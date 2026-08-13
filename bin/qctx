@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Lançador do CLI, para `qctx` funcionar de qualquer diretório.
+#
+# Existe porque skill e documentação precisam citar UM comando estável. Sem isto,
+# cada invocação teria de carregar o caminho de instalação do plugin, que muda com
+# a versão — e instrução com caminho frágil é instrução que para de funcionar sem
+# ninguém perceber.
+#
+# Instale com:
+#     ln -s "$PWD/bin/qctx" ~/.local/bin/qctx
+set -euo pipefail
+
+# Resolve links simbólicos para achar a raiz real do repositório, mesmo quando
+# chamado por um symlink em outro diretório.
+alvo="${BASH_SOURCE[0]}"
+while [ -L "$alvo" ]; do
+  destino="$(readlink "$alvo")"
+  case "$destino" in
+    /*) alvo="$destino" ;;
+    *)  alvo="$(cd -P "$(dirname "$alvo")" && pwd)/$destino" ;;
+  esac
+done
+raiz="$(cd -P "$(dirname "$alvo")/.." && pwd)"
+
+exec python3 "$raiz/cli/qctx.py" "$@"

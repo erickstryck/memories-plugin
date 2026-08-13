@@ -65,12 +65,32 @@ idioma, não só semântica. Consequências no desenho:
 ```bash
 git clone git@github.com:erickstryck/qdrant-context.git
 cd qdrant-context
-python3 -m unittest discover -s tests    # 60 testes, sem rede, sem dependência
+python3 -m unittest discover -s tests    # 101 testes, sem rede, sem dependência
+ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # para `qctx` funcionar de qualquer lugar
 ```
 
 Não há `pip install`: o núcleo usa só a biblioteca padrão. Isso é deliberado —
 este código roda dentro de hooks disparados a cada interação, e uma dependência
 faltando transformaria falha de ambiente em perda silenciosa de funcionalidade.
+
+### Como plugin de Claude Code
+
+O repositório é ao mesmo tempo um plugin e um marketplace de um só plugin:
+
+```bash
+claude plugin marketplace add ~/dev/qdrant-context
+claude plugin install qdrant-context@qdrant-context
+```
+
+Habilitar o plugin registra **dois hooks** de `UserPromptSubmit` (recall a cada
+prompt, checkpoint a cada N) e **duas skills** (`memory`, `doc-index`). Os hooks
+usam `${CLAUDE_PLUGIN_ROOT}`, então não há caminho fixo para manter.
+
+**Se você já tinha hooks equivalentes registrados à mão no `settings.json`,
+remova-os na MESMA passada.** Os dois conjuntos disparam juntos e o recall é
+injetado em dobro no mesmo prompt — que é pior que não ter nenhum, porque duplica
+o custo de contexto sem acrescentar informação. Confira pelo log: um round por
+prompt, não dois.
 
 ## Configuração
 
@@ -160,7 +180,6 @@ core/       núcleo portável — nenhuma referência a host ou agente
   chunk.py    fatiamento por fronteira estrutural
   memory.py   CRUD de memórias + recall de dois estágios
   docs.py     índice de documentos, TTL, obsolescência
-  setup.py    diagnóstico e sugestões de configuração
 cli/        interface de linha de comando sobre o núcleo
 tests/      60 testes de lógica pura, sem rede
 ```
@@ -177,8 +196,26 @@ O fatiamento acontece **dentro** deste processo, então o documento nunca passa
 pelo contexto de quem pergunta — é isso que torna viável indexar um arquivo de
 30 mil caracteres para responder com três trechos.
 
+## Os hooks
+
+`recall.py` roda a cada prompt do usuário, ANTES de o modelo ver o texto: monta
+três ângulos da pergunta numa única chamada de embeddings, funde os resultados por
+id pelo maior score, aplica os dois portões e injeta os documentos com as regras de
+uso. Memória já injetada há pouco volta como ponteiro de uma linha, e a vaga
+liberada revela mais do acervo.
+
+Falha em silêncio para o **usuário** e nunca para o **modelo**: se a busca não
+roda, o prompt segue normalmente, mas o bloco injetado diz explicitamente que o
+acervo não foi consultado. Sem esse aviso, ausência de resultado é indistinguível
+de "não há precedente", e é assim que se afirma que algo é inédito sem ninguém ter
+olhado.
+
+`checkpoint.py` injeta o procedimento completo de gravação a cada N interações. O
+texto é autossuficiente de propósito: lembrete de uma linha produz memória vaga,
+duplicada e sem metadata, e o custo aparece meses depois.
+
 ## Estado
 
-Pronto: núcleo, CLI, os três acervos, testes.
-A caminho: skills e hooks do adaptador de host, e o manifesto de plugin
-correspondente.
+Pronto e testado: núcleo, CLI, os três acervos, diagnóstico guiado, os dois hooks,
+as duas skills e o manifesto de plugin. 101 testes offline e 17 de integração
+contra Qdrant e modelos reais.

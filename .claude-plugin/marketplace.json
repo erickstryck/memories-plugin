@@ -7,8 +7,8 @@
     {
       "name": "qdrant-context",
       "source": "./",
-      "description": "Memória semântica de longo prazo e índice de documentos sobre Qdrant: recall automático, biblioteca permanente e índice temporário com TTL",
-      "version": "0.1.0",
+      "description": "Memória semântica de longo prazo com recall automático a cada prompt, mais índice de documentos longos (biblioteca permanente e temporário com TTL), sobre Qdrant",
+      "version": "0.2.0",
       "author": {
         "name": "Erick Batista"
       }
