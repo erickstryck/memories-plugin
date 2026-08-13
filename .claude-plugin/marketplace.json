@@ -7,12 +7,12 @@
     {
       "name": "memories-plugin",
       "source": "./",
-      "description": "Memória semântica de longo prazo com recall automático a cada prompt, mais índice de documentos longos (biblioteca permanente e temporário com TTL), sobre Qdrant",
+      "description": "Long-term semantic memory with automatic recall on every prompt, plus an index for long documents (a permanent library and a temporary archive with TTL), on top of Qdrant",
       "version": "0.2.0",
       "author": {
         "name": "Erick Batista"
       }
     }
   ],
-  "description": "Marketplace pessoal do memories-plugin"
+  "description": "Personal marketplace for memories-plugin"
 }

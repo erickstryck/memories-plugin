@@ -1,102 +1,103 @@
 ---
 name: doc-index
-description: Indexa documento longo no Qdrant e busca só os trechos relevantes, via `qctx docs` — em vez de ler o arquivo inteiro para o contexto. Use ANTES de ler arquivo grande (log, dump, transcrição, código extenso, relatório) quando a pergunta é sobre uma parte dele; e quando o usuário pedir para guardar um documento para consulta futura. Também para buscar em documentação já guardada.
+description: Indexes a long document in Qdrant and searches only the relevant chunks, via `qctx docs` — instead of reading the whole file into context. Use it BEFORE reading a large file (log, dump, transcript, extensive code, report) when the question is about one part of it; and when the user asks you to keep a document for later reference. Also for searching documentation already kept.
 ---
 
 # doc-index
 
-Responder uma pergunta sobre 40 linhas de um arquivo de 8.000 não deve custar o
-arquivo inteiro em contexto. O `qctx` lê o arquivo do disco **fora** do seu
-contexto, fatia, embeda e devolve só os trechos que respondem.
+Answering a question about 40 lines of an 8,000-line file should not cost the whole
+file in context. `qctx` reads the file from disk **outside** your context, slices it,
+embeds it and returns only the chunks that answer.
 
-## Dois acervos, e a escolha é sua
+## Two archives, and the choice is yours
 
-| comando | acervo | expira | quando |
+| command | archive | expires | when |
 |---|---|---|---|
-| `qctx docs index <arquivo>` | temporário | 24h (`--ttl 2h`, `7d`…) | arquivo aberto para a tarefa de agora |
-| `qctx docs keep <arquivo>` | biblioteca | nunca | documento que vale consultar depois |
+| `qctx docs index <file>` | temporary | 24h (`--ttl 2h`, `7d`…) | a file opened for the task at hand |
+| `qctx docs keep <file>` | library | never | a document worth consulting later |
 
-Use `keep` quando o usuário disser algo como *"esse doc é importante guardar para
-consulta"*. Use `index` para o resto.
+Use `keep` when the user says something like *"this doc is important, keep it for
+reference"*. Use `index` for everything else.
 
-## Quando indexar em vez de ler
+## When to index instead of reading
 
-**Indexe** quando as duas coisas valem: o arquivo é grande (acima de ~2.000 linhas
-ou ~100 KB) **e** a pergunta é sobre uma parte dele. Casos típicos: log, dump,
-transcrição, CSV grande, arquivo de código extenso, relatório longo.
+**Index** when both hold: the file is large (above ~2,000 lines or ~100 KB) **and** the
+question is about one part of it. Typical cases: a log, a dump, a transcript, a large
+CSV, an extensive code file, a long report.
 
-**NÃO indexe** — leia inteiro:
+**Do NOT index** — read it whole:
 
-- Spec, plano, README, design doc. Documentos que se leem do começo ao fim; buscar
-  trechos perde o fio do argumento, que é justamente o conteúdo.
-- Qualquer arquivo abaixo do limite. Indexar custa uma ida à rede e um índice para
-  limpar depois; ler é imediato.
-- Quando o usuário pediu explicitamente para você **ler** o arquivo.
+- A spec, a plan, a README, a design doc. Documents read from start to finish;
+  searching for chunks loses the thread of the argument, which is precisely the
+  content.
+- Any file below the threshold. Indexing costs a network round trip and an index to
+  clean up later; reading is immediate.
+- When the user explicitly asked you to **read** the file.
 
-Avise em uma linha quando indexar em vez de ler, para o usuário saber que você não
-tem o arquivo inteiro em contexto.
+Say so in one line when you index instead of reading, so the user knows you do not have
+the whole file in context.
 
-## Buscar
+## Searching
 
 ```bash
-qctx docs search "<pergunta>"                     # os dois acervos
-qctx docs search "<pergunta>" --scope library     # só a biblioteca
-qctx docs search "<pergunta>" --doc-id <id>       # só um documento
+qctx docs search "<question>"                     # both archives
+qctx docs search "<question>" --scope library     # library only
+qctx docs search "<question>" --doc-id <id>       # a single document
 ```
 
-### Leia o que a saída está dizendo
+### Read what the output is telling you
 
-**Arquivo de texto devolve LOCALIZAÇÃO, não conteúdo:**
+**A text file returns a LOCATION, not content:**
 
 ```
-1. [temporário] /caminho/arquivo.py:317-354  (CE 0.526)
-   # DISJUNTOR. Numa GPU compartilhada a saturação dura minutos…
-   -> ler linhas 317-354 do arquivo para o conteúdo atual
+1. [temporary] /path/file.py:317-354  (CE 0.526)
+   # BREAKER. On a shared GPU, saturation lasts minutes…
+   -> read lines 317-354 of the file for the current content
 ```
 
-O trecho mostrado é uma **prévia**. Para trabalhar sobre o conteúdo, leia aquelas
-linhas no arquivo: o índice é uma foto do momento da indexação, e o arquivo pode ter
-mudado. Isto importa especialmente para editar código — você precisa do número de
-linha e do texto atual.
+The chunk shown is a **preview**. To work on the content, read those lines in the file:
+the index is a snapshot from the moment of indexing, and the file may have changed.
+This matters especially for editing code — you need the line number and the current
+text.
 
-**Origem não relegível por região** (PDF convertido, transcrição, dump colado) vem
-marcada como `[FOTO de <data>]` com o texto completo, porque não há região para
-reler.
+**A source that cannot be re-read by region** (a converted PDF, a transcript, a pasted
+dump) comes back marked `[SNAPSHOT from <date>]` with the full text, because there is
+no region to re-read.
 
-**Marcas que exigem ação:**
+**Marks that call for action:**
 
-| marca | significa |
+| mark | means |
 |---|---|
-| `⚠ arquivo mudou desde a indexação` | o trecho é de uma versão antiga. Releia o arquivo, e rode `qctx docs refresh` se for da biblioteca. |
-| `⚠ arquivo não existe mais` | o índice sobreviveu ao arquivo. Remova com `drop`. |
-| `(CE 0.xxx)` | o cross-encoder julgou a relevância. |
-| `(CE? 0.xxx)` | abaixo do corte de confiança — pode não responder. |
-| `(denso 0.xxx)` | o cross-encoder não foi usado. Não é veredito de relevância, só proximidade de vetor. |
-| `re-rank colapsou … línguas diferentes` | pergunta e documento em idiomas diferentes derrubam o cross-encoder; a ordem passou a ser densa, que é indiferente à língua. Os resultados seguem úteis. Se quiser ordem melhor, **repita a pergunta no idioma do documento**. |
+| `⚠ file changed since indexing` | the chunk is from an old version. Re-read the file, and run `qctx docs refresh` if it is from the library. |
+| `⚠ file no longer exists` | the index outlived the file. Remove it with `drop`. |
+| `(CE 0.xxx)` | the cross-encoder judged the relevance. |
+| `(CE? 0.xxx)` | below the confidence cutoff — it may not answer. |
+| `(dense 0.xxx)` | the cross-encoder was not used. This is not a relevance verdict, only vector proximity. |
+| `re-rank collapsed … different languages` | a question and a document in different languages knock the cross-encoder down; the order became dense, which is language-agnostic. The results are still useful. If you want a better order, **repeat the question in the document's language**. |
 
-Aquele último caso é medido e vale saber: a mesma pergunta sobre o mesmo documento
-em inglês deu score 0.2073 em inglês e 0.0004 em português. O estágio denso não se
-abala com isso, o cross-encoder sim.
+That last case is measured and worth knowing: the same question about the same English
+document scored 0.2073 in English and 0.0004 in Portuguese. The dense stage is unmoved
+by this; the cross-encoder is not.
 
-## Manter e limpar
+## Maintaining and cleaning up
 
 ```bash
-qctx docs list                        # o que está indexado, e quando expira
-qctx docs refresh --scope library     # reindexa o que mudou no disco
-qctx docs drop <doc-id>               # remove um documento
-qctx docs drop --purge-tmp            # apaga o temporário inteiro; biblioteca intacta
+qctx docs list                        # what is indexed, and when it expires
+qctx docs refresh --scope library     # reindexes what changed on disk
+qctx docs drop <doc-id>               # removes one document
+qctx docs drop --purge-tmp            # deletes the whole temporary archive; library untouched
 ```
 
-Reindexar o mesmo arquivo **substitui** o índice anterior — não duplica.
+Reindexing the same file **replaces** the previous index — it does not duplicate.
 
-Ao terminar uma tarefa que usou índice temporário, um `drop <doc-id>` é cortesia,
-mas não é obrigatório: o TTL limpa sozinho.
+When finishing a task that used a temporary index, a `drop <doc-id>` is a courtesy but
+not required: the TTL cleans up on its own.
 
-## Limites
+## Limits
 
-- Arquivo binário é recusado. Converta para texto antes.
-- Um trecho tem ~2.400 chars por alvo, cortado em fronteira estrutural (título,
-  parágrafo, definição de topo) para o vetor não virar a média de dois assuntos.
-- O acervo de documentos **nunca** é o acervo de memória: são coleções distintas, e
-  a configuração recusa apontá-las para o mesmo lugar. Documento longo vira dezenas
-  de trechos verbosos que venceriam por volume em toda busca de memória.
+- A binary file is refused. Convert it to text first.
+- A chunk targets ~2,400 chars, cut on a structural boundary (a heading, a paragraph, a
+  top-level definition) so the vector does not become the average of two subjects.
+- The document archive is **never** the memory archive: they are distinct collections,
+  and the configuration refuses to point them at the same place. A long document becomes
+  dozens of verbose chunks that would win on volume in every memory search.

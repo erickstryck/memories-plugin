@@ -1,131 +1,132 @@
 # memories-plugin
 
-Memória semântica de longo prazo e índice de documentos sobre [Qdrant](https://qdrant.tech),
-para agentes. Núcleo em Python puro (só stdlib), com adaptadores finos por host.
+Long-term semantic memory and a document index on top of [Qdrant](https://qdrant.tech),
+for agents. A pure-Python core (stdlib only), with thin per-host adapters.
 
-O problema que resolve é duplo:
+The problem it solves is twofold:
 
-- **Contexto que se perde.** Decisão tomada, armadilha já paga, comportamento já
-  medido — tudo isso evapora no fim da sessão e é redescoberto do zero na
-  seguinte, às vezes contradizendo o que já se sabia.
-- **Contexto que não cabe.** Responder uma pergunta sobre 40 linhas de um arquivo
-  de 8.000 não deveria custar o arquivo inteiro. Aqui o arquivo é lido, fatiado e
-  indexado **fora** do contexto do agente; a busca devolve só os trechos que
-  respondem.
+- **Context that gets lost.** A decision made, a trap already paid for, behaviour
+  already measured — all of it evaporates at the end of the session and is
+  rediscovered from scratch in the next one, sometimes contradicting what was
+  already known.
+- **Context that does not fit.** Answering a question about 40 lines of an
+  8,000-line file should not cost the whole file. Here the file is read, sliced and
+  indexed **outside** the agent's context; the search returns only the chunks that
+  answer.
 
-## Três acervos, três ciclos de vida
+## Three archives, three lifecycles
 
-A separação é estrutural — coleções distintas, configuráveis —, não convenção:
+The separation is structural — distinct, configurable collections — not a convention:
 
-| acervo | o que guarda | expira |
+| archive | what it holds | expires |
 |---|---|---|
-| **memória** | fato atômico curado (decisão, preferência, comportamento medido) | não |
-| **biblioteca** | documento inteiro guardado para consulta | não |
-| **temporário** | documento aberto para uma tarefa | sim, TTL |
+| **memory** | a curated atomic fact (decision, preference, measured behaviour) | no |
+| **library** | a whole document kept for reference | no |
+| **temporary** | a document opened for one task | yes, TTL |
 
-Por que não juntar tudo numa coleção: um documento longo vira dezenas de trechos
-verbosos. Misturados aos fatos curados, eles vencem por volume em toda busca e
-afundam justamente o acervo que mais importa. E o temporário é destrutível por
-construção (existe comando que apaga a coleção inteira), então acervo permanente
-não pode morar lá. A configuração recusa apontar dois papéis para a mesma coleção.
+Why not put everything in one collection: a long document becomes dozens of verbose
+chunks. Mixed in with curated facts, they win on volume in every search and drown
+precisely the archive that matters most. And the temporary archive is destroyable by
+construction (there is a command that deletes the entire collection), so a permanent
+archive cannot live there. The configuration refuses to point two roles at the same
+collection.
 
-## Como a busca funciona
+## How the search works
 
-Dois estágios, com papéis distintos:
+Two stages, with distinct jobs:
 
-1. **Denso** (`bge-m3` ou outro embedder): varre o acervo inteiro por similaridade
-   de vetor. Barato, aproximado, e **praticamente indiferente ao idioma** — uma
-   pergunta em português encontra documento em inglês (medido: 0.460 contra 0.475
-   para a mesma pergunta nas duas línguas).
-2. **Cross-encoder** (`bge-reranker-v2-m3` ou outro): lê pergunta e trecho na
-   MESMA passada, com atenção cruzada. Julga muito melhor, e por isso não tem
-   vetor pré-computável — é um forward por par, custo linear no total de tokens.
+1. **Dense** (`bge-m3` or another embedder): sweeps the whole archive by vector
+   similarity. Cheap, approximate, and **practically indifferent to language** — a
+   question in Portuguese finds an English document (measured: 0.460 against 0.475
+   for the same question in the two languages).
+2. **Cross-encoder** (`bge-reranker-v2-m3` or another): reads the question and the
+   chunk in the SAME pass, with cross attention. It judges far better, and for that
+   reason has no precomputable vector — it is one forward pass per pair, cost linear
+   in the total token count.
 
-Duas descobertas medidas moldaram o desenho, e ambas são falhas silenciosas se
-ignoradas:
+Two measured findings shaped the design, and both are silent failures if ignored:
 
-**A escala do re-rank depende do servidor.** O mesmo modelo devolve sigmoid (0..1)
-num servidor e logit cru noutro — o mesmo documento irrelevante deu `1.6e-05` e
-`-11.04`, sendo o segundo exatamente `logit(1.6e-05)`. Um corte calibrado numa
-escala é inócuo na outra. O núcleo detecta pela faixa e normaliza, então o número
-calibrado continua válido em qualquer servidor.
+**The re-rank scale depends on the server.** The same model returns a sigmoid (0..1)
+on one server and a raw logit on another — the same irrelevant document gave `1.6e-05`
+and `-11.04`, the second being exactly `logit(1.6e-05)`. A cutoff calibrated on one
+scale is inert on the other. The core detects it by range and normalizes, so the
+calibrated number stays valid on any server.
 
-**O cross-encoder colapsa em par cross-lingual.** A mesma pergunta sobre o mesmo
-documento em inglês: `0.2073` em inglês, `0.0004` em português — 500x. Ele casa
-idioma, não só semântica. Consequências no desenho:
+**The cross-encoder collapses on a cross-lingual pair.** The same question about the
+same English document: `0.2073` in English, `0.0004` in Portuguese — 500x. It matches
+language, not just semantics. Consequences in the design:
 
-- Na busca de **documento**, o re-rank **ordena mas não veta**: quem pergunta já
-  escolheu o documento, e silêncio é pior que ordem imperfeita. Colapso é
-  detectado (melhor score abaixo de `0.01`) e a ordem densa assume, com aviso.
-- Na busca de **memória**, o re-rank mantém o veto: ali precisão importa mais que
-  alcance, e um falso positivo polui o contexto do agente.
+- In **document** search, the re-rank **orders but does not veto**: whoever asks has
+  already chosen the document, and silence is worse than imperfect order. A collapse
+  is detected (best score below `0.01`) and the dense order takes over, with a warning.
+- In **memory** search, the re-rank keeps the veto: there precision matters more than
+  reach, and a false positive pollutes the agent's context.
 
-## Instalação
+## Installation
 
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 155 testes, sem rede, sem dependência
-ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # para `qctx` funcionar de qualquer lugar
+python3 -m unittest discover -s tests    # 161 tests, no network, no dependencies
+ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
-Não há `pip install`: o núcleo usa só a biblioteca padrão. Isso é deliberado —
-este código roda dentro de hooks disparados a cada interação, e uma dependência
-faltando transformaria falha de ambiente em perda silenciosa de funcionalidade.
+There is no `pip install`: the core uses only the standard library. That is
+deliberate — this code runs inside hooks fired on every interaction, and a missing
+dependency would turn an environment failure into a silent loss of functionality.
 
-### Como plugin de Claude Code
+### As a Claude Code plugin
 
-O repositório é ao mesmo tempo um plugin e um marketplace de um só plugin:
+The repository is at once a plugin and a single-plugin marketplace:
 
 ```bash
 claude plugin marketplace add ~/dev/memories-plugin
 claude plugin install memories-plugin@memories-plugin
 ```
 
-Habilitar o plugin registra **dois hooks** de `UserPromptSubmit` (recall a cada
-prompt, checkpoint a cada N) e **duas skills** (`memory`, `doc-index`). Os hooks
-usam `${CLAUDE_PLUGIN_ROOT}`, então não há caminho fixo para manter.
+Enabling the plugin registers **two `UserPromptSubmit` hooks** (recall on every
+prompt, checkpoint every N) and **two skills** (`memory`, `doc-index`). The hooks use
+`${CLAUDE_PLUGIN_ROOT}`, so there is no hard-coded path to maintain.
 
-**Se você já tinha hooks equivalentes registrados à mão no `settings.json`,
-remova-os na MESMA passada.** Os dois conjuntos disparam juntos e o recall é
-injetado em dobro no mesmo prompt — que é pior que não ter nenhum, porque duplica
-o custo de contexto sem acrescentar informação. Confira pelo log: um round por
-prompt, não dois.
+**If you already had equivalent hooks registered by hand in `settings.json`, remove
+them in the SAME pass.** Both sets fire together and recall gets injected twice into
+the same prompt — which is worse than having none, because it doubles the context cost
+without adding information. Check the log: one round per prompt, not two.
 
-## Configuração
+## Configuration
 
-Comece pelo diagnóstico guiado:
+Start with the guided diagnostics:
 
 ```bash
 python3 cli/qctx.py setup
 ```
 
-Ele verifica Qdrant, endpoint de embedding (detectando a dimensão real do modelo),
-endpoint de re-rank (inclusive a escala em que ele responde) e as três coleções —
-e imprime, para cada item que falta, o comando exato que resolve. Num terminal
-interativo ele pergunta e grava; **sem TTY ele nunca bloqueia**, apenas relata.
-Isso é deliberado: o comando também é chamado por agente e por script, e um prompt
-esperando resposta que nunca vem penduraria a chamada.
+It checks Qdrant, the embedding endpoint (detecting the model's real dimension), the
+re-rank endpoint (including which scale it answers in) and the three collections — and
+prints, for each missing item, the exact command that fixes it. In an interactive
+terminal it asks and writes; **with no TTY it never blocks**, it only reports. That is
+deliberate: the command is also called by agents and by scripts, and a prompt waiting
+for an answer that never comes would hang the call.
 
-`--check` força o modo somente-diagnóstico; `--json` devolve o retrato completo
-para consumo por programa.
+`--check` forces diagnose-only mode; `--json` returns the full picture for
+consumption by a program.
 
-Precedência: **variável de ambiente > arquivo > default**. O arquivo vive em
+Precedence: **environment variable > file > default**. The file lives at
 `~/.config/memories-plugin/config.json`.
 
 ```bash
-python3 cli/qctx.py collections list           # o que existe no Qdrant, com dimensão
-python3 cli/qctx.py config set memory-collection minhas_memorias
+python3 cli/qctx.py collections list           # what exists in Qdrant, with dimensions
+python3 cli/qctx.py config set memory-collection my_memories
 python3 cli/qctx.py config show
 ```
 
-`collections list` marca cada coleção como compatível ou não com a dimensão do
-modelo configurado. Gravar num acervo de outra dimensão é recusado: passaria e
-degradaria a busca sem nenhum erro aparecer.
+`collections list` marks each collection as compatible or not with the configured
+model's dimension. Writing into an archive of a different dimension is refused: it
+would go through and degrade search with no error appearing.
 
-Variáveis reconhecidas (canônica primeiro, aliases legados aceitos):
+Recognized variables (canonical first, legacy aliases accepted):
 
-| config | ambiente |
+| config | environment |
 |---|---|
 | `qdrant_url` | `QCTX_QDRANT_URL`, `QDRANT_URL` |
 | `qdrant_api_key` | `QCTX_QDRANT_API_KEY`, `QDRANT_SERVICE_API_KEY` |
@@ -139,108 +140,134 @@ Variáveis reconhecidas (canônica primeiro, aliases legados aceitos):
 | `docs_collection` | `QCTX_DOCS_COLLECTION` |
 | `library_collection` | `QCTX_LIBRARY_COLLECTION` |
 
-`memory_collection` nasce **vazia** de propósito: sem escolha explícita o CLI se
-recusa a operar, para que não exista caminho acidental de escrita num acervo
-errado.
+The two API keys are the only settings that **cannot** go into the config file:
+`config set` refuses them and points at the environment variable instead. A plaintext
+secret ends up in backups and in dotfile sync.
 
-## Uso
+`memory_collection` starts out **empty** on purpose: with no explicit choice the CLI
+refuses to operate, so there is no accidental write path into the wrong archive.
+
+## Usage
 
 ```bash
 qctx() { python3 cli/qctx.py "$@"; }
 
-# memória
-qctx memory store "o poll do conector X trunca em 100 itens" --type reference
-qctx memory find "paginação do poll"          # denso, barato
-qctx memory recall "paginação do poll"        # dois estágios, com re-rank
+# memory
+qctx memory store "connector X's poll truncates at 100 items" --type reference
+qctx memory find "poll pagination"            # dense, cheap
+qctx memory recall "poll pagination"          # two stages, with re-rank
 qctx memory update <id> --text "..." ; qctx memory delete <id>
 
-# documentos
-qctx docs index ./relatorio-gigante.md --ttl 24h    # temporário
-qctx docs keep ./manual-da-api.md                   # biblioteca, permanente
-qctx docs search "como autenticar?" --scope all --limit 5
+# documents
+qctx docs index ./huge-report.md --ttl 24h          # temporary
+qctx docs keep ./api-manual.md                      # library, permanent
+qctx docs search "how do I authenticate?" --scope all --limit 5
 qctx docs list
-qctx docs refresh --scope library                   # reindexa o que mudou no disco
+qctx docs refresh --scope library                   # reindexes what changed on disk
 qctx docs drop <doc-id> --scope library
-qctx docs drop --purge-tmp                          # apaga só o temporário
+qctx docs drop --purge-tmp                          # deletes only the temporary archive
 ```
 
-Para arquivo de texto, a busca devolve **`caminho:linhas`** e um trecho curto, em
-vez do conteúdo inteiro: quem consome relê a região exata e trabalha sobre o
-conteúdo **atual**, sem risco de operar sobre uma foto vencida. Para origem não
-relegível por região, devolve o texto com a data da indexação e um aviso. Em todos
-os casos, se o arquivo mudou desde a indexação, o resultado vem marcado.
+For a text file, the search returns **`path:lines`** plus a short excerpt, rather than
+the whole content: the consumer re-reads the exact region and works on the **current**
+content, with no risk of operating on a stale snapshot. For a source that cannot be
+re-read by region, it returns the text with the indexing date and a warning. In every
+case, if the file changed since indexing, the result comes back marked.
 
-## Estrutura
+## Layout
 
 ```
-core/       núcleo portável — nenhuma referência a host ou agente
-  config.py   precedência de configuração, guardas de coleção
-  qdrant.py   cliente mínimo (stdlib)
-  models.py   embedder e cross-encoder, com normalização de escala
-  chunk.py    fatiamento por fronteira estrutural
-  memory.py   CRUD de memórias + recall de dois estágios
-  docs.py     índice de documentos, TTL, obsolescência
-cli/        interface de linha de comando sobre o núcleo
-tests/      155 testes offline + 17 de integração
+core/       the portable core — no reference to a host or an agent
+  config.py     configuration precedence, collection guards
+  ports.py      the dependency contracts (Protocol)
+  errors.py     the root of the error hierarchy
+  http.py       JSON over HTTP, in one place
+  qdrant.py     minimal client (stdlib)
+  embedding.py  the embedder
+  reranking.py  the cross-encoder, with scale normalization
+  retrieval.py  the two-stage pipeline, shared
+  chunk.py      slicing on structural boundaries
+  query.py      preparing the question (angles, trivial-prompt filter)
+  breaker.py    circuit breaker for a saturated GPU
+  memory.py     memory CRUD + two-stage recall
+  docs.py       document index, TTL, staleness
+  setup.py      diagnostics and suggestions
+cli/        the command-line interface over the core
+hooks/      recall on every prompt, checkpoint every N
+skills/     memory, doc-index
+tests/      161 offline tests + 17 integration
 ```
 
-## Desenho
+## Design
 
-O núcleo depende de CONTRATOS (`core/ports.py`, `typing.Protocol`) e não de
-implementações: `VectorStore`, `EmbeddingModel`, `RerankModel`. Trocar Qdrant por
-outro banco vetorial, ou o endpoint de embedding por uma biblioteca local, é
-escrever um adaptador — nenhum arquivo de regra muda.
+The core depends on CONTRACTS (`core/ports.py`, `typing.Protocol`) rather than
+implementations: `VectorStore`, `EmbeddingModel`, `RerankModel`. Swapping Qdrant for
+another vector store, or the embedding endpoint for a local library, is writing an
+adapter — no rule file changes.
 
-São `Protocol` e não classe base abstrata de propósito: tipagem estrutural, sem
-herança e sem custo em tempo de execução. O ganho concreto é teste — o pipeline de
-recuperação, que é a lógica mais delicada do pacote, roda com dublês em
-milissegundos. Antes só dava para exercitá-lo com infra real, o que significa que
-ninguém o rodava enquanto editava.
+They are `Protocol`s and not abstract base classes on purpose: structural typing, no
+inheritance and no runtime cost. The concrete gain is testing — the retrieval
+pipeline, the most delicate logic in the package, runs with fakes in milliseconds.
+Before, it could only be exercised against real infra, which means nobody ran it while
+editing.
 
-O pipeline de dois estágios vive em UM lugar (`core/retrieval.py`) e as diferenças
-entre consumidores são POLÍTICA, não código duplicado:
+The two-stage pipeline lives in ONE place (`core/retrieval.py`) and the differences
+between consumers are POLICY, not duplicated code:
 
-| | memória | documentos |
+| | memory | documents |
 |---|---|---|
-| o re-rank pode eliminar? | sim, veta | não, só ordena |
-| a ordem importa? | não — tudo é injetado junto | sim — é uma lista lida de cima para baixo |
-| por quê | falso positivo polui o contexto do agente | quem pergunta já escolheu o documento; silêncio é pior que ordem imperfeita |
+| may the re-rank eliminate? | yes, it vetoes | no, it only orders |
+| does the order matter? | no — everything is injected together | yes — it is a list read top to bottom |
+| why | a false positive pollutes the agent's context | whoever asks has already chosen the document; silence is worse than imperfect order |
 
-Antes existiam três implementações da mesma ideia, e isso já custou: a normalização
-de escala do re-rank existiu num consumidor e não no outro.
+There used to be three implementations of the same idea, and that already cost
+something: the re-rank scale normalization existed in one consumer and not the other.
 
-## Portabilidade
+## Portability
 
-`core/` não conhece o chamador. Um host novo é um adaptador fino:
+`core/` does not know its caller. A new host is a thin adapter:
 
-- **Como biblioteca:** `import core` e monte com `build_memory(cfg)` /
+- **As a library:** `import core` and assemble with `build_memory(cfg)` /
   `build_docs(cfg)`.
-- **Como processo:** chame `cli/qctx.py` e leia o JSON de `--json`.
+- **As a process:** call `cli/qctx.py` and read the JSON from `--json`.
 
-O fatiamento acontece **dentro** deste processo, então o documento nunca passa
-pelo contexto de quem pergunta — é isso que torna viável indexar um arquivo de
-30 mil caracteres para responder com três trechos.
+The slicing happens **inside** this process, so the document never passes through the
+context of whoever is asking — that is what makes it viable to index a
+30,000-character file in order to answer with three chunks.
 
-## Os hooks
+## The hooks
 
-`recall.py` roda a cada prompt do usuário, ANTES de o modelo ver o texto: monta
-três ângulos da pergunta numa única chamada de embeddings, funde os resultados por
-id pelo maior score, aplica os dois portões e injeta os documentos com as regras de
-uso. Memória já injetada há pouco volta como ponteiro de uma linha, e a vaga
-liberada revela mais do acervo.
+`recall.py` runs on every user prompt, BEFORE the model sees the text: it builds three
+angles on the question in a single embeddings call, fuses the results by id keeping the
+highest score, applies both gates and injects the documents along with the rules for
+using them. A memory injected recently comes back as a one-line pointer, and the freed
+slot reveals more of the archive.
 
-Falha em silêncio para o **usuário** e nunca para o **modelo**: se a busca não
-roda, o prompt segue normalmente, mas o bloco injetado diz explicitamente que o
-acervo não foi consultado. Sem esse aviso, ausência de resultado é indistinguível
-de "não há precedente", e é assim que se afirma que algo é inédito sem ninguém ter
-olhado.
+It fails silently for the **user** and never for the **model**: if the search does not
+run, the prompt goes through as usual, but the injected block says explicitly that the
+archive was not consulted. Without that warning, an absence of results is
+indistinguishable from "there is no precedent", and that is how something gets called
+unprecedented without anyone having looked.
 
-`checkpoint.py` injeta o procedimento completo de gravação a cada N interações. O
-texto é autossuficiente de propósito: lembrete de uma linha produz memória vaga,
-duplicada e sem metadata, e o custo aparece meses depois.
+`checkpoint.py` injects the complete writing procedure every N interactions. The text
+is self-sufficient on purpose: a one-line reminder produces vague, duplicated,
+metadata-less memory, and the cost shows up months later.
 
-## Estado
+## Language
 
-Pronto e testado: núcleo, CLI, os três acervos, diagnóstico guiado, os dois hooks,
-as duas skills e o manifesto de plugin. 155 testes offline e 17 de integração
-contra Qdrant e modelos reais.
+Code, comments and user-facing messages are in English. Two things stay in Portuguese
+on purpose, and both are data rather than prose:
+
+- `TRIVIAL_WORDS` and `STOPWORDS` in `core/query.py`, matched against what the user
+  types. Translating them would silently disable the trivial-prompt filter and the
+  content angle.
+- The stored memories themselves, and the checkpoint procedure's instruction to
+  confirm in the user's language. The archive is written in whatever language the user
+  writes; the dense stage is language-agnostic, and where the cross-encoder is not,
+  the pipeline detects the collapse and falls back.
+
+## Status
+
+Done and tested: the core, the CLI, the three archives, the guided diagnostics, both
+hooks, both skills and the plugin manifest. 161 offline tests and 17 integration tests
+against a real Qdrant and real models.

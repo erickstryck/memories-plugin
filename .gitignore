@@ -2,9 +2,9 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-# config local com endereços e escolha de coleções
+# local config, with addresses and the collection choices
 config.json
 .env
-# nada de segredo entra no repo
+# no secret goes into the repo
 *.secret
 *.key

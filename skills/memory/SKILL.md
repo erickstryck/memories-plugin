@@ -1,167 +1,167 @@
 ---
 name: memory
-description: Memória de longo prazo em Qdrant, via `qctx memory` — AS DUAS DIREÇÕES. Buscar primeiro, depois salvar. Use quando o usuário pedir para salvar/persistir/lembrar algo; E — obrigatório — antes de responder pergunta não trivial, iniciar investigação, afirmar fato sobre o codebase, SDK, plataforma ou decisão passada, propor desenho, ou reverter conclusão anterior. Se pode existir precedente, busque antes de responder.
+description: Long-term memory in Qdrant, via `qctx memory` — BOTH DIRECTIONS. Search first, then save. Use it when the user asks you to save/persist/remember something; AND — mandatory — before answering a non-trivial question, starting an investigation, asserting a fact about the codebase, an SDK, a platform or a past decision, proposing a design, or reversing an earlier conclusion. If precedent might exist, search before answering.
 ---
 
 # memory
 
-Memória de longo prazo, entre sessões, no acervo semântico configurado. Duas
-direções, e a de leitura é a que se esquece:
+Long-term memory, across sessions, in the configured semantic archive. Two
+directions, and reading is the one that gets forgotten:
 
-- **BUSCAR** — antes de afirmar. Barato, e é o que impede re-decidir o que já foi
-  decidido.
-- **SALVAR** — persistir fato durável, um fato atômico por registro, deduplicado.
+- **SEARCH** — before asserting. Cheap, and it is what keeps you from re-deciding
+  what has already been decided.
+- **SAVE** — persist a durable fact, one atomic fact per record, deduplicated.
 
-**Princípio:** *busque antes de afirmar, salve só o que ainda vai importar depois.*
+**Principle:** *search before asserting, save only what will still matter later.*
 
-## Um hook já garante o piso — a profundidade é sua
+## A hook already guarantees the floor — the depth is yours
 
-Um hook de `UserPromptSubmit` roda uma busca a **cada** prompt do usuário, antes de
-você ver o texto, e injeta as memórias relevantes. Você não precisa buscar para
-responder o prompt em si, e repetir aquela mesma busca genérica é desperdício.
+A `UserPromptSubmit` hook runs a search on **every** user prompt, before you see the
+text, and injects the relevant memories. You do not need to search in order to answer
+the prompt itself, and repeating that same generic search is waste.
 
-Leia o estado do bloco injetado, porque os três significam coisas diferentes:
+Read the state of the injected block, because the three mean different things:
 
-| bloco injetado | o que significa |
+| injected block | what it means |
 |---|---|
-| memórias listadas | o acervo foi consultado; trate cada uma pela tabela abaixo |
-| "nenhuma memória acima do corte" | o acervo **foi** consultado e não tem nada. Não repita a mesma busca ampla. |
-| "recall automático — INDISPONÍVEL" | a busca **não rodou** (infra fora). Isto NÃO é evidência de ausência de precedente. Nunca afirme que algo é inédito apoiado nesse turno; tente `qctx memory recall` você mesmo. |
+| memories listed | the archive was consulted; treat each one by the table below |
+| "no memory above the relevance cutoff" | the archive **was** consulted and holds nothing. Do not repeat the same broad search. |
+| "automatic recall — UNAVAILABLE" | the search **did not run** (infra down). This is NOT evidence that no precedent exists. Never claim something is unprecedented on the strength of that turn; try `qctx memory recall` yourself. |
 
-**O que o hook não cobre, e continua inteiramente seu:**
+**What the hook does not cover, and stays entirely yours:**
 
-- **Meio de turno.** Nenhum prompt novo chega quando você fecha uma etapa, abre um
-  sub-assunto ou chega numa decisão de desenho 20 minutos dentro da tarefa. Busque
-  de novo a cada etapa. Memória escrita por sessão paralela só aparece para quem
-  relê.
-- **Abrir ponteiros.** O hook entrega o hit; abrir os ids que ele cita é seu. Um
-  índice é ponteiro, não resposta.
-- **Ângulos que o texto do prompt não contém.** O hook monta as consultas com as
-  palavras do prompt. Faceta que o usuário não nomeou não foi buscada.
-- **Toda a escrita.**
-- **Outros acervos.** Coleções de outros sistemas só sob pedido.
+- **Mid-turn.** No new prompt arrives when you close out a step, open a sub-subject or
+  reach a design decision 20 minutes into the task. Search again at each step. Memory
+  written by a parallel session only appears to whoever re-reads.
+- **Opening pointers.** The hook delivers the hit; opening the ids it cites is on you.
+  An index is a pointer, not an answer.
+- **Angles the prompt text does not contain.** The hook builds its queries from the
+  prompt's words. A facet the user did not name was not searched.
+- **All of the writing.**
+- **Other archives.** Collections belonging to other systems, only on request.
 
-## 1. BUSCAR — antes de responder
+## 1. SEARCH — before answering
 
 ```bash
-qctx memory recall "<tema, em linguagem natural>"     # dois estágios, com re-rank
-qctx memory find "<tema>" --limit 8                   # denso puro, mais barato
+qctx memory recall "<topic, in natural language>"     # two stages, with re-rank
+qctx memory find "<topic>" --limit 8                  # pure dense, cheaper
 ```
 
-**Gatilhos** — busque quando qualquer um for verdade:
+**Triggers** — search when any of these holds:
 
-- O usuário pergunta **como algo funciona** no codebase, SDK, plataforma ou infra.
-- Você vai **afirmar um fato** sobre comportamento de terceiro (biblioteca, API).
-- Você vai **propor desenho ou decisão** em área com histórico.
-- O usuário diz algo na forma *"já não discutimos isso?"*, *"não tem isso já?"* —
-  é instrução de busca, não pergunta retórica.
-- Você está **começando uma investigação** — busque antes de ler código.
-- Você vai **reverter ou contradizer** algo que disse antes.
-- Um **review ou subagente relata um achado** em área com histórico.
+- The user asks **how something works** in the codebase, an SDK, a platform or the
+  infra.
+- You are about to **assert a fact** about third-party behaviour (a library, an API).
+- You are about to **propose a design or a decision** in an area with history.
+- The user says something of the form *"didn't we already discuss this?"*, *"don't we
+  have this already?"* — that is a search instruction, not a rhetorical question.
+- You are **starting an investigation** — search before reading code.
+- You are about to **reverse or contradict** something you said earlier.
+- A **review or a subagent reports a finding** in an area with history.
 
-Busque por **tema**, não por símbolo exato: o acervo é semântico. Dois ou três
-ângulos diferentes batem uma consulta longa.
+Search by **topic**, not by exact symbol: the archive is semantic. Two or three
+different angles beat one long query.
 
-| situação | ação |
+| situation | action |
 |---|---|
-| um precedente resolve | aplique, diga que é precedente e cite o id. Não re-derive. |
-| a memória registra **decisão ou veto** do usuário | vale. Não re-proponha o vetado; se acha que deve mudar, diga explicitamente que é reversão, com a evidência nova. |
-| a memória cita arquivo, linha, flag ou versão | **verifique na árvore atual** antes de agir. |
-| a memória contradiz o que você mediu | a medição ganha — e então **corrija a memória** (§2.4). Nunca deixe memória sabidamente errada de pé. |
-| nada relevante | siga, e considere se a resposta que você vai produzir merece ser salva. |
+| a precedent settles it | apply it, say it is precedent and cite the id. Do not re-derive. |
+| the memory records a **decision or veto** by the user | it holds. Do not re-propose what was vetoed; if you think it should change, say explicitly that it is a reversal, with the new evidence. |
+| the memory cites a file, a line, a flag or a version | **verify it against the current tree** before acting. |
+| the memory contradicts what you measured | the measurement wins — and then **fix the memory** (§2.4). Never leave a knowingly wrong memory standing. |
+| nothing relevant | carry on, and consider whether the answer you are about to produce deserves saving. |
 
-### Os modos de falha que isto existe para evitar
+### The failure modes this exists to prevent
 
-Observados, repetidamente:
+Observed, repeatedly:
 
-- **Re-propor um desenho vetado.** Uma decisão que o usuário já tomara duas vezes
-  foi reintroduzida porque a memória que a guardava nunca foi aberta.
-- **Afirmar comportamento de plataforma que uma memória já mediu.** O usuário teve
-  de trazer a correção.
-- **Citar um índice e nunca abri-lo.** O índice foi citado várias vezes enquanto os
-  ids que ele aponta seguiam sem leitura.
+- **Re-proposing a vetoed design.** A decision the user had already made twice was
+  reintroduced because the memory holding it was never opened.
+- **Asserting platform behaviour a memory had already measured.** The user had to
+  bring the correction.
+- **Citing an index and never opening it.** The index was cited several times while the
+  ids it points at went unread.
 
-Nos três, o custo não foi o erro — foi o usuário ter de ser quem percebeu.
+In all three, the cost was not the mistake — it was the user having to be the one who
+noticed.
 
-## 2. SALVAR
+## 2. SAVE
 
-### 2.1 O que salvar
+### 2.1 What to save
 
-- `user` — quem o usuário é: papel, expertise, preferências estáveis.
-- `feedback` — como ele quer que você trabalhe (correções e abordagens
-  confirmadas); **inclua o porquê**, senão a regra é reaplicada fora de contexto.
-- `project` — objetivos, restrições e decisões em curso que não se deduzem do
-  código nem do git. Converta data relativa em absoluta.
-- `reference` — ponteiros externos (URL, dashboard, ticket) e comportamento
-  **medido** de plataforma ou SDK.
+- `user` — who the user is: role, expertise, stable preferences.
+- `feedback` — how they want you to work (corrections and confirmed approaches);
+  **include the why**, otherwise the rule gets reapplied out of context.
+- `project` — goals, constraints and in-flight decisions that do not follow from the
+  code or from git. Convert relative dates to absolute ones.
+- `reference` — external pointers (URL, dashboard, ticket) and **measured** behaviour
+  of a platform or an SDK.
 
-**Especialmente:** comportamento que você teve de **medir** — uma probe, um grep,
-um branch que você rodou. É o conhecimento caro, e o que impede a próxima sessão de
-re-medir. Registre **como** foi medido.
+**Especially:** behaviour you had to **measure** — a probe, a grep, a branch you ran.
+That is the expensive knowledge, and what keeps the next session from re-measuring.
+Record **how** it was measured.
 
-**Descarte:** conversa passageira, detalhe de uma vez só, estado volátil, e o que
-já está no repositório, no git ou nas instruções do projeto.
+**Discard:** passing conversation, one-off detail, volatile state, and anything already
+in the repository, in git or in the project instructions.
 
-### 2.2 Deduplique antes de escrever
+### 2.2 Dedupe before writing
 
 ```bash
-qctx memory find "<consulta curta do fato>"
+qctx memory find "<short query for the fact>"
 ```
 
-Match próximo (score alto, mesmo fato) é **atualização** naquele id, não registro
-novo.
+A close match (high score, same fact) is an **update** on that id, not a new record.
 
-### 2.3 Corrija o que está errado
+### 2.3 Fix what is wrong
 
-Quando uma memória se revela errada ou obsoleta, **atualize na mesma passada** —
-não escreva uma nova competindo. Diga o que a versão antiga afirmava, o que foi
-medido e quando. Acervo com duas memórias contraditórias é pior que um com memória
-corrigida, porque quem lê depois não sabe qual vale. Vale também para memória que
-**você** escreveu hoje.
+When a memory turns out to be wrong or obsolete, **update it in the same pass** — do
+not write a new one competing with it. Say what the old version claimed, what was
+measured and when. An archive with two contradictory memories is worse than one with a
+corrected memory, because whoever reads it later does not know which holds. This
+applies to a memory **you** wrote today too.
 
-### 2.4 Escreva
+### 2.4 Write
 
 ```bash
-qctx memory store "<fato atômico>" --type reference --project X --area Y
-qctx memory update <id> --text "<versão corrigida>"
+qctx memory store "<atomic fact>" --type reference --project X --area Y
+qctx memory update <id> --text "<corrected version>"
 qctx memory delete <id>
 ```
 
-**Um fato atômico por registro.** Parágrafo inteiro como memória única arruína a
-busca, porque o vetor vira a média de vários assuntos. Metadata sempre com `type` e
-data.
+**One atomic fact per record.** A whole paragraph as a single memory ruins the search,
+because the vector becomes the average of several subjects. Metadata always with `type`
+and a date.
 
-### 2.5 Confirme
+### 2.5 Confirm
 
-Lista curta do que foi salvo ou atualizado, cada item com seu id, no idioma do
-usuário.
+A short list of what was saved or updated, each item with its id, in the user's
+language.
 
-## Comandos
+## Commands
 
-| ação | comando |
+| action | command |
 |---|---|
-| buscar com re-rank | `qctx memory recall "<tema>"` |
-| buscar denso | `qctx memory find "<tema>" --limit N` |
-| ler por id | `qctx memory get <id>` |
-| criar | `qctx memory store "<texto>" --type T` |
-| atualizar | `qctx memory update <id> --text "..."` |
-| remover | `qctx memory delete <id>` |
-| listar | `qctx memory list --limit N` |
-| ver config | `qctx config show` · `qctx collections list` |
+| search with re-rank | `qctx memory recall "<topic>"` |
+| dense search | `qctx memory find "<topic>" --limit N` |
+| read by id | `qctx memory get <id>` |
+| create | `qctx memory store "<text>" --type T` |
+| update | `qctx memory update <id> --text "..."` |
+| delete | `qctx memory delete <id>` |
+| list | `qctx memory list --limit N` |
+| see config | `qctx config show` · `qctx collections list` |
 
-`--json` em qualquer comando devolve saída estruturada.
+`--json` on any command returns structured output.
 
-## Erros comuns
+## Common mistakes
 
-**Na leitura:**
-- Responder do que você acha que sabe, quando o acervo tem a medição.
-- Tratar *"já não discutimos…"* como retórica em vez de instrução de busca.
-- Ler uma memória-índice e nunca abrir os ids que ela aponta.
-- Confiar num `arquivo:linha` de memória sem conferir a árvore atual.
+**When reading:**
+- Answering from what you think you know, when the archive holds the measurement.
+- Treating *"didn't we already discuss…"* as rhetoric instead of a search instruction.
+- Reading an index memory and never opening the ids it points at.
+- Trusting a `file:line` from a memory without checking the current tree.
 
-**Na escrita:**
-- Guardar um parágrafo inteiro como um registro → quebre em fatos atômicos.
-- Criar quase-duplicata → busque primeiro, depois atualize.
-- Salvar estado volátil ("estamos na linha 42").
-- Esquecer metadata → sempre `type` e data.
-- Deixar memória desmentida de pé com uma nova ao lado.
+**When writing:**
+- Storing a whole paragraph as one record → break it into atomic facts.
+- Creating a near-duplicate → search first, then update.
+- Saving volatile state ("we are on line 42").
+- Forgetting metadata → always `type` and a date.
+- Leaving a disproved memory standing with a new one beside it.
