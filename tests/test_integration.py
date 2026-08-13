@@ -1,0 +1,287 @@
+"""Testes de INTEGRAÇÃO — exigem Qdrant e endpoints de modelo reais.
+
+Ficam fora da suíte padrão de propósito: `python3 -m unittest discover -s tests`
+tem de rodar offline e em milissegundos. Para rodar estes:
+
+    QCTX_INTEGRATION=1 python3 -m unittest tests.test_integration -v
+
+REGRA DE SEGURANÇA, e não é negociável: o acervo de memória configurado é tratado
+como PRODUÇÃO. Toda escrita vai para uma coleção descartável criada e apagada pelo
+próprio teste; no acervo real só há LEITURA. Um teste que apaga memória de verdade
+é pior que nenhum teste.
+
+O que estes testes provam, e que teste offline não consegue: que o núcleo lê o
+payload escrito pelo servidor MCP antigo sem conversão, e que o payload que ele
+escreve tem exatamente as mesmas chaves — é o que torna a substituição segura.
+"""
+import os
+import sys
+import tempfile
+import time
+import unittest
+import uuid
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import core
+
+LIGADO = os.environ.get("QCTX_INTEGRATION") == "1"
+COLECAO_DESCARTAVEL = f"qctx_test_{uuid.uuid4().hex[:8]}"
+
+#: Chaves que o servidor MCP anterior gravava. O núcleo tem de ler e escrever
+#: exatamente isto, senão o acervo existente vira ilegível ou fica inconsistente.
+CHAVES_PAYLOAD = {"document", "metadata", "created_at", "updated_at"}
+
+
+def cfg_leitura():
+    return core.load()
+
+
+def cfg_escrita():
+    """Config apontando a memória para a coleção descartável."""
+    base = core.load()
+    campos = {f: getattr(base, f) for f in base.__dataclass_fields__}
+    campos["memory_collection"] = COLECAO_DESCARTAVEL
+
+    return core.Config(**campos)
+
+
+@unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
+class TestLeituraDoAcervoReal(unittest.TestCase):
+    """SOMENTE LEITURA. Prova que o núcleo entende o que já está gravado."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = cfg_leitura()
+        if not cls.cfg.memory_collection:
+            raise unittest.SkipTest("memory_collection não configurada")
+        cls.store = core.build_memory(cls.cfg)
+
+    def test_acervo_tem_pontos(self):
+        total = self.store.count()
+        self.assertIsNotNone(total)
+        self.assertGreater(total, 0, "o acervo real deveria ter memórias")
+
+    def test_payload_escrito_pelo_mcp_antigo_e_legivel(self):
+        pagina = self.store.list_page(limit=5)
+        self.assertGreater(pagina["count"], 0)
+        for m in pagina["memories"]:
+            self.assertIsInstance(m["document"], str)
+            self.assertTrue(m["document"].strip(), "documento não pode vir vazio")
+            self.assertIsInstance(m["metadata"], dict)
+
+    def test_get_por_id_devolve_as_quatro_chaves(self):
+        pagina = self.store.list_page(limit=1)
+        mid = pagina["memories"][0]["id"]
+        m = self.store.get(mid)
+        self.assertNotEqual(m.get("status"), "not_found")
+        for chave in ("document", "metadata", "created_at", "updated_at"):
+            self.assertIn(chave, m, f"{chave} tem de existir no payload legado")
+
+    def test_find_devolve_score_decrescente(self):
+        hits = self.store.find("memória de longo prazo", limit=5)
+        self.assertTrue(hits, "busca densa no acervo real não devolveu nada")
+        scores = [h["score"] for h in hits]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_recall_de_dois_portoes_no_acervo_real(self):
+        hits, info = self.store.recall(["memória de longo prazo e recall automático"],
+                                       dense_floor=0.45, strict_floor=0.58, top_k=20,
+                                       min_score=0.10, max_results=6)
+        self.assertGreater(info["hits"], 0)
+        for h in hits:
+            self.assertIsInstance(h, core.Recalled)
+            self.assertIn(h.origem, ("CE", "denso"))
+            self.assertGreaterEqual(h.dense_score, 0.0)
+        if info["ce_ran"]:
+            self.assertTrue(all(h.origem == "CE" for h in hits))
+
+    def test_recall_com_multiplos_angulos_funde_por_id(self):
+        hits, _ = self.store.recall(
+            ["como funciona o hook de recall",
+             "hook recall funciona como",
+             "recall automático a cada prompt"],
+            dense_floor=0.45, strict_floor=0.58, top_k=10, min_score=0.10, max_results=6)
+        ids = [h.id for h in hits]
+        self.assertEqual(len(ids), len(set(ids)), "fusão por id não pode duplicar")
+
+
+@unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
+class TestCrudEmColecaoDescartavel(unittest.TestCase):
+    """Escrita SÓ aqui. A coleção é criada e destruída pelo próprio teste."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = cfg_escrita()
+        cls.store = core.build_memory(cls.cfg)
+        cls.q = core.build_qdrant(cls.cfg)
+        assert cls.cfg.memory_collection == COLECAO_DESCARTAVEL
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.q.delete_collection(COLECAO_DESCARTAVEL)
+        except Exception:
+            pass
+
+    def test_ciclo_completo(self):
+        criado = self.store.store("O poll do conector trunca em 100 itens por página.",
+                                  {"type": "reference", "date": "2026-08-13"})
+        self.assertEqual(criado["status"], "created")
+        mid = criado["id"]
+
+        lido = self.store.get(mid)
+        self.assertIn("trunca em 100", lido["document"])
+        self.assertEqual(lido["metadata"]["type"], "reference")
+
+        achado = self.store.find("paginação do poll", limit=5)
+        self.assertIn(mid, [h["id"] for h in achado])
+
+        atualizado = self.store.update(mid, information="Corrigido: trunca em 50 itens.")
+        self.assertEqual(atualizado["status"], "updated")
+        relido = self.store.get(mid)
+        self.assertIn("50 itens", relido["document"])
+        self.assertEqual(relido["metadata"]["type"], "reference",
+                         "update sem metadata tem de PRESERVAR a metadata anterior")
+        self.assertEqual(relido["created_at"], lido["created_at"],
+                         "created_at não pode ser reescrito por um update")
+        self.assertNotEqual(relido["updated_at"], lido["updated_at"])
+
+        self.store.delete(mid)
+        self.assertEqual(self.store.get(mid)["status"], "not_found")
+
+    def test_payload_gravado_tem_as_mesmas_chaves_do_mcp_antigo(self):
+        criado = self.store.store("fato para conferir a forma do payload", {"type": "test"})
+        ponto = self.q.get_point(COLECAO_DESCARTAVEL, criado["id"])
+        self.assertEqual(set(ponto["payload"].keys()), CHAVES_PAYLOAD,
+                         "o payload tem de ser idêntico ao do servidor anterior, "
+                         "senão o acervo existente fica inconsistente")
+        self.store.delete(criado["id"])
+
+    def test_store_many_e_tudo_ou_nada(self):
+        itens = [{"information": f"fato de lote número {i}", "metadata": {"type": "test"}}
+                 for i in range(5)]
+        res = self.store.store_many(itens)
+        self.assertEqual(res["count"], 5)
+        for mid in res["ids"]:
+            self.assertNotEqual(self.store.get(mid).get("status"), "not_found")
+        for mid in res["ids"]:
+            self.store.delete(mid)
+
+    def test_store_many_recusa_item_invalido_antes_de_gravar(self):
+        antes = self.store.count() or 0
+        with self.assertRaises(core.memory.MemoryError_):
+            self.store.store_many([{"information": "válido"}, {"information": "  "}])
+        time.sleep(0.2)
+        self.assertEqual(self.store.count() or 0, antes,
+                         "validação tem de acontecer ANTES de qualquer escrita")
+
+    def test_store_vazio_e_recusado(self):
+        with self.assertRaises(core.memory.MemoryError_):
+            self.store.store("   ")
+
+
+@unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
+class TestDocsIntegracao(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        base = core.load()
+        campos = {f: getattr(base, f) for f in base.__dataclass_fields__}
+        campos["docs_collection"] = f"{COLECAO_DESCARTAVEL}_tmp"
+        campos["library_collection"] = f"{COLECAO_DESCARTAVEL}_lib"
+        cls.cfg = core.Config(**campos)
+        cls.idx = core.build_docs(cls.cfg)
+        cls.q = core.build_qdrant(cls.cfg)
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.arquivo = Path(cls.tmpdir.name) / "manual.md"
+        # Documento realista: cada seção precisa ser grande o bastante para o
+        # fatiamento ter trabalho, senão o teste "acha a seção certa" é vacuidade
+        # — com um trecho único, acertar é inevitável.
+        recheio = ("Detalhe operacional relevante para esta seção, repetido para dar "
+                   "corpo ao documento sem mudar o assunto dela. ")
+        cls.arquivo.write_text("\n".join([
+            "# Autenticação",
+            "",
+            "Para autenticar, envie o header Authorization com um token Bearer.",
+            "O token expira em uma hora e precisa ser renovado pelo endpoint de refresh.",
+            recheio * 12,
+            "",
+            "# Paginação",
+            "",
+            "As listagens devolvem no máximo 100 itens por página.",
+            "Use o cursor devolvido em next_page para buscar a página seguinte.",
+            recheio * 12,
+            "",
+            "# Limites de uso",
+            "",
+            "O limite é de 5000 requisições por hora, com janela deslizante de 180 segundos.",
+            recheio * 12,
+        ]) + "\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        for nome in (f"{COLECAO_DESCARTAVEL}_tmp", f"{COLECAO_DESCARTAVEL}_lib"):
+            try:
+                cls.q.delete_collection(nome)
+            except Exception:
+                pass
+        cls.tmpdir.cleanup()
+
+    def test_index_busca_e_localiza_a_secao_certa(self):
+        res = self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        self.assertGreater(res["chunks"], 1, "documento com 3 seções longas tem de virar vários trechos")
+        self.assertEqual(res["mode"], "locator")
+
+        hits, info = self.idx.search("qual o limite de requisições por hora?",
+                                     scope="tmp", limit=3)
+        self.assertTrue(hits, "deveria achar a seção de limites")
+        texto_do_topo = hits[0].text.lower()
+        self.assertIn("5000", texto_do_topo)
+        self.assertGreater(hits[0].start_line, 0)
+        self.assertGreaterEqual(hits[0].end_line, hits[0].start_line)
+
+    def test_intervalo_de_linhas_aponta_para_o_conteudo_real(self):
+        self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        hits, _ = self.idx.search("como paginar?", scope="tmp", limit=1)
+        linhas = self.arquivo.read_text().splitlines()
+        recorte = "\n".join(linhas[hits[0].start_line - 1:hits[0].end_line])
+        self.assertEqual(recorte.strip("\n"), hits[0].text,
+                         "o contrato do modo localizador é que essas linhas "
+                         "reproduzam exatamente o trecho indexado")
+
+    def test_biblioteca_nao_expira_e_temporario_expira(self):
+        self.idx.keep_file(str(self.arquivo))
+        self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        docs = {d["scope"]: d for d in self.idx.list_docs("all")}
+        self.assertIn("library", docs)
+        self.assertIn("tmp", docs)
+        self.assertIsNone(docs["library"]["expires_at_ts"])
+        self.assertIsNotNone(docs["tmp"]["expires_at_ts"])
+
+    def test_ttl_vencido_desaparece_da_busca(self):
+        self.idx.index_file(str(self.arquivo), ttl_seconds=-1)  # já nasce vencido
+        hits, _ = self.idx.search("autenticação", scope="tmp", limit=3)
+        self.assertEqual(hits, [], "trecho vencido não pode aparecer")
+
+    def test_purge_do_temporario_preserva_a_biblioteca(self):
+        self.idx.keep_file(str(self.arquivo))
+        self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        self.idx.drop_all_tmp()
+        docs = self.idx.list_docs("all")
+        escopos = {d["scope"] for d in docs}
+        self.assertIn("library", escopos, "a biblioteca TEM de sobreviver ao purge")
+        self.assertNotIn("tmp", escopos)
+
+    def test_reindexar_substitui_em_vez_de_duplicar(self):
+        primeiro = self.idx.keep_file(str(self.arquivo))
+        segundo = self.idx.keep_file(str(self.arquivo))
+        self.assertEqual(primeiro["doc_id"], segundo["doc_id"])
+        docs = [d for d in self.idx.list_docs("library") if d["doc_id"] == segundo["doc_id"]]
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["chunks"], segundo["chunks"],
+                         "não pode sobrar trecho da indexação anterior")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
