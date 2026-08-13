@@ -21,17 +21,17 @@ from tests.fakes import (FakeEmbedder, FailingFakeEmbedder, FakeReranker,
 
 #: As quatro chaves que o servidor MCP anterior gravava. Mudar isto torna o acervo
 #: existente inconsistente, sem nenhum erro aparecer.
-CHAVES = {"document", "metadata", "created_at", "updated_at"}
+KEYS = {"document", "metadata", "created_at", "updated_at"}
 
 POL = retrieval.Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
                        max_results=6, veto=True)
 
 
-def store(reranker=None, colecao="mem"):
+def store(reranker=None, collection="mem"):
     q, emb = FakeVectorStore(), FakeEmbedder()
-    q.ensure_collection(colecao, emb.dim)
+    q.ensure_collection(collection, emb.dim)
 
-    return MemoryStore(q, emb, reranker, colecao, emb.dim), q, emb
+    return MemoryStore(q, emb, reranker, collection, emb.dim), q, emb
 
 
 class TestPayloadShape(unittest.TestCase):
@@ -41,13 +41,13 @@ class TestPayloadShape(unittest.TestCase):
         s, q, _ = store()
         r = s.store("um fato", {"type": "reference"})
         point = q.get_point("mem", r["id"])
-        self.assertEqual(set(point["payload"]), CHAVES)
+        self.assertEqual(set(point["payload"]), KEYS)
 
     def test_store_many_writes_the_same_keys(self):
         s, q, _ = store()
         r = s.store_many([{"information": "a"}, {"information": "b", "metadata": {"x": 1}}])
         for mid in r["ids"]:
-            self.assertEqual(set(q.get_point("mem", mid)["payload"]), CHAVES)
+            self.assertEqual(set(q.get_point("mem", mid)["payload"]), KEYS)
 
     def test_update_preserves_created_at(self):
         s, q, _ = store()
@@ -58,7 +58,7 @@ class TestPayloadShape(unittest.TestCase):
         depois = q.get_point("mem", mid)["payload"]
         self.assertEqual(depois["created_at"], antes, "created_at não pode ser reescrito")
         self.assertNotEqual(depois["updated_at"], antes)
-        self.assertEqual(set(depois), CHAVES)
+        self.assertEqual(set(depois), KEYS)
 
     def test_update_without_metadata_keeps_the_previous_one(self):
         s, q, _ = store()
@@ -146,7 +146,7 @@ class TestRecall(unittest.TestCase):
         self.assertIsInstance(hits[0], core.Recalled)
         self.assertIn("paginação", hits[0].document,
                       "a consulta compartilha três palavras com este registro")
-        self.assertEqual(hits[0].origin, "denso")
+        self.assertEqual(hits[0].origin, "dense")
 
     def test_floor_relaxes_ONLY_when_a_reranker_exists(self):
         sem, _ = self._populate(None)

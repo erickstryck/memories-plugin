@@ -12,7 +12,7 @@ MIN_CHARS = 12
 
 #: Continuações e confirmações. Não vale ida à rede: o assunto é o do turno
 #: anterior, que já foi buscado quando chegou.
-TRIVIAIS = {
+TRIVIAL_WORDS = {
     # confirmação
     "ok", "okay", "beleza", "blz", "sim", "isso", "certo", "correto", "exato",
     "exatamente", "claro", "perfeito", "top", "boa", "legal", "ótimo", "otimo",
@@ -71,7 +71,7 @@ def _only_confirmation(text: str) -> bool:
     if not words:
         return False
 
-    return all(p in TRIVIAIS for p in words)
+    return all(p in TRIVIAL_WORDS for p in words)
 
 
 def skip_reason(prompt: str) -> str | None:

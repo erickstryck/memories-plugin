@@ -257,7 +257,7 @@ class DocIndex:
 
     # ---- busca -------------------------------------------------------------
 
-    def search(self, pergunta: str, scope: str = "all", doc_id: str | None = None,
+    def search(self, query: str, scope: str = "all", doc_id: str | None = None,
                limit: int = 5, min_score: float = RERANK_MIN_SCORE
                ) -> tuple[list[Hit], retrieval.Outcome]:
         """Busca nos acervos pedidos e reranqueia a UNIÃO.
@@ -284,14 +284,14 @@ class DocIndex:
             dense_floor=DENSE_FLOOR, strict_floor=DENSE_FLOOR, min_score=min_score,
             max_results=limit, veto=False, detect_collapse=True, order_matters=True,
         )
-        vector = self.embedder.embed_one(pergunta)
+        vector = self.embedder.embed_one(query)
         candidates: list[dict] = []
         for esc in scopes:
             for bruto in self._search_scope(esc, vector, doc_id):
                 candidates.append(bruto)
         candidates.sort(key=lambda b: -(b.get("score") or 0.0))
 
-        outcome = retrieval.two_stage(candidates, pergunta, self.reranker, policy,
+        outcome = retrieval.two_stage(candidates, query, self.reranker, policy,
                                   text_of=lambda b: b["payload"]["document"])
 
         return [self._to_hit(s.item, s.score, s.origin) for s in outcome.scored], outcome

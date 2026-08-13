@@ -27,11 +27,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
 
 LIGADO = os.environ.get("QCTX_INTEGRATION") == "1"
-COLECAO_DESCARTAVEL = f"qctx_test_{uuid.uuid4().hex[:8]}"
+THROWAWAY_COLLECTION = f"qctx_test_{uuid.uuid4().hex[:8]}"
 
 #: Chaves que o servidor MCP anterior gravava. O núcleo tem de ler e escrever
 #: exatamente isto, senão o acervo existente vira ilegível ou fica inconsistente.
-CHAVES_PAYLOAD = {"document", "metadata", "created_at", "updated_at"}
+PAYLOAD_KEYS = {"document", "metadata", "created_at", "updated_at"}
 
 
 def read_config():
@@ -42,7 +42,7 @@ def write_config():
     """Config apontando a memória para a coleção descartável."""
     base = core.load()
     fields = {f: getattr(base, f) for f in base.__dataclass_fields__}
-    fields["memory_collection"] = COLECAO_DESCARTAVEL
+    fields["memory_collection"] = THROWAWAY_COLLECTION
 
     return core.Config(**fields)
 
@@ -92,7 +92,7 @@ class TestReadingTheRealArchive(unittest.TestCase):
         self.assertGreater(outcome.candidates, 0)
         for h in hits:
             self.assertIsInstance(h, core.Recalled)
-            self.assertIn(h.origin, ("CE", "denso"))
+            self.assertIn(h.origin, ("CE", "dense"))
             self.assertGreaterEqual(h.dense_score, 0.0)
         if outcome.by_rerank:
             self.assertTrue(all(h.origin == "CE" for h in hits))
@@ -116,12 +116,12 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
         cls.cfg = write_config()
         cls.store = core.build_memory(cls.cfg)
         cls.q = core.build_qdrant(cls.cfg)
-        assert cls.cfg.memory_collection == COLECAO_DESCARTAVEL
+        assert cls.cfg.memory_collection == THROWAWAY_COLLECTION
 
     @classmethod
     def tearDownClass(cls):
         try:
-            cls.q.delete_collection(COLECAO_DESCARTAVEL)
+            cls.q.delete_collection(THROWAWAY_COLLECTION)
         except Exception:
             pass
 
@@ -153,8 +153,8 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
 
     def test_written_payload_has_the_same_keys_as_the_old_mcp(self):
         criado = self.store.store("fato para conferir a forma do payload", {"type": "test"})
-        point = self.q.get_point(COLECAO_DESCARTAVEL, criado["id"])
-        self.assertEqual(set(point["payload"].keys()), CHAVES_PAYLOAD,
+        point = self.q.get_point(THROWAWAY_COLLECTION, criado["id"])
+        self.assertEqual(set(point["payload"].keys()), PAYLOAD_KEYS,
                          "o payload tem de ser idêntico ao do servidor anterior, "
                          "senão o acervo existente fica inconsistente")
         self.store.delete(criado["id"])
@@ -188,8 +188,8 @@ class TestDocsIntegration(unittest.TestCase):
     def setUpClass(cls):
         base = core.load()
         fields = {f: getattr(base, f) for f in base.__dataclass_fields__}
-        fields["docs_collection"] = f"{COLECAO_DESCARTAVEL}_tmp"
-        fields["library_collection"] = f"{COLECAO_DESCARTAVEL}_lib"
+        fields["docs_collection"] = f"{THROWAWAY_COLLECTION}_tmp"
+        fields["library_collection"] = f"{THROWAWAY_COLLECTION}_lib"
         cls.cfg = core.Config(**fields)
         cls.idx = core.build_docs(cls.cfg)
         cls.q = core.build_qdrant(cls.cfg)
@@ -221,7 +221,7 @@ class TestDocsIntegration(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for name in (f"{COLECAO_DESCARTAVEL}_tmp", f"{COLECAO_DESCARTAVEL}_lib"):
+        for name in (f"{THROWAWAY_COLLECTION}_tmp", f"{THROWAWAY_COLLECTION}_lib"):
             try:
                 cls.q.delete_collection(name)
             except Exception:

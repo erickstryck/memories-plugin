@@ -17,7 +17,7 @@ from .memory import MemoryStore, Recalled, search_collections
 from .embedding import Embedder, EmbeddingError
 from .reranking import Reranker, RerankError, normalize_scores, sigmoid
 from .qdrant import Qdrant, QdrantError
-from .retrieval import (CE, CE_FRACO, DENSO, Outcome, Policy, Scored,
+from .retrieval import (CE, CE_WEAK, DENSE, Outcome, Policy, Scored,
                         fuse_by_id, needs_rerank, two_stage)
 
 __all__ = [

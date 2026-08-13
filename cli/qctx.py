@@ -368,14 +368,14 @@ def cmd_docs_search(args, cfg):
               f"não é veredito)\n")
     for i, h in enumerate(hits, 1):
         warning = f"  ⚠ {h.stale}" if h.stale else ""
-        etiqueta = "biblioteca" if h.scope == "library" else "temporário"
+        label = "biblioteca" if h.scope == "library" else "temporário"
         if h.mode == "locator":
-            print(f"{i}. [{etiqueta}] {h.path}:{h.start_line}-{h.end_line}  "
+            print(f"{i}. [{label}] {h.path}:{h.start_line}-{h.end_line}  "
                   f"({h.origin} {h.score:.3f}){warning}")
             print(f"   {' '.join(h.text.split())[:300]}…")
             print(f"   -> ler linhas {h.start_line}-{h.end_line} do arquivo para o conteúdo atual")
         else:
-            print(f"{i}. [{etiqueta}] {os.path.basename(h.path)}  "
+            print(f"{i}. [{label}] {os.path.basename(h.path)}  "
                   f"({h.origin} {h.score:.3f}){warning}")
             print(f"   [FOTO de {h.indexed_at} — origem não relegível por região]")
             print("   " + h.text.replace("\n", "\n   "))
@@ -396,10 +396,10 @@ def cmd_docs_list(args, cfg):
     print(f"{len(docs)} documento(s):")
     for d in docs:
         if d["expires_at_ts"]:
-            validade = f"expira em {(d['expires_at_ts'] - time.time()) / 3600:5.1f}h"
+            expiry = f"expira em {(d['expires_at_ts'] - time.time()) / 3600:5.1f}h"
         else:
-            validade = "permanente     "
-        print(f"  [{d['scope']:7}] {d['doc_id']}  {d['chunks']:>4} trechos  {validade}  "
+            expiry = "permanente     "
+        print(f"  [{d['scope']:7}] {d['doc_id']}  {d['chunks']:>4} trechos  {expiry}  "
               f"{d['mode']:9} {d['path']}")
 
 

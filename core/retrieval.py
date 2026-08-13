@@ -36,8 +36,8 @@ COLLAPSE_MAX = 0.01
 #: Procedência do score de cada resultado. Quem apresenta precisa distinguir:
 #: ordem densa NÃO é veredito de relevância, é proximidade de vetor.
 CE = "CE"           # julgado pelo cross-encoder, acima do corte
-CE_FRACO = "CE?"    # julgado, abaixo do corte — entregue sem veto, marcado
-DENSO = "denso"     # sem julgamento do cross-encoder
+CE_WEAK = "CE?"    # julgado, abaixo do corte — entregue sem veto, marcado
+DENSE = "dense"     # sem julgamento do cross-encoder
 
 
 def default_score(hit: Any) -> float:
@@ -86,7 +86,7 @@ class Scored:
 
     @property
     def is_weak(self) -> bool:
-        return self.origin == CE_FRACO
+        return self.origin == CE_WEAK
 
 
 @dataclass
@@ -118,7 +118,7 @@ class Outcome:
 
     @property
     def by_rerank(self) -> bool:
-        return any(s.origin in (CE, CE_FRACO) for s in self.scored)
+        return any(s.origin in (CE, CE_WEAK) for s in self.scored)
 
 
 def fuse_by_id(batches: list[list[Any]], id_of: Callable[[Any], str],
@@ -212,7 +212,7 @@ def two_stage(candidates: list[Any], query: str, reranker, policy: Policy,
 
     valid_keys = [(candidates[i], s) for i, s in pairs if 0 <= i < len(candidates)]
     above = [Scored(c, s, CE) for c, s in valid_keys if s >= policy.min_score]
-    below = [Scored(c, s, CE_FRACO) for c, s in valid_keys if s < policy.min_score]
+    below = [Scored(c, s, CE_WEAK) for c, s in valid_keys if s < policy.min_score]
     chosen = above if policy.veto else above + below
     outcome.scored = chosen[:policy.max_results]
 
@@ -222,5 +222,5 @@ def two_stage(candidates: list[Any], query: str, reranker, policy: Policy,
 def _strict_cut(candidates: list[Any], policy: Policy,
              score_of: Callable[[Any], float]) -> list[Scored]:
     """Reaplica o corte estrito. Chamado sempre que o segundo estágio não julgou."""
-    return [Scored(c, score_of(c), DENSO) for c in candidates
+    return [Scored(c, score_of(c), DENSE) for c in candidates
             if score_of(c) >= policy.strict_floor][:policy.max_results]

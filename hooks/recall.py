@@ -85,7 +85,7 @@ BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 #: linha. O contexto pode ter sido compactado nesse meio-tempo.
 REINJECT_AFTER = 8
 
-INSTRUCOES = """Como usar, sem exceção:
+INSTRUCTIONS = """Como usar, sem exceção:
 - Precedente ou veto do usuário PREVALECE. Não re-derive, não re-proponha o que foi \
 vetado; se achar que deve mudar, diga explicitamente que é uma reversão.
 - Memória que cita arquivo, linha, flag ou versão: VERIFIQUE na árvore atual antes \
@@ -131,10 +131,10 @@ def emit(context: str) -> None:
     }))
 
 
-def unavailable_block(estagio: str, error: str) -> str:
+def unavailable_block(stage: str, error: str) -> str:
     return (
         "[recall automático — INDISPONÍVEL neste prompt]\n"
-        f"A busca na memória de longo prazo NÃO foi executada: {estagio} falhou ({error}). "
+        f"A busca na memória de longo prazo NÃO foi executada: {stage} falhou ({error}). "
         "Isto NÃO significa que não há precedente — significa que o acervo não foi "
         "consultado. Não afirme que algo é inédito ou sem histórico apoiado neste turno. "
         "Se o assunto puder ter precedente, tente uma busca explícita; se ela também "
@@ -206,7 +206,7 @@ def build_block(full_hits: list, pointers: list, n_angles: int, outcome) -> str:
     nota = _degradation_note(outcome)
     if nota:
         parts.append(nota.rstrip())
-    parts += ["", INSTRUCOES, ""]
+    parts += ["", INSTRUCTIONS, ""]
     for i, h in enumerate(full_hits, 1):
         doc = h.document
         truncated = ""
