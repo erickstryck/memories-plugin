@@ -35,7 +35,7 @@ def sigmoid(x: float) -> float:
     return e / (1.0 + e)
 
 
-def normalize_scores(pares: list[tuple[int, float]]) -> tuple[list[tuple[int, float]], bool]:
+def normalize_scores(pairs: list[tuple[int, float]]) -> tuple[list[tuple[int, float]], bool]:
     """Converte para a faixa 0..1 quando a resposta veio em logit.
 
     Detecta pela FAIXA e não por configuração: configuração erra em silêncio quando
@@ -44,13 +44,13 @@ def normalize_scores(pares: list[tuple[int, float]]) -> tuple[list[tuple[int, fl
 
     Devolve (pares normalizados, era_logit).
     """
-    if not pares:
+    if not pairs:
         return [], False
-    era_logit = any(s < 0.0 or s > 1.0 for _, s in pares)
-    if era_logit:
-        pares = [(i, sigmoid(s)) for i, s in pares]
+    was_logit = any(s < 0.0 or s > 1.0 for _, s in pairs)
+    if was_logit:
+        pairs = [(i, sigmoid(s)) for i, s in pairs]
 
-    return pares, era_logit
+    return pairs, was_logit
 
 
 # ---- estratégias de contrato de rede ---------------------------------------
@@ -58,12 +58,12 @@ def normalize_scores(pares: list[tuple[int, float]]) -> tuple[list[tuple[int, fl
 @dataclass(frozen=True)
 class WireContract:
     """Como montar o pedido e como ler a resposta de um servidor de re-rank."""
-    nome: str
+    name: str
 
-    def body(self, model: str, query: str, documentos: list[str]) -> dict:
+    def body(self, model: str, query: str, documents: list[str]) -> dict:
         raise NotImplementedError
 
-    def parse(self, resposta: dict) -> list[tuple[int, float]]:
+    def parse(self, response: dict) -> list[tuple[int, float]]:
         raise NotImplementedError
 
 
@@ -75,13 +75,13 @@ class JinaContract(WireContract):
     """
 
     def __init__(self):
-        super().__init__(nome="jina")
+        super().__init__(name="jina")
 
-    def body(self, model: str, query: str, documentos: list[str]) -> dict:
-        return {"model": model, "query": query, "documents": documentos}
+    def body(self, model: str, query: str, documents: list[str]) -> dict:
+        return {"model": model, "query": query, "documents": documents}
 
-    def parse(self, resposta: dict) -> list[tuple[int, float]]:
-        return _pares(resposta.get("results") or [], "relevance_score")
+    def parse(self, response: dict) -> list[tuple[int, float]]:
+        return _pairs(response.get("results") or [], "relevance_score")
 
 
 class ScoreContract(WireContract):
@@ -92,27 +92,27 @@ class ScoreContract(WireContract):
     """
 
     def __init__(self):
-        super().__init__(nome="score")
+        super().__init__(name="score")
 
-    def body(self, model: str, query: str, documentos: list[str]) -> dict:
-        return {"model": model, "text_1": query, "text_2": documentos}
+    def body(self, model: str, query: str, documents: list[str]) -> dict:
+        return {"model": model, "text_1": query, "text_2": documents}
 
-    def parse(self, resposta: dict) -> list[tuple[int, float]]:
-        return _pares(resposta.get("data") or [], "score")
+    def parse(self, response: dict) -> list[tuple[int, float]]:
+        return _pairs(response.get("data") or [], "score")
 
 
-def _pares(linhas: list, campo: str) -> list[tuple[int, float]]:
-    saida = []
-    for linha in linhas:
-        if not isinstance(linha, dict):
+def _pairs(lines: list, field: str) -> list[tuple[int, float]]:
+    output = []
+    for line in lines:
+        if not isinstance(line, dict):
             continue
-        idx = linha.get("index")
-        valor = linha.get(campo, linha.get("relevance_score", linha.get("score")))
-        if not isinstance(idx, int) or valor is None:
+        idx = line.get("index")
+        value = line.get(field, line.get("relevance_score", line.get("score")))
+        if not isinstance(idx, int) or value is None:
             continue
-        saida.append((idx, float(valor)))
+        output.append((idx, float(value)))
 
-    return saida
+    return output
 
 
 def contract_for(url: str) -> WireContract:
@@ -136,7 +136,7 @@ class Reranker:
         self.query_chars = query_chars
         self.contract = contract or contract_for(url)
 
-    def rank(self, query: str, documentos: list[str]) -> tuple[list[tuple[int, float]], dict]:
+    def rank(self, query: str, documents: list[str]) -> tuple[list[tuple[int, float]], dict]:
         """Reordena `documentos` para `query`. NUNCA levanta.
 
         Devolve (pares ordenados por score desc, info com `ok`). Falha é DEGRADAÇÃO,
@@ -150,22 +150,22 @@ class Reranker:
         do JULGAMENTO, não do que o chamador entrega adiante.
         """
         info = {"ok": False, "era_logit": False, "descartados": 0,
-                "erro": None, "contrato": self.contract.nome}
-        if not documentos:
+                "erro": None, "contrato": self.contract.name}
+        if not documents:
             return [], info
 
-        info["descartados"] = max(0, len(documentos) - self.max_docs)
-        candidatos = [d[:self.doc_chars] for d in documentos[:self.max_docs]]
+        info["descartados"] = max(0, len(documents) - self.max_docs)
+        candidates = [d[:self.doc_chars] for d in documents[:self.max_docs]]
         # A LEITURA da resposta fica DENTRO do try: um servidor que responde uma
         # lista, ou um score em string, fazia o parse explodir e quebrava a promessa
         # de "nunca levanta" — justamente com a resposta inesperada, que é quando a
         # promessa importa.
         try:
-            resposta = post_json(self.url,
-                                 self.contract.body(self.model, query[:self.query_chars], candidatos),
+            response = post_json(self.url,
+                                 self.contract.body(self.model, query[:self.query_chars], candidates),
                                  headers=bearer(self.api_key), timeout=self.timeout)
-            pares = [(i, s) for i, s in self.contract.parse(resposta)
-                     if 0 <= i < len(candidatos)]
+            pairs = [(i, s) for i, s in self.contract.parse(response)
+                     if 0 <= i < len(candidates)]
         except HttpError as exc:
             info["erro"] = str(exc)
 
@@ -174,14 +174,14 @@ class Reranker:
             info["erro"] = f"{type(exc).__name__}: {exc}"
 
             return [], info
-        if not pares:
-            info["erro"] = f"resposta sem hits utilizáveis: {str(resposta)[:200]}"
+        if not pairs:
+            info["erro"] = f"resposta sem hits utilizáveis: {str(response)[:200]}"
 
             return [], info
 
-        pares, era_logit = normalize_scores(pares)
-        pares.sort(key=lambda p: -p[1])
+        pairs, was_logit = normalize_scores(pairs)
+        pairs.sort(key=lambda p: -p[1])
         info["ok"] = True
-        info["era_logit"] = era_logit
+        info["era_logit"] = was_logit
 
-        return pares, info
+        return pairs, info

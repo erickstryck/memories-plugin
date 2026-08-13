@@ -77,17 +77,17 @@ def main() -> None:
     except Exception:
         data = {}
 
-    sessao = "".join(c if c.isalnum() or c in "-_" else "_"
+    session = "".join(c if c.isalnum() or c in "-_" else "_"
                      for c in str(data.get("session_id") or "default"))
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    contador = STATE_DIR / f"checkpoint-{sessao}.count"
+    counter = STATE_DIR / f"checkpoint-{session}.count"
 
     try:
-        n = int(contador.read_text().strip())
+        n = int(counter.read_text().strip())
     except Exception:
         n = 0
     n += 1
-    contador.write_text(str(n))
+    counter.write_text(str(n))
 
     if INTERVALO <= 0 or n % INTERVALO != 0:
         return  # silencioso nas interações intermediárias

@@ -20,7 +20,7 @@ class Breaker:
         self.path = Path(path)
         self.cooldown = cooldown_seconds
 
-    def aberto(self) -> float | None:
+    def is_open(self) -> float | None:
         """Segundos desde a última falha, se ainda estamos no período de espera.
 
         None significa "pode tentar". Qualquer problema de leitura resolve para
@@ -39,14 +39,14 @@ class Breaker:
 
         return None
 
-    def armar(self) -> None:
+    def arm(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(str(time.time()))
         except Exception:
             pass
 
-    def limpar(self) -> None:
+    def clear(self) -> None:
         try:
             self.path.unlink()
         except Exception:

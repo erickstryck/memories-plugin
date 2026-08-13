@@ -43,13 +43,13 @@ class Chunk:
         return self.end_line - self.start_line + 1
 
 
-def is_probably_binary(amostra: str) -> bool:
-    return "\x00" in amostra
+def is_probably_binary(sample: str) -> bool:
+    return "\x00" in sample
 
 
-def mode_for_suffix(sufixo: str) -> str:
+def mode_for_suffix(suffix: str) -> str:
     """`locator` quando dá para reler a região no arquivo; `snapshot` quando não."""
-    return "locator" if sufixo.lower() in LOCATABLE_SUFFIXES else "snapshot"
+    return "locator" if suffix.lower() in LOCATABLE_SUFFIXES else "snapshot"
 
 
 def split_blocks(lines: list[str]) -> list[tuple[int, int]]:
@@ -62,28 +62,28 @@ def split_blocks(lines: list[str]) -> list[tuple[int, int]]:
     """
     if not lines:
         return []
-    limites = {0}
+    boundaries = {0}
     for i in range(1, len(lines)):
-        atual = lines[i]
+        current = lines[i]
         anterior = lines[i - 1]
-        if HEADING.match(atual):
-            limites.add(i)
+        if HEADING.match(current):
+            boundaries.add(i)
             continue
-        if not anterior.strip() and atual.strip():
-            limites.add(i)
+        if not anterior.strip() and current.strip():
+            boundaries.add(i)
             continue
-        comeca_na_coluna_zero = atual[:1] not in ("", " ", "\t", "\n")
+        comeca_na_coluna_zero = current[:1] not in ("", " ", "\t", "\n")
         anterior_indentado = anterior[:1] in (" ", "\t")
         if comeca_na_coluna_zero and anterior_indentado:
-            limites.add(i)
-    ordenados = sorted(limites) + [len(lines)]
+            boundaries.add(i)
+    ordered = sorted(boundaries) + [len(lines)]
 
-    return [(ordenados[i], ordenados[i + 1]) for i in range(len(ordenados) - 1)]
+    return [(ordered[i], ordered[i + 1]) for i in range(len(ordered) - 1)]
 
 
 def _window(lines: list[str], ini: int, fim: int, target: int) -> list[tuple[int, int]]:
     """Janela fixa com sobreposição, para bloco que estoura o teto sozinho."""
-    janelas = []
+    windows = []
     passo = ini
     while passo < fim:
         acumulado = 0
@@ -91,12 +91,12 @@ def _window(lines: list[str], ini: int, fim: int, target: int) -> list[tuple[int
         while cursor < fim and acumulado < target:
             acumulado += len(lines[cursor])
             cursor += 1
-        janelas.append((passo, cursor))
+        windows.append((passo, cursor))
         if cursor >= fim:
             break
         passo = max(passo + 1, cursor - OVERLAP_LINES)
 
-    return janelas
+    return windows
 
 
 def pack_chunks(lines: list[str], target: int = TARGET_CHARS,
@@ -110,36 +110,36 @@ def pack_chunks(lines: list[str], target: int = TARGET_CHARS,
         return []
     chunks: list[Chunk] = []
 
-    def emitir(ini: int, fim: int) -> None:
-        texto = "".join(lines[ini:fim]).strip("\n")
-        if texto.strip():
-            chunks.append(Chunk(ini + 1, fim, texto))
+    def emit(ini: int, fim: int) -> None:
+        text = "".join(lines[ini:fim]).strip("\n")
+        if text.strip():
+            chunks.append(Chunk(ini + 1, fim, text))
 
-    aberto: int | None = None
-    tamanho = 0
+    is_open: int | None = None
+    size = 0
     for bi, bf in split_blocks(lines):
-        bloco = sum(len(l) for l in lines[bi:bf])
-        if bloco > hard_max:
-            if aberto is not None:
-                emitir(aberto, bi)
-                aberto, tamanho = None, 0
+        block = sum(len(l) for l in lines[bi:bf])
+        if block > hard_max:
+            if is_open is not None:
+                emit(is_open, bi)
+                is_open, size = None, 0
             for ji, jf in _window(lines, bi, bf, target):
-                emitir(ji, jf)
+                emit(ji, jf)
             continue
-        if aberto is None:
-            aberto, tamanho = bi, bloco
+        if is_open is None:
+            is_open, size = bi, block
             continue
-        if tamanho + bloco > target:
-            emitir(aberto, bi)
-            aberto, tamanho = bi, bloco
+        if size + block > target:
+            emit(is_open, bi)
+            is_open, size = bi, block
             continue
-        tamanho += bloco
-    if aberto is not None:
-        emitir(aberto, len(lines))
+        size += block
+    if is_open is not None:
+        emit(is_open, len(lines))
 
     return chunks
 
 
-def chunk_text(conteudo: str, target: int = TARGET_CHARS,
+def chunk_text(content: str, target: int = TARGET_CHARS,
                hard_max: int = HARD_MAX_CHARS) -> list[Chunk]:
-    return pack_chunks(conteudo.splitlines(keepends=True), target, hard_max)
+    return pack_chunks(content.splitlines(keepends=True), target, hard_max)

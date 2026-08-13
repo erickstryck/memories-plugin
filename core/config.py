@@ -116,7 +116,7 @@ class Config:
                 "`collections list` e escolha com `config set memory-collection <nome>`"
             )
 
-        return self._require_distinta("memory_collection", self.memory_collection)
+        return self._require_distinct("memory_collection", self.memory_collection)
 
     def require_docs_collection(self) -> str:
         return self._require_doc_collection("docs_collection", self.docs_collection)
@@ -124,13 +124,13 @@ class Config:
     def require_library_collection(self) -> str:
         return self._require_doc_collection("library_collection", self.library_collection)
 
-    def _require_doc_collection(self, nome_campo: str, valor: str) -> str:
-        if not valor:
-            raise ConfigError(f"{nome_campo} não configurada")
+    def _require_doc_collection(self, field_name: str, value: str) -> str:
+        if not value:
+            raise ConfigError(f"{field_name} não configurada")
 
-        return self._require_distinta(nome_campo, valor)
+        return self._require_distinct(field_name, value)
 
-    def _require_distinta(self, nome_campo: str, valor: str) -> str:
+    def _require_distinct(self, field_name: str, value: str) -> str:
         """Garante que as TRÊS coleções sejam distintas.
 
         Cada colisão possível tem uma consequência concreta, e nenhuma delas dá
@@ -143,22 +143,22 @@ class Config:
           construção (`drop --all` apaga a coleção), então um comando de limpeza
           passaria a ser capaz de apagar acervo permanente.
         """
-        outras = {
+        others = {
             "memory_collection": self.memory_collection,
             "docs_collection": self.docs_collection,
             "library_collection": self.library_collection,
         }
-        for outro_campo, outro_valor in outras.items():
-            if outro_campo == nome_campo or not outro_valor:
+        for other_field, other_value in others.items():
+            if other_field == field_name or not other_value:
                 continue
-            if outro_valor == valor:
+            if other_value == value:
                 raise ConfigError(
-                    f"{nome_campo} e {outro_campo} apontam para a mesma coleção "
-                    f"({valor!r}). As três coleções têm ciclos de vida diferentes e "
+                    f"{field_name} e {other_field} apontam para a mesma coleção "
+                    f"({value!r}). As três coleções têm ciclos de vida diferentes e "
                     f"precisam ser distintas — veja `collections list`."
                 )
 
-        return valor
+        return value
 
 
 def read_file(path: Path | None = None) -> dict:
@@ -173,20 +173,20 @@ def read_file(path: Path | None = None) -> dict:
 
 def load(path: Path | None = None, env: dict | None = None) -> Config:
     env = os.environ if env is None else env
-    arquivo = read_file(path)
-    valores = {}
-    for campo, aliases in ENV_ALIASES.items():
-        valor = None
-        for nome in aliases:
-            if env.get(nome):
-                valor = env[nome]
+    file_path = read_file(path)
+    values = {}
+    for field, aliases in ENV_ALIASES.items():
+        value = None
+        for name in aliases:
+            if env.get(name):
+                value = env[name]
                 break
-        if valor is None:
-            valor = arquivo.get(campo, DEFAULTS[campo])
-        valores[campo] = valor
-    valores["vector_size"] = int(valores["vector_size"])
+        if value is None:
+            value = file_path.get(field, DEFAULTS[field])
+        values[field] = value
+    values["vector_size"] = int(values["vector_size"])
 
-    return Config(**valores)
+    return Config(**values)
 
 
 #: Campos que NUNCA vão para o arquivo de config. Segredo em arquivo de texto é
@@ -198,22 +198,22 @@ SECRET_FIELDS = frozenset({"qdrant_api_key", "api_key"})
 def save(patch: dict, path: Path | None = None) -> Path:
     """Grava só o que mudou, preservando o resto do arquivo."""
     p = path or DEFAULT_CONFIG_PATH
-    validos = {f.name for f in fields(Config)}
-    desconhecidos = set(patch) - validos
-    if desconhecidos:
-        raise ConfigError(f"chave(s) desconhecida(s): {', '.join(sorted(desconhecidos))}")
-    segredos = set(patch) & SECRET_FIELDS
-    if segredos:
-        nomes = ", ".join(sorted(segredos))
-        canonicos = ", ".join(ENV_ALIASES[s][0] for s in sorted(segredos))
+    valid_keys = {f.name for f in fields(Config)}
+    unknown_keys = set(patch) - valid_keys
+    if unknown_keys:
+        raise ConfigError(f"chave(s) desconhecida(s): {', '.join(sorted(unknown_keys))}")
+    secret_keys = set(patch) & SECRET_FIELDS
+    if secret_keys:
+        names = ", ".join(sorted(secret_keys))
+        canonical = ", ".join(ENV_ALIASES[s][0] for s in sorted(secret_keys))
         raise ConfigError(
-            f"{nomes} não vai para o arquivo de config — segredo em texto puro entra "
-            f"em backup e em sincronização de dotfiles. Exporte no ambiente: {canonicos}"
+            f"{names} não vai para o arquivo de config — segredo em texto puro entra "
+            f"em backup e em sincronização de dotfiles. Exporte no ambiente: {canonical}"
         )
-    atual = read_file(p)
-    atual.update(patch)
+    current = read_file(p)
+    current.update(patch)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(atual, indent=2, ensure_ascii=False) + "\n")
+    p.write_text(json.dumps(current, indent=2, ensure_ascii=False) + "\n")
 
     return p
 
@@ -221,8 +221,8 @@ def save(patch: dict, path: Path | None = None) -> Path:
 def redacted(cfg: Config) -> dict:
     """Config para exibição, sem vazar segredo em log ou terminal."""
     d = asdict(cfg)
-    for chave in ("qdrant_api_key", "api_key"):
-        if d[chave]:
-            d[chave] = f"<{len(d[chave])} chars>"
+    for key in ("qdrant_api_key", "api_key"):
+        if d[key]:
+            d[key] = f"<{len(d[key])} chars>"
 
     return d

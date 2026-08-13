@@ -16,12 +16,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
 from core.docs import DEFAULT_TTL_SECONDS, DocIndex
 from core.memory import MemoryStore
-from tests.fakes import FakeEmbedder, FakeEmbedderQueQuebra, FakeVectorStore
+from tests.fakes import FakeEmbedder, FailingFakeEmbedder, FakeVectorStore
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"))
 
 
-def carrega_hook():
+def load_hook():
     """Importa o hook com STATE_DIR apontando para um diretório temporário."""
     import importlib
     tmp = tempfile.mkdtemp()
@@ -36,50 +36,50 @@ class TestPodaDoEstado(unittest.TestCase):
     """Entrada em `seen` só importa enquanto pode evitar uma reinjeção."""
 
     def test_descarta_o_que_nao_muda_mais_decisao(self):
-        recall, _ = carrega_hook()
-        estado = {"round": 20, "seen": {"recente": 19, "no_limite": 12, "velha": 5}}
-        podadas = recall.poda_estado(estado)
-        self.assertEqual(podadas, 2, "12 e 5 estão a >= 8 rodadas de distância")
-        self.assertEqual(set(estado["seen"]), {"recente"})
+        recall, _ = load_hook()
+        state = {"round": 20, "seen": {"recente": 19, "no_limite": 12, "velha": 5}}
+        pruned = recall.prune_state(state)
+        self.assertEqual(pruned, 2, "12 e 5 estão a >= 8 rodadas de distância")
+        self.assertEqual(set(state["seen"]), {"recente"})
 
     def test_mantem_o_que_ainda_evita_reinjecao(self):
-        recall, _ = carrega_hook()
-        estado = {"round": 10, "seen": {"a": 9, "b": 4}}  # 10-4 = 6 < 8
-        recall.poda_estado(estado)
-        self.assertEqual(set(estado["seen"]), {"a", "b"})
+        recall, _ = load_hook()
+        state = {"round": 10, "seen": {"a": 9, "b": 4}}  # 10-4 = 6 < 8
+        recall.prune_state(state)
+        self.assertEqual(set(state["seen"]), {"a", "b"})
 
     def test_valor_corrompido_e_descartado(self):
-        recall, _ = carrega_hook()
-        estado = {"round": 5, "seen": {"ok": 4, "lixo": "nao é numero", "nulo": None}}
-        recall.poda_estado(estado)
-        self.assertEqual(set(estado["seen"]), {"ok"})
+        recall, _ = load_hook()
+        state = {"round": 5, "seen": {"ok": 4, "lixo": "nao é numero", "nulo": None}}
+        recall.prune_state(state)
+        self.assertEqual(set(state["seen"]), {"ok"})
 
     def test_estado_vazio_nao_quebra(self):
-        recall, _ = carrega_hook()
-        self.assertEqual(recall.poda_estado({}), 0)
+        recall, _ = load_hook()
+        self.assertEqual(recall.prune_state({}), 0)
 
 
 class TestLimpezaDeSessoesMortas(unittest.TestCase):
     def test_remove_antigo_e_preserva_recente(self):
-        recall, dir_ = carrega_hook()
-        antigo = dir_ / "recall-morta.json"
-        recente = dir_ / "recall-viva.json"
-        for f in (antigo, recente):
+        recall, dir_ = load_hook()
+        previous = dir_ / "recall-morta.json"
+        recent = dir_ / "recall-viva.json"
+        for f in (previous, recent):
             f.write_text(json.dumps({"round": 1, "seen": {}}))
-        velho = time.time() - 10 * 86400
-        os.utime(antigo, (velho, velho))
-        removidos = recall.limpa_sessoes_mortas(dias=7.0)
-        self.assertEqual(removidos, 1)
-        self.assertFalse(antigo.exists())
-        self.assertTrue(recente.exists())
+        old_ts = time.time() - 10 * 86400
+        os.utime(previous, (old_ts, old_ts))
+        removed = recall.purge_dead_sessions(days=7.0)
+        self.assertEqual(removed, 1)
+        self.assertFalse(previous.exists())
+        self.assertTrue(recent.exists())
 
     def test_nao_toca_o_log(self):
-        recall, dir_ = carrega_hook()
+        recall, dir_ = load_hook()
         log = dir_ / "recall.log"
         log.write_text("linha")
-        velho = time.time() - 30 * 86400
-        os.utime(log, (velho, velho))
-        recall.limpa_sessoes_mortas(dias=1.0)
+        old_ts = time.time() - 30 * 86400
+        os.utime(log, (old_ts, old_ts))
+        recall.purge_dead_sessions(days=1.0)
         self.assertTrue(log.exists(), "o log não é estado de sessão")
 
 
@@ -87,7 +87,7 @@ class TestEnvTolerante(unittest.TestCase):
     """Lido no carregamento do módulo, ANTES do catch-all — não pode explodir."""
 
     def test_numero_valido(self):
-        recall, _ = carrega_hook()
+        recall, _ = load_hook()
         os.environ["QCTX_TESTE_NUM"] = "42"
         try:
             self.assertEqual(recall.env_num("QCTX_TESTE_NUM", "X", "7", int), 42)
@@ -95,59 +95,59 @@ class TestEnvTolerante(unittest.TestCase):
             del os.environ["QCTX_TESTE_NUM"]
 
     def test_numero_invalido_cai_no_default_e_registra(self):
-        recall, _ = carrega_hook()
-        recall._pendencias.clear()
+        recall, _ = load_hook()
+        recall._pending_notes.clear()
         os.environ["QCTX_TESTE_NUM"] = "14k"
         try:
             self.assertEqual(recall.env_num("QCTX_TESTE_NUM", "X", "14000", int), 14000)
-            self.assertTrue(any("14k" in p for p in recall._pendencias),
+            self.assertTrue(any("14k" in p for p in recall._pending_notes),
                             "o valor ruim tem de ficar registrado, não sumir")
         finally:
             del os.environ["QCTX_TESTE_NUM"]
 
     def test_ausente_usa_default(self):
-        recall, _ = carrega_hook()
+        recall, _ = load_hook()
         self.assertAlmostEqual(recall.env_num("QCTX_NAO_EXISTE", "NEM_ESTE", "0.58"), 0.58)
 
 
 class TestTtlPreservadoNoRefresh(unittest.TestCase):
-    def _idx(self):
+    def _index(self):
         q, emb = FakeVectorStore(), FakeEmbedder()
 
         return DocIndex(q, emb, None, "tmp", "lib", emb.dim), q
 
-    def _arquivo(self, texto="conteudo do documento\n"):
+    def _write_file(self, text="conteudo do documento\n"):
         d = tempfile.mkdtemp()
-        caminho = os.path.join(d, "doc.md")
-        Path(caminho).write_text(texto)
+        path = os.path.join(d, "doc.md")
+        Path(path).write_text(text)
 
-        return caminho
+        return path
 
     def test_duracao_e_guardada_na_indexacao(self):
-        idx, q = self._idx()
-        idx.index_file(self._arquivo(), ttl_seconds=3600)
-        md = list(q.colecoes["tmp"]["pontos"].values())[0]["payload"]["metadata"]
+        idx, q = self._index()
+        idx.index_file(self._write_file(), ttl_seconds=3600)
+        md = list(q.collections["tmp"]["pontos"].values())[0]["payload"]["metadata"]
         self.assertEqual(md["ttl_seconds"], 3600)
 
     def test_refresh_reusa_a_duracao_em_vez_do_default(self):
-        idx, q = self._idx()
-        caminho = self._arquivo()
-        idx.index_file(caminho, ttl_seconds=3600)          # o usuário pediu 1 hora
-        Path(caminho).write_text("conteudo alterado maior\n")  # força reindexação
+        idx, q = self._index()
+        path = self._write_file()
+        idx.index_file(path, ttl_seconds=3600)          # o usuário pediu 1 hora
+        Path(path).write_text("conteudo alterado maior\n")  # força reindexação
         idx.refresh(scope="tmp")
-        p = list(q.colecoes["tmp"]["pontos"].values())[0]["payload"]
-        restante = p["expires_at_ts"] - time.time()
-        self.assertLess(restante, 3700, "não pode virar o default de 24h")
-        self.assertGreater(restante, 3500)
-        self.assertNotAlmostEqual(restante, DEFAULT_TTL_SECONDS, delta=100)
+        p = list(q.collections["tmp"]["pontos"].values())[0]["payload"]
+        remaining = p["expires_at_ts"] - time.time()
+        self.assertLess(remaining, 3700, "não pode virar o default de 24h")
+        self.assertGreater(remaining, 3500)
+        self.assertNotAlmostEqual(remaining, DEFAULT_TTL_SECONDS, delta=100)
 
     def test_biblioteca_nao_ganha_validade_no_refresh(self):
-        idx, q = self._idx()
-        caminho = self._arquivo()
-        idx.keep_file(caminho)
-        Path(caminho).write_text("outro conteudo bem diferente\n")
+        idx, q = self._index()
+        path = self._write_file()
+        idx.keep_file(path)
+        Path(path).write_text("outro conteudo bem diferente\n")
         idx.refresh(scope="library")
-        for p in q.colecoes["lib"]["pontos"].values():
+        for p in q.collections["lib"]["pontos"].values():
             self.assertNotIn("expires_at_ts", p["payload"])
 
 
@@ -162,39 +162,39 @@ class TestUpdateSemReembedding(unittest.TestCase):
     def test_metadata_sozinha_nao_chama_embedding(self):
         s, q, emb = self._store()
         mid = s.store("texto que não muda")["id"]
-        chamadas_antes = len(emb.chamadas)
+        calls_before = len(emb.calls)
         res = s.update(mid, metadata={"type": "feedback"})
         self.assertFalse(res["reembedded"])
-        self.assertEqual(len(emb.chamadas), chamadas_antes, "vetor idêntico não se recalcula")
+        self.assertEqual(len(emb.calls), calls_before, "vetor idêntico não se recalcula")
         self.assertEqual(q.get_point("mem", mid)["payload"]["metadata"], {"type": "feedback"})
 
     def test_texto_igual_ao_anterior_tambem_nao_chama(self):
         s, _, emb = self._store()
         mid = s.store("mesmo texto")["id"]
-        antes = len(emb.chamadas)
+        antes = len(emb.calls)
         res = s.update(mid, information="mesmo texto")
         self.assertFalse(res["reembedded"])
-        self.assertEqual(len(emb.chamadas), antes)
+        self.assertEqual(len(emb.calls), antes)
 
     def test_texto_diferente_chama(self):
         s, _, emb = self._store()
         mid = s.store("original")["id"]
-        antes = len(emb.chamadas)
+        antes = len(emb.calls)
         res = s.update(mid, information="mudou de verdade")
         self.assertTrue(res["reembedded"])
-        self.assertEqual(len(emb.chamadas), antes + 1)
+        self.assertEqual(len(emb.calls), antes + 1)
 
     def test_corrigir_etiqueta_FUNCIONA_com_embedding_fora(self):
         """O motivo real do conserto: a operação não depende de embedding, então não
         pode ficar impossível quando o endpoint está fora."""
         q = FakeVectorStore()
         q.ensure_collection("mem", 8)
-        vivo = MemoryStore(q, FakeEmbedder(), None, "mem", 8)
-        mid = vivo.store("fato gravado enquanto o endpoint funcionava")["id"]
+        live_store = MemoryStore(q, FakeEmbedder(), None, "mem", 8)
+        mid = live_store.store("fato gravado enquanto o endpoint funcionava")["id"]
 
-        quebrado = MemoryStore(q, FakeEmbedderQueQuebra(core.EmbeddingError("fora do ar")),
+        broken_store = MemoryStore(q, FailingFakeEmbedder(core.EmbeddingError("fora do ar")),
                                None, "mem", 8)
-        res = quebrado.update(mid, metadata={"type": "corrigido"})
+        res = broken_store.update(mid, metadata={"type": "corrigido"})
         self.assertEqual(res["status"], "updated")
         self.assertEqual(q.get_point("mem", mid)["payload"]["metadata"], {"type": "corrigido"})
 

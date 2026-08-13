@@ -25,10 +25,10 @@ class HttpError(CoreError):
     tentativa e erro.
     """
 
-    def __init__(self, mensagem: str, status: int | None = None, corpo: str = ""):
-        super().__init__(mensagem)
+    def __init__(self, message: str, status: int | None = None, body: str = ""):
+        super().__init__(message)
         self.status = status
-        self.corpo = corpo
+        self.body = body
 
 
 def request_json(url: str, *, method: str = "GET", body=None, headers: dict | None = None,
@@ -36,18 +36,18 @@ def request_json(url: str, *, method: str = "GET", body=None, headers: dict | No
     """Faz a requisição e decodifica JSON. Corpo vazio devolve `{}`."""
     dados = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=dados, method=method)
-    for chave, valor in (headers or {}).items():
-        req.add_header(chave, valor)
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
     req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            cru = resp.read()
+            raw = resp.read()
 
-            return json.loads(cru.decode()) if cru else {}
+            return json.loads(raw.decode()) if raw else {}
     except urllib.error.HTTPError as exc:
-        corpo = exc.read().decode(errors="replace")[:400]
-        raise HttpError(f"HTTP {exc.code} em {method} {url}: {corpo}",
-                        status=exc.code, corpo=corpo) from exc
+        body = exc.read().decode(errors="replace")[:400]
+        raise HttpError(f"HTTP {exc.code} em {method} {url}: {body}",
+                        status=exc.code, body=body) from exc
     except urllib.error.URLError as exc:
         raise HttpError(f"não alcancei {url}: {exc.reason}") from exc
     except json.JSONDecodeError as exc:

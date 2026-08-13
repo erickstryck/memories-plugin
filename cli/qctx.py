@@ -37,7 +37,7 @@ import core.setup  # noqa: E402
 from core.config import ConfigError  # noqa: E402
 
 
-def saida(obj, como_json: bool) -> None:
+def output(obj, como_json: bool) -> None:
     if como_json:
         print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
 
@@ -52,40 +52,40 @@ RUIDO = ("ws-",)
 
 def cmd_collections(args, cfg):
     q = core.build_qdrant(cfg)
-    nomes = q.list_collections()
-    configuradas = {cfg.memory_collection, cfg.docs_collection, cfg.library_collection}
+    names = q.list_collections()
+    configured = {cfg.memory_collection, cfg.docs_collection, cfg.library_collection}
     if not args.all:
-        visiveis = [n for n in nomes
-                    if n in configuradas or not n.startswith(RUIDO)]
+        visible = [n for n in names
+                    if n in configured or not n.startswith(RUIDO)]
     else:
-        visiveis = list(nomes)
-    escondidas = len(nomes) - len(visiveis)
-    linhas = []
-    for nome in visiveis:
-        info = q.collection_info(nome) or {}
+        visible = list(names)
+    hidden = len(names) - len(visible)
+    lines = []
+    for name in visible:
+        info = q.collection_info(name) or {}
         size = info.get("size")
-        linhas.append({
-            "collection": nome,
+        lines.append({
+            "collection": name,
             "points": info.get("points"),
             "dim": size,
             "compativel": size == cfg.vector_size,
-            "uso": ("memória" if nome == cfg.memory_collection
-                    else "temporário" if nome == cfg.docs_collection
-                    else "biblioteca" if nome == cfg.library_collection else ""),
+            "uso": ("memória" if name == cfg.memory_collection
+                    else "temporário" if name == cfg.docs_collection
+                    else "biblioteca" if name == cfg.library_collection else ""),
         })
-    linhas.sort(key=lambda l: (not l["uso"], -(l["points"] or 0)))
+    lines.sort(key=lambda l: (not l["uso"], -(l["points"] or 0)))
     if args.json:
-        saida({"vector_size": cfg.vector_size, "hidden": escondidas,
-               "collections": linhas}, True)
+        output({"vector_size": cfg.vector_size, "hidden": hidden,
+               "collections": lines}, True)
 
         return
     print(f"modelo {cfg.embed_model} usa dimensão {cfg.vector_size}\n")
     print(f"{'coleção':34} {'pontos':>8} {'dim':>6}  {'':10} uso")
-    for l in linhas:
-        marca = "ok" if l["compativel"] else "INCOMPAT."
-        print(f"{l['collection']:34} {str(l['points']):>8} {str(l['dim']):>6}  {marca:10} {l['uso']}")
-    if escondidas:
-        print(f"\n({escondidas} coleção(ões) de outro sistema escondidas — `--all` mostra)")
+    for l in lines:
+        mark = "ok" if l["compativel"] else "INCOMPAT."
+        print(f"{l['collection']:34} {str(l['points']):>8} {str(l['dim']):>6}  {mark:10} {l['uso']}")
+    if hidden:
+        print(f"\n({hidden} coleção(ões) de outro sistema escondidas — `--all` mostra)")
     print("\nescolher: qctx config set memory-collection|docs-collection|"
           "library-collection <nome>")
 
@@ -93,7 +93,7 @@ def cmd_collections(args, cfg):
 def cmd_config_show(args, cfg):
     dados = core.redacted(cfg)
     if args.json:
-        saida(dados, True)
+        output(dados, True)
 
         return
     for k, v in dados.items():
@@ -101,20 +101,20 @@ def cmd_config_show(args, cfg):
 
 
 def cmd_config_set(args, cfg):
-    chave = args.key.replace("-", "_")
-    valor = int(args.value) if chave == "vector_size" else args.value
-    caminho = core.save({chave: valor})
-    print(f"{chave} = {valor}  (gravado em {caminho})")
+    key = args.key.replace("-", "_")
+    value = int(args.value) if key == "vector_size" else args.value
+    path = core.save({key: value})
+    print(f"{key} = {value}  (gravado em {path})")
     # Aviso, não erro: a coleção pode ser criada depois. Mas dimensão incompatível
     # é armadilha silenciosa, então vale gritar na hora da escolha.
-    if chave in ("memory_collection", "docs_collection", "library_collection"):
+    if key in ("memory_collection", "docs_collection", "library_collection"):
         try:
             q = core.build_qdrant(core.load())
-            info = q.collection_info(valor)
+            info = q.collection_info(value)
             if info is None:
-                print(f"  (a coleção {valor!r} ainda não existe — será criada no primeiro uso)")
+                print(f"  (a coleção {value!r} ainda não existe — será criada no primeiro uso)")
             elif info.get("size") not in (None, cfg.vector_size):
-                print(f"  ATENÇÃO: {valor!r} tem dimensão {info['size']}, "
+                print(f"  ATENÇÃO: {value!r} tem dimensão {info['size']}, "
                       f"incompatível com o modelo ({cfg.vector_size})")
         except Exception:
             pass
@@ -127,15 +127,15 @@ def cmd_config_detect(args, cfg):
         print(f"{cfg.embed_model} devolve {dim} dimensões — config já está correta")
 
         return
-    caminho = core.save({"vector_size": dim})
+    path = core.save({"vector_size": dim})
     print(f"{cfg.embed_model} devolve {dim} dimensões (config dizia {cfg.vector_size})")
-    print(f"  vector_size atualizado em {caminho}")
+    print(f"  vector_size atualizado em {path}")
     print("  confira com `qctx collections list` quais coleções seguem compatíveis")
 
 
 def _render_check(c: dict) -> None:
-    marca = "ok  " if c["ok"] else ("aviso" if c["aviso"] else "FALHA")
-    print(f"  [{marca:5}] {c['nome']:20} {c['detalhe']}")
+    mark = "ok  " if c["ok"] else ("aviso" if c["aviso"] else "FALHA")
+    print(f"  [{mark:5}] {c['nome']:20} {c['detalhe']}")
     if not c["ok"] and c["correcao"]:
         print(f"            -> {c['correcao']}")
 
@@ -150,7 +150,7 @@ def cmd_setup(args, cfg):
     """
     rel = core.setup.diagnose(cfg)
     if args.json:
-        saida(rel, True)
+        output(rel, True)
 
         return
 
@@ -176,20 +176,20 @@ def cmd_setup(args, cfg):
         return
 
     print("\n--- configurar (Enter mantém o valor atual) ---")
-    opcoes = [s_["collection"] for s_ in rel["sugestoes_memoria"]]
-    for i, s_ in enumerate(opcoes, 1):
+    options = [s_["collection"] for s_ in rel["sugestoes_memoria"]]
+    for i, s_ in enumerate(options, 1):
         print(f"  {i}. {s_}")
-    escolha = core.setup.escolher_por_indice(
-        opcoes, input(f"coleção de memória [{cfg.memory_collection or 'nenhuma'}]: "))
+    escolha = core.setup.choose_by_index(
+        options, input(f"coleção de memória [{cfg.memory_collection or 'nenhuma'}]: "))
     if escolha:
         core.save({"memory_collection": escolha})
         print(f"  memory_collection = {escolha}")
-    for chave, atual in (("docs_collection", cfg.docs_collection),
+    for key, current in (("docs_collection", cfg.docs_collection),
                          ("library_collection", cfg.library_collection)):
-        resp = input(f"{chave} [{atual}]: ").strip()
+        resp = input(f"{key} [{current}]: ").strip()
         if resp:
-            core.save({chave: resp})
-            print(f"  {chave} = {resp}")
+            core.save({key: resp})
+            print(f"  {key} = {resp}")
     if rel["dim_detectada"] and rel["dim_detectada"] != cfg.vector_size:
         core.save({"vector_size": rel["dim_detectada"]})
         print(f"  vector_size = {rel['dim_detectada']} (detectado do endpoint)")
@@ -204,23 +204,23 @@ def _meta_de_args(args) -> dict:
     meta = {}
     if getattr(args, "json_meta", None):
         meta.update(json.loads(args.json_meta))
-    for campo in ("type", "project", "area"):
-        valor = getattr(args, campo, None)
-        if valor:
-            meta[campo] = valor
+    for field in ("type", "project", "area"):
+        value = getattr(args, field, None)
+        if value:
+            meta[field] = value
 
     return meta
 
 
 def cmd_memory_store(args, cfg):
-    saida_ = core.build_memory(cfg).store(args.text, _meta_de_args(args))
-    print(json.dumps(saida_, ensure_ascii=False) if args.json else f"gravado id={saida_['id']}")
+    result = core.build_memory(cfg).store(args.text, _meta_de_args(args))
+    print(json.dumps(result, ensure_ascii=False) if args.json else f"gravado id={result['id']}")
 
 
 def cmd_memory_find(args, cfg):
     hits = core.build_memory(cfg).find(args.query, args.limit)
     if args.json:
-        saida(hits, True)
+        output(hits, True)
 
         return
     if not hits:
@@ -234,32 +234,32 @@ def cmd_memory_find(args, cfg):
 
 def cmd_memory_recall(args, cfg):
     store = core.build_memory(cfg)
-    politica = core.Policy(dense_floor=args.dense_floor, strict_floor=args.strict_floor,
+    policy = core.Policy(dense_floor=args.dense_floor, strict_floor=args.strict_floor,
                            min_score=args.min_score, max_results=args.limit,
                            veto=True, order_matters=False)
-    hits, fora = store.recall([args.query], politica, args.top_k)
+    hits, outcome = store.recall([args.query], policy, args.top_k)
     if args.json:
-        saida({"info": fora.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
+        output({"info": outcome.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
 
         return
-    if fora.scale_converted:
+    if outcome.scale_converted:
         print("(escala logit detectada e normalizada para sigmoid)")
     if not hits:
-        print(f"nada acima do corte (melhor denso {fora.best_dense:.3f})")
+        print(f"nada acima do corte (melhor denso {outcome.best_dense:.3f})")
 
         return
     for i, h in enumerate(hits[:args.limit], 1):
-        print(f"{i}. {h.origem} {h.score:.3f} (denso {h.dense_score:.3f})  {h.id}")
+        print(f"{i}. {h.origin} {h.score:.3f} (denso {h.dense_score:.3f})  {h.id}")
         print(f"   {json.dumps(h.metadata, ensure_ascii=False)}")
         print(f"   {h.document[:600]}\n")
 
 
 def cmd_memory_get(args, cfg):
-    saida(core.build_memory(cfg).get(args.id), True)
+    output(core.build_memory(cfg).get(args.id), True)
 
 
 def cmd_memory_delete(args, cfg):
-    saida(core.build_memory(cfg).delete(args.id), True)
+    output(core.build_memory(cfg).delete(args.id), True)
 
 
 def cmd_memory_update(args, cfg):
@@ -276,11 +276,11 @@ def cmd_memory_store_many(args, cfg):
     método foi escrito para dar.
     """
     bruto = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
-    itens = json.loads(bruto)
-    if not isinstance(itens, list):
+    items = json.loads(bruto)
+    if not isinstance(items, list):
         print("erro: esperado um array JSON de {information, metadata?}", file=sys.stderr)
         raise SystemExit(2)
-    res = core.build_memory(cfg).store_many(itens)
+    res = core.build_memory(cfg).store_many(items)
     print(json.dumps(res, ensure_ascii=False) if args.json
           else f"gravados {res['count']}: {' '.join(res['ids'])}")
 
@@ -291,7 +291,7 @@ def cmd_memory_search_collections(args, cfg):
                                   args.query, args.collections or None,
                                   cfg.vector_size, limit=args.limit)
     if args.json:
-        saida(res, True)
+        output(res, True)
 
         return
     if res["skipped"]:
@@ -303,14 +303,14 @@ def cmd_memory_search_collections(args, cfg):
 
 
 def cmd_memory_list(args, cfg):
-    saida(core.build_memory(cfg).list_page(args.limit), True)
+    output(core.build_memory(cfg).list_page(args.limit), True)
 
 
 # ---- docs ------------------------------------------------------------------
 
-def _relata_escrita(res: dict, como_json: bool) -> None:
+def _report_write(res: dict, como_json: bool) -> None:
     if como_json:
-        saida(res, True)
+        output(res, True)
 
         return
     rotulo = "guardado na biblioteca" if res["scope"] == "library" else "indexado (temporário)"
@@ -326,57 +326,57 @@ def _relata_escrita(res: dict, como_json: bool) -> None:
 
 def cmd_docs_index(args, cfg):
     res = core.build_docs(cfg).index_file(args.path, core.parse_ttl(args.ttl), args.doc_id)
-    _relata_escrita(res, args.json)
+    _report_write(res, args.json)
 
 
 def cmd_docs_keep(args, cfg):
     res = core.build_docs(cfg).keep_file(args.path, args.doc_id)
-    _relata_escrita(res, args.json)
+    _report_write(res, args.json)
 
 
 def cmd_docs_refresh(args, cfg):
-    relatorio = core.build_docs(cfg).refresh(args.scope)
+    report = core.build_docs(cfg).refresh(args.scope)
     if args.json:
-        saida(relatorio, True)
+        output(report, True)
 
         return
-    if not relatorio:
+    if not report:
         print("nada para verificar")
 
         return
-    for r in relatorio:
-        marca = {"ok": "  ", "reindexado": "->", "ausente": "!!"}.get(r["acao"], "  ")
-        print(f"{marca} {r['acao']:11} {r['doc_id']}  {r['path']}")
+    for r in report:
+        mark = {"ok": "  ", "reindexado": "->", "ausente": "!!"}.get(r["acao"], "  ")
+        print(f"{mark} {r['acao']:11} {r['doc_id']}  {r['path']}")
 
 
 def cmd_docs_search(args, cfg):
-    hits, fora = core.build_docs(cfg).search(args.query, args.scope, args.doc_id, args.limit)
+    hits, outcome = core.build_docs(cfg).search(args.query, args.scope, args.doc_id, args.limit)
     if args.json:
-        saida({"info": fora.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
+        output({"info": outcome.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
 
         return
     if not hits:
         print("nenhum trecho relevante (ou o índice expirou — veja `qctx docs list`)")
 
         return
-    if fora.collapsed:
-        print(f"(re-rank colapsou — melhor CE {fora.best_rerank:.4f}, típico de pergunta "
+    if outcome.collapsed:
+        print(f"(re-rank colapsou — melhor CE {outcome.best_rerank:.4f}, típico de pergunta "
               f"e documento em línguas diferentes; usando ordem DENSA, que é indiferente "
               f"à língua)\n")
-    elif not fora.reranked:
-        print(f"(aviso: re-rank não rodou — {fora.rerank_error}; ordem DENSA, "
+    elif not outcome.reranked:
+        print(f"(aviso: re-rank não rodou — {outcome.rerank_error}; ordem DENSA, "
               f"não é veredito)\n")
     for i, h in enumerate(hits, 1):
-        aviso = f"  ⚠ {h.stale}" if h.stale else ""
+        warning = f"  ⚠ {h.stale}" if h.stale else ""
         etiqueta = "biblioteca" if h.scope == "library" else "temporário"
         if h.mode == "locator":
             print(f"{i}. [{etiqueta}] {h.path}:{h.start_line}-{h.end_line}  "
-                  f"({h.origem} {h.score:.3f}){aviso}")
+                  f"({h.origin} {h.score:.3f}){warning}")
             print(f"   {' '.join(h.text.split())[:300]}…")
             print(f"   -> ler linhas {h.start_line}-{h.end_line} do arquivo para o conteúdo atual")
         else:
             print(f"{i}. [{etiqueta}] {os.path.basename(h.path)}  "
-                  f"({h.origem} {h.score:.3f}){aviso}")
+                  f"({h.origin} {h.score:.3f}){warning}")
             print(f"   [FOTO de {h.indexed_at} — origem não relegível por região]")
             print("   " + h.text.replace("\n", "\n   "))
         print()
@@ -385,7 +385,7 @@ def cmd_docs_search(args, cfg):
 def cmd_docs_list(args, cfg):
     docs = core.build_docs(cfg).list_docs(args.scope)
     if args.json:
-        saida(docs, True)
+        output(docs, True)
 
         return
     if not docs:
@@ -406,8 +406,8 @@ def cmd_docs_list(args, cfg):
 def cmd_docs_drop(args, cfg):
     idx = core.build_docs(cfg)
     if args.purge_tmp:
-        nome = idx.drop_all_tmp()
-        print(f"coleção temporária {nome} removida (recriada no próximo uso); "
+        name = idx.drop_all_tmp()
+        print(f"coleção temporária {name} removida (recriada no próximo uso); "
               f"biblioteca intacta")
 
         return
@@ -425,7 +425,7 @@ def cmd_docs_drop(args, cfg):
 
 # ---- parser ----------------------------------------------------------------
 
-def _propaga_json(parser: argparse.ArgumentParser) -> None:
+def _propagate_json(parser: argparse.ArgumentParser) -> None:
     """Acrescenta `--json` a TODO subcomando, recursivamente.
 
     Quem digita põe a flag no fim (`qctx memory find x --json`) e a documentação
@@ -434,11 +434,11 @@ def _propaga_json(parser: argparse.ArgumentParser) -> None:
     montados resolve num lugar só; repetir a definição em vinte `add_parser` seria a
     mesma duplicação que este projeto passou a tarde eliminando.
     """
-    for acao in parser._subparsers._group_actions if parser._subparsers else []:
-        for sub in getattr(acao, "choices", {}).values():
+    for action in parser._subparsers._group_actions if parser._subparsers else []:
+        for sub in getattr(action, "choices", {}).values():
             if not any(o == "--json" for a in sub._actions for o in a.option_strings):
                 sub.add_argument("--json", action="store_true", help="saída em JSON")
-            _propaga_json(sub)
+            _propagate_json(sub)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -562,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expired", action="store_true")
     p.set_defaults(fn=cmd_docs_drop)
 
-    _propaga_json(ap)
+    _propagate_json(ap)
 
     return ap
 

@@ -41,10 +41,10 @@ def cfg_leitura():
 def cfg_escrita():
     """Config apontando a memória para a coleção descartável."""
     base = core.load()
-    campos = {f: getattr(base, f) for f in base.__dataclass_fields__}
-    campos["memory_collection"] = COLECAO_DESCARTAVEL
+    fields = {f: getattr(base, f) for f in base.__dataclass_fields__}
+    fields["memory_collection"] = COLECAO_DESCARTAVEL
 
-    return core.Config(**campos)
+    return core.Config(**fields)
 
 
 @unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
@@ -76,8 +76,8 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
         mid = pagina["memories"][0]["id"]
         m = self.store.get(mid)
         self.assertNotEqual(m.get("status"), "not_found")
-        for chave in ("document", "metadata", "created_at", "updated_at"):
-            self.assertIn(chave, m, f"{chave} tem de existir no payload legado")
+        for key in ("document", "metadata", "created_at", "updated_at"):
+            self.assertIn(key, m, f"{key} tem de existir no payload legado")
 
     def test_find_devolve_score_decrescente(self):
         hits = self.store.find("memória de longo prazo", limit=5)
@@ -86,16 +86,16 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
         self.assertEqual(scores, sorted(scores, reverse=True))
 
     def test_recall_de_dois_portoes_no_acervo_real(self):
-        politica = core.Policy(0.45, 0.58, 0.10, 6, veto=True)
-        hits, fora = self.store.recall(["memória de longo prazo e recall automático"],
-                                       politica, top_k=20)
-        self.assertGreater(fora.candidates, 0)
+        policy = core.Policy(0.45, 0.58, 0.10, 6, veto=True)
+        hits, outcome = self.store.recall(["memória de longo prazo e recall automático"],
+                                       policy, top_k=20)
+        self.assertGreater(outcome.candidates, 0)
         for h in hits:
             self.assertIsInstance(h, core.Recalled)
-            self.assertIn(h.origem, ("CE", "denso"))
+            self.assertIn(h.origin, ("CE", "denso"))
             self.assertGreaterEqual(h.dense_score, 0.0)
-        if fora.by_rerank:
-            self.assertTrue(all(h.origem == "CE" for h in hits))
+        if outcome.by_rerank:
+            self.assertTrue(all(h.origin == "CE" for h in hits))
 
     def test_recall_com_multiplos_angulos_funde_por_id(self):
         hits, _ = self.store.recall(
@@ -153,16 +153,16 @@ class TestCrudEmColecaoDescartavel(unittest.TestCase):
 
     def test_payload_gravado_tem_as_mesmas_chaves_do_mcp_antigo(self):
         criado = self.store.store("fato para conferir a forma do payload", {"type": "test"})
-        ponto = self.q.get_point(COLECAO_DESCARTAVEL, criado["id"])
-        self.assertEqual(set(ponto["payload"].keys()), CHAVES_PAYLOAD,
+        point = self.q.get_point(COLECAO_DESCARTAVEL, criado["id"])
+        self.assertEqual(set(point["payload"].keys()), CHAVES_PAYLOAD,
                          "o payload tem de ser idêntico ao do servidor anterior, "
                          "senão o acervo existente fica inconsistente")
         self.store.delete(criado["id"])
 
     def test_store_many_e_tudo_ou_nada(self):
-        itens = [{"information": f"fato de lote número {i}", "metadata": {"type": "test"}}
+        items = [{"information": f"fato de lote número {i}", "metadata": {"type": "test"}}
                  for i in range(5)]
-        res = self.store.store_many(itens)
+        res = self.store.store_many(items)
         self.assertEqual(res["count"], 5)
         for mid in res["ids"]:
             self.assertNotEqual(self.store.get(mid).get("status"), "not_found")
@@ -187,20 +187,20 @@ class TestDocsIntegracao(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         base = core.load()
-        campos = {f: getattr(base, f) for f in base.__dataclass_fields__}
-        campos["docs_collection"] = f"{COLECAO_DESCARTAVEL}_tmp"
-        campos["library_collection"] = f"{COLECAO_DESCARTAVEL}_lib"
-        cls.cfg = core.Config(**campos)
+        fields = {f: getattr(base, f) for f in base.__dataclass_fields__}
+        fields["docs_collection"] = f"{COLECAO_DESCARTAVEL}_tmp"
+        fields["library_collection"] = f"{COLECAO_DESCARTAVEL}_lib"
+        cls.cfg = core.Config(**fields)
         cls.idx = core.build_docs(cls.cfg)
         cls.q = core.build_qdrant(cls.cfg)
         cls.tmpdir = tempfile.TemporaryDirectory()
-        cls.arquivo = Path(cls.tmpdir.name) / "manual.md"
+        cls.file_path = Path(cls.tmpdir.name) / "manual.md"
         # Documento realista: cada seção precisa ser grande o bastante para o
         # fatiamento ter trabalho, senão o teste "acha a seção certa" é vacuidade
         # — com um trecho único, acertar é inevitável.
         recheio = ("Detalhe operacional relevante para esta seção, repetido para dar "
                    "corpo ao documento sem mudar o assunto dela. ")
-        cls.arquivo.write_text("\n".join([
+        cls.file_path.write_text("\n".join([
             "# Autenticação",
             "",
             "Para autenticar, envie o header Authorization com um token Bearer.",
@@ -221,38 +221,38 @@ class TestDocsIntegracao(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for nome in (f"{COLECAO_DESCARTAVEL}_tmp", f"{COLECAO_DESCARTAVEL}_lib"):
+        for name in (f"{COLECAO_DESCARTAVEL}_tmp", f"{COLECAO_DESCARTAVEL}_lib"):
             try:
-                cls.q.delete_collection(nome)
+                cls.q.delete_collection(name)
             except Exception:
                 pass
         cls.tmpdir.cleanup()
 
     def test_index_busca_e_localiza_a_secao_certa(self):
-        res = self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        res = self.idx.index_file(str(self.file_path), ttl_seconds=600)
         self.assertGreater(res["chunks"], 1, "documento com 3 seções longas tem de virar vários trechos")
         self.assertEqual(res["mode"], "locator")
 
         hits, info = self.idx.search("qual o limite de requisições por hora?",
                                      scope="tmp", limit=3)
         self.assertTrue(hits, "deveria achar a seção de limites")
-        texto_do_topo = hits[0].text.lower()
-        self.assertIn("5000", texto_do_topo)
+        top_text = hits[0].text.lower()
+        self.assertIn("5000", top_text)
         self.assertGreater(hits[0].start_line, 0)
         self.assertGreaterEqual(hits[0].end_line, hits[0].start_line)
 
     def test_intervalo_de_linhas_aponta_para_o_conteudo_real(self):
-        self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        self.idx.index_file(str(self.file_path), ttl_seconds=600)
         hits, _ = self.idx.search("como paginar?", scope="tmp", limit=1)
-        linhas = self.arquivo.read_text().splitlines()
-        recorte = "\n".join(linhas[hits[0].start_line - 1:hits[0].end_line])
-        self.assertEqual(recorte.strip("\n"), hits[0].text,
+        lines = self.file_path.read_text().splitlines()
+        slice_text = "\n".join(lines[hits[0].start_line - 1:hits[0].end_line])
+        self.assertEqual(slice_text.strip("\n"), hits[0].text,
                          "o contrato do modo localizador é que essas linhas "
                          "reproduzam exatamente o trecho indexado")
 
     def test_biblioteca_nao_expira_e_temporario_expira(self):
-        self.idx.keep_file(str(self.arquivo))
-        self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        self.idx.keep_file(str(self.file_path))
+        self.idx.index_file(str(self.file_path), ttl_seconds=600)
         docs = {d["scope"]: d for d in self.idx.list_docs("all")}
         self.assertIn("library", docs)
         self.assertIn("tmp", docs)
@@ -260,26 +260,26 @@ class TestDocsIntegracao(unittest.TestCase):
         self.assertIsNotNone(docs["tmp"]["expires_at_ts"])
 
     def test_ttl_vencido_desaparece_da_busca(self):
-        self.idx.index_file(str(self.arquivo), ttl_seconds=-1)  # já nasce vencido
+        self.idx.index_file(str(self.file_path), ttl_seconds=-1)  # já nasce vencido
         hits, _ = self.idx.search("autenticação", scope="tmp", limit=3)
         self.assertEqual(hits, [], "trecho vencido não pode aparecer")
 
     def test_purge_do_temporario_preserva_a_biblioteca(self):
-        self.idx.keep_file(str(self.arquivo))
-        self.idx.index_file(str(self.arquivo), ttl_seconds=600)
+        self.idx.keep_file(str(self.file_path))
+        self.idx.index_file(str(self.file_path), ttl_seconds=600)
         self.idx.drop_all_tmp()
         docs = self.idx.list_docs("all")
-        escopos = {d["scope"] for d in docs}
-        self.assertIn("library", escopos, "a biblioteca TEM de sobreviver ao purge")
-        self.assertNotIn("tmp", escopos)
+        scopes = {d["scope"] for d in docs}
+        self.assertIn("library", scopes, "a biblioteca TEM de sobreviver ao purge")
+        self.assertNotIn("tmp", scopes)
 
     def test_reindexar_substitui_em_vez_de_duplicar(self):
-        primeiro = self.idx.keep_file(str(self.arquivo))
-        segundo = self.idx.keep_file(str(self.arquivo))
-        self.assertEqual(primeiro["doc_id"], segundo["doc_id"])
-        docs = [d for d in self.idx.list_docs("library") if d["doc_id"] == segundo["doc_id"]]
+        first = self.idx.keep_file(str(self.file_path))
+        second = self.idx.keep_file(str(self.file_path))
+        self.assertEqual(first["doc_id"], second["doc_id"])
+        docs = [d for d in self.idx.list_docs("library") if d["doc_id"] == second["doc_id"]]
         self.assertEqual(len(docs), 1)
-        self.assertEqual(docs[0]["chunks"], segundo["chunks"],
+        self.assertEqual(docs[0]["chunks"], second["chunks"],
                          "não pode sobrar trecho da indexação anterior")
 
 

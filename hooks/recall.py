@@ -43,11 +43,11 @@ from core import query  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 
 
-def env(nome: str, legado: str, default: str) -> str:
-    return os.environ.get(nome) or os.environ.get(legado) or default
+def env(name: str, legado: str, default: str) -> str:
+    return os.environ.get(name) or os.environ.get(legado) or default
 
 
-def env_num(nome: str, legado: str, default: str, tipo=float):
+def env_num(name: str, legado: str, default: str, kind=float):
     """Lê número do ambiente SEM derrubar o processo se estiver mal escrito.
 
     Isto é lido no carregamento do módulo, ou seja ANTES do catch-all do `main` — um
@@ -55,18 +55,18 @@ def env_num(nome: str, legado: str, default: str, tipo=float):
     usuário perdia o recall recebendo um traceback em vez do aviso de
     indisponibilidade. Valor inválido cai no default e fica registrado no log.
     """
-    cru = env(nome, legado, default)
+    raw = env(name, legado, default)
     try:
-        return tipo(cru)
+        return kind(raw)
     except (TypeError, ValueError):
-        _pendencias.append(f"{nome}={cru!r} não é número — usando {default}")
+        _pending_notes.append(f"{name}={raw!r} não é número — usando {default}")
 
-        return tipo(default)
+        return kind(default)
 
 
 #: Avisos coletados antes de o log existir (o log depende de STATE_DIR, que depende
 #: de env). Despejados na primeira escrita de log.
-_pendencias: list[str] = []
+_pending_notes: list[str] = []
 
 
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
@@ -98,43 +98,43 @@ CORRIJA a memória, não deixe as duas conviverem.
 def log(msg: str) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        while _pendencias:
-            _escreve_log(f"config: {_pendencias.pop(0)}")
+        while _pending_notes:
+            _write_log(f"config: {_pending_notes.pop(0)}")
         if LOG.exists() and LOG.stat().st_size > LOG_MAX_BYTES:
             LOG.write_text(LOG.read_text(errors="replace")[-LOG_MAX_BYTES // 2:])
-        _escreve_log(msg)
+        _write_log(msg)
     except Exception:
         pass
 
 
-def _escreve_log(msg: str) -> None:
+def _write_log(msg: str) -> None:
     with LOG.open("a") as fh:
         fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
 
-def extrai_prompt(data: dict) -> str:
+def extract_prompt(data: dict) -> str:
     """O nome do campo varia por versão de host; aceita os candidatos conhecidos."""
-    for chave in ("prompt", "user_prompt", "userPrompt", "message", "current_prompt", "text"):
-        v = data.get(chave)
+    for key in ("prompt", "user_prompt", "userPrompt", "message", "current_prompt", "text"):
+        v = data.get(key)
         if isinstance(v, str) and v.strip():
             return v.strip()
 
     return ""
 
 
-def emitir(contexto: str) -> None:
+def emit(context: str) -> None:
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": contexto,
+            "additionalContext": context,
         }
     }))
 
 
-def bloco_indisponivel(estagio: str, erro: str) -> str:
+def unavailable_block(estagio: str, error: str) -> str:
     return (
         "[recall automático — INDISPONÍVEL neste prompt]\n"
-        f"A busca na memória de longo prazo NÃO foi executada: {estagio} falhou ({erro}). "
+        f"A busca na memória de longo prazo NÃO foi executada: {estagio} falhou ({error}). "
         "Isto NÃO significa que não há precedente — significa que o acervo não foi "
         "consultado. Não afirme que algo é inédito ou sem histórico apoiado neste turno. "
         "Se o assunto puder ter precedente, tente uma busca explícita; se ela também "
@@ -143,34 +143,34 @@ def bloco_indisponivel(estagio: str, erro: str) -> str:
     )
 
 
-def _nota_degradacao(fora) -> str:
+def _degradation_note(outcome) -> str:
     """Uma linha dizendo que o julgamento foi PARCIAL, quando foi.
 
     Sem isto o bloco afirmava "não há precedente registrado sobre este assunto" mesmo
     quando o segundo estágio havia falhado — ou seja apresentava resultado de um
     pipeline degradado com a confiança de um pipeline completo.
     """
-    partes = []
-    if fora.rerank_error:
-        partes.append(f"o re-rank NÃO rodou ({fora.rerank_error[:80]}), então a ordem é "
+    parts = []
+    if outcome.rerank_error:
+        parts.append(f"o re-rank NÃO rodou ({outcome.rerank_error[:80]}), então a ordem é "
                       "densa e o corte estrito foi reaplicado")
-    elif fora.collapsed:
-        partes.append(f"o re-rank colapsou (melhor {fora.best_rerank:.4f}), típico de "
+    elif outcome.collapsed:
+        parts.append(f"o re-rank colapsou (melhor {outcome.best_rerank:.4f}), típico de "
                       "pergunta e memória em línguas diferentes; ordem densa")
     # `dropped` só é notícia quando as vagas NÃO foram preenchidas: os descartados
     # são a cauda de menor score denso, cortada por desenho, e avisar sobre eles em
     # todo prompt é gritar lobo — o aviso perde o valor justamente quando importa.
-    if fora.dropped and len(fora.scored) < MAX_MEMORIES:
-        partes.append(f"{fora.dropped} candidato(s) não foram julgados por teto de pares, "
+    if outcome.dropped and len(outcome.scored) < MAX_MEMORIES:
+        parts.append(f"{outcome.dropped} candidato(s) não foram julgados por teto de pares, "
                       f"e as vagas não foram preenchidas — pode haver memória relevante fora")
-    if not partes:
+    if not parts:
         return ""
 
-    return "ATENÇÃO, julgamento parcial: " + "; ".join(partes) + ".\n"
+    return "ATENÇÃO, julgamento parcial: " + "; ".join(parts) + ".\n"
 
 
-def bloco_vazio(fora, n_angulos: int) -> str:
-    if fora.rerank_error or fora.collapsed:
+def empty_block(outcome, n_angles: int) -> str:
+    if outcome.rerank_error or outcome.collapsed:
         # Com o julgamento degradado, "não há precedente" seria uma afirmação que
         # os dados não sustentam.
         conclusao = ("O acervo foi consultado mas o julgamento foi PARCIAL, então isto "
@@ -183,103 +183,103 @@ def bloco_vazio(fora, n_angulos: int) -> str:
 
     return (
         "[recall automático — memória de longo prazo]\n"
-        f"Busca executada a partir do seu prompt ({n_angulos} ângulos semânticos): nenhuma "
-        f"memória acima do corte de relevância (melhor score {fora.best_dense:.3f}).\n"
-        + _nota_degradacao(fora) + conclusao +
+        f"Busca executada a partir do seu prompt ({n_angles} ângulos semânticos): nenhuma "
+        f"memória acima do corte de relevância (melhor score {outcome.best_dense:.3f}).\n"
+        + _degradation_note(outcome) + conclusao +
         " E considere se a resposta que você vai produzir merece ser salva no fim."
     )
 
 
-def linha_meta(meta: dict) -> str:
-    campos = [meta.get(k) for k in ("type", "project", "connector", "area", "date")]
+def meta_line(meta: dict) -> str:
+    fields = [meta.get(k) for k in ("type", "project", "connector", "area", "date")]
 
-    return " · ".join(str(c) for c in campos if c)
+    return " · ".join(str(c) for c in fields if c)
 
 
-def monta_bloco(cheias: list, ponteiros: list, n_angulos: int, fora) -> str:
-    partes = [
+def build_block(full_hits: list, pointers: list, n_angles: int, outcome) -> str:
+    parts = [
         "[recall automático — memória de longo prazo]",
-        f"Esta busca foi EXECUTADA pelo harness a partir do seu prompt ({n_angulos} ângulos "
+        f"Esta busca foi EXECUTADA pelo harness a partir do seu prompt ({n_angles} ângulos "
         "semânticos, fundidos pelo maior score). O que segue é conhecimento de sessões "
         "anteriores — leia ANTES de responder, investigar ou propor design.",
     ]
-    nota = _nota_degradacao(fora)
+    nota = _degradation_note(outcome)
     if nota:
-        partes.append(nota.rstrip())
-    partes += ["", INSTRUCOES, ""]
-    for i, h in enumerate(cheias, 1):
+        parts.append(nota.rstrip())
+    parts += ["", INSTRUCOES, ""]
+    for i, h in enumerate(full_hits, 1):
         doc = h.document
-        corte = ""
+        truncated = ""
         if len(doc) > MAX_PER_MEM:
             doc = doc[:MAX_PER_MEM]
-            corte = (f"\n[… truncado em {MAX_PER_MEM} chars — recupere o restante pelo "
+            truncated = (f"\n[… truncado em {MAX_PER_MEM} chars — recupere o restante pelo "
                      f"id {h.id} se o assunto for central]")
-        cabecalho = f"── {i}. {h.origem} {h.score:.3f}"
-        meta = linha_meta(h.metadata)
+        header = f"── {i}. {h.origin} {h.score:.3f}"
+        meta = meta_line(h.metadata)
         if meta:
-            cabecalho += f" · {meta}"
-        cabecalho += f" · id {h.id}"
-        partes += [cabecalho, doc + corte, ""]
+            header += f" · {meta}"
+        header += f" · id {h.id}"
+        parts += [header, doc + truncated, ""]
 
-    if ponteiros:
-        partes.append("Também relevantes, não incluídas por inteiro (já injetadas nesta "
+    if pointers:
+        parts.append("Também relevantes, não incluídas por inteiro (já injetadas nesta "
                       "sessão, ou fora do orçamento de contexto deste turno — recupere "
                       "pelo id se precisar do texto):")
-        for p in ponteiros:
-            resumo = re.sub(r"\s+", " ", p.document)[:110]
-            partes.append(f"- {p.id} (score {p.score:.3f}) — {resumo}…")
-        partes.append("")
+        for p in pointers:
+            summary = re.sub(r"\s+", " ", p.document)[:110]
+            parts.append(f"- {p.id} (score {p.score:.3f}) — {summary}…")
+        parts.append("")
 
-    return "\n".join(partes).rstrip()
+    return "\n".join(parts).rstrip()
 
 
-def carrega_estado(path: Path) -> dict:
+def load_state(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
     except Exception:
         return {"round": 0, "seen": {}}
 
 
-def poda_estado(estado: dict) -> int:
+def prune_state(state: dict) -> int:
     """Descarta de `seen` o que já não muda decisão nenhuma.
 
     Uma entrada só importa enquanto `round - visto < REINJECT_AFTER`: passado isso a
     memória volta INTEIRA de qualquer forma, então guardá-la é só ocupar espaço. Sem
     poda, uma sessão longa acumula uma entrada por memória por rodada para sempre.
     """
-    rodada = int(estado.get("round", 0))
-    vistas = estado.get("seen", {})
-    velhas = [mid for mid, r in vistas.items()
-              if not isinstance(r, int) or (rodada - r) >= REINJECT_AFTER]
+    round_no = int(state.get("round", 0))
+    seen_map = state.get("seen", {})
+    velhas = [mid for mid, r in seen_map.items()
+              if not isinstance(r, int) or (round_no - r) >= REINJECT_AFTER]
     for mid in velhas:
-        vistas.pop(mid, None)
+        seen_map.pop(mid, None)
 
     return len(velhas)
 
 
-def limpa_sessoes_mortas(dias: float = 7.0) -> int:
+def purge_dead_sessions(days: float = 7.0) -> int:
     """Apaga estado de sessões que não são tocadas há dias.
 
     Cada sessão cria um arquivo e nada os removia: o diretório crescia para sempre.
     Sessão parada há uma semana não vai voltar, e se voltar o custo é começar com
     `seen` vazio — o pior efeito é uma memória reinjetada uma vez.
     """
-    limite = time.time() - dias * 86400
-    apagados = 0
+    cutoff = time.time() - days * 86400
+    deleted = 0
     try:
-        for arquivo in STATE_DIR.glob("recall-*.json"):
-            if arquivo.stat().st_mtime < limite:
-                arquivo.unlink()
-                apagados += 1
+        for file_path in STATE_DIR.glob("recall-*.json"):
+            if file_path.stat().st_mtime < cutoff:
+                file_path.unlink()
+                deleted += 1
     except Exception:
         pass
 
-    return apagados
+    return deleted
 
 
-def salva_estado(path: Path, estado: dict) -> None:
+def save_state(path: Path, state: dict) -> None:
     try:
-        path.write_text(json.dumps(estado))
+        path.write_text(json.dumps(state))
     except Exception:
         pass
 
@@ -295,18 +295,18 @@ def main() -> None:
     lista, e é a falha mais comum.
     """
     try:
-        _executa()
+        _run()
     except SystemExit:
         raise
     except BaseException as exc:  # noqa: BLE001 — ver docstring
         try:
             log(f"falha inesperada ({type(exc).__name__}: {exc})")
-            emitir(bloco_indisponivel("o hook", type(exc).__name__))
+            emit(unavailable_block("o hook", type(exc).__name__))
         except Exception:
             pass  # se nem isso funcionar, silêncio é o único caminho restante
 
 
-def _executa() -> None:
+def _run() -> None:
     if os.environ.get("QCTX_RECALL_DISABLED") == "1" or os.environ.get("RECALL_DISABLED") == "1":
         return
 
@@ -315,14 +315,14 @@ def _executa() -> None:
     except Exception:
         data = {}
 
-    prompt = extrai_prompt(data)
+    prompt = extract_prompt(data)
     if not prompt:
         log(f"sem prompt no payload; chaves={sorted(data.keys())}")
         return
 
-    motivo = query.motivo_para_pular(prompt)
-    if motivo:
-        log(f"skip ({motivo}): {prompt[:60]!r}")
+    reason = query.skip_reason(prompt)
+    if reason:
+        log(f"skip ({reason}): {prompt[:60]!r}")
         return
 
     try:
@@ -340,7 +340,7 @@ def _executa() -> None:
     # em vez de dentro do núcleo, é o que faz o `recall` aplicar sozinho o corte
     # estrito: sem o segundo portão, o piso permissivo não tem quem o limpe.
     breaker = Breaker(STATE_DIR / "rerank-breaker", BREAKER_SECONDS)
-    ocioso = breaker.aberto()
+    ocioso = breaker.is_open()
     if ocioso is not None:
         store.reranker = None
         log(f"re-rank em disjuntor: falhou há {ocioso:.0f}s — corte denso estrito")
@@ -348,76 +348,76 @@ def _executa() -> None:
     top_k = int(env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20" if store.reranker else "8"))
     # Política da MEMÓRIA: o cross-encoder VETA (falso positivo polui o contexto do
     # agente) e a ordem entre os aprovados é cosmética, porque todos são injetados.
-    politica = core.Policy(dense_floor=DENSE_FLOOR, strict_floor=STRICT_FLOOR,
+    policy = core.Policy(dense_floor=DENSE_FLOOR, strict_floor=STRICT_FLOOR,
                            min_score=MIN_SCORE, max_results=MAX_MEMORIES,
                            veto=True, order_matters=False)
-    angulos = query.angulos(prompt)
+    angles = query.angles(prompt)
     t0 = time.monotonic()
     try:
-        hits, fora = store.recall(angulos, politica, top_k)
+        hits, outcome = store.recall(angles, policy, top_k)
     except core.EmbeddingError as exc:
         log(f"embeddings falhou ({exc}) — sem recall neste prompt")
-        emitir(bloco_indisponivel("embeddings", type(exc).__name__))
+        emit(unavailable_block("embeddings", type(exc).__name__))
         return
     except core.QdrantError as exc:
         log(f"Qdrant falhou ({exc}) — sem recall neste prompt")
-        emitir(bloco_indisponivel("Qdrant", type(exc).__name__))
+        emit(unavailable_block("Qdrant", type(exc).__name__))
         return
-    decorrido = time.monotonic() - t0
+    elapsed = time.monotonic() - t0
 
-    if fora.rerank_error:
-        breaker.armar()
-        log(f"re-rank falhou ({fora.rerank_error}) — disjuntor armado por {BREAKER_SECONDS:.0f}s")
-    elif fora.by_rerank:
-        breaker.limpar()
+    if outcome.rerank_error:
+        breaker.arm()
+        log(f"re-rank falhou ({outcome.rerank_error}) — disjuntor armado por {BREAKER_SECONDS:.0f}s")
+    elif outcome.by_rerank:
+        breaker.clear()
 
-    sessao = "".join(c if c.isalnum() or c in "-_" else "_"
+    session = "".join(c if c.isalnum() or c in "-_" else "_"
                      for c in str(data.get("session_id") or "default"))
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    caminho_estado = STATE_DIR / f"recall-{sessao}.json"
-    estado = carrega_estado(caminho_estado)
-    estado["round"] = int(estado.get("round", 0)) + 1
-    vistas = estado.setdefault("seen", {})
-    rodada = estado["round"]
+    state_path = STATE_DIR / f"recall-{session}.json"
+    state = load_state(state_path)
+    state["round"] = int(state.get("round", 0)) + 1
+    seen_map = state.setdefault("seen", {})
+    round_no = state["round"]
 
     if not hits:
-        poda_estado(estado)
-        log(f"round {rodada}: 0 acima do corte (melhor {fora.best_dense:.3f}) "
-            f"em {decorrido:.1f}s | {len(angulos)} ângulos | {prompt[:60]!r}")
-        salva_estado(caminho_estado, estado)
-        emitir(bloco_vazio(fora, len(angulos)))
+        prune_state(state)
+        log(f"round {round_no}: 0 acima do corte (melhor {outcome.best_dense:.3f}) "
+            f"em {elapsed:.1f}s | {len(angles)} ângulos | {prompt[:60]!r}")
+        save_state(state_path, state)
+        emit(empty_block(outcome, len(angles)))
         return
 
     # Orça contexto. Memória já injetada há pouco volta como ponteiro de uma linha:
     # repetir o documento inteiro a cada prompt do mesmo assunto infla o contexto
     # sem acrescentar nada, e a vaga liberada revela MAIS do acervo.
-    cheias, ponteiros = [], []
-    orcamento = MAX_CHARS
+    full_hits, pointers = [], []
+    budget = MAX_CHARS
     for h in hits:
-        ultima = vistas.get(h.id)
-        recente = isinstance(ultima, int) and (rodada - ultima) < REINJECT_AFTER
-        custo = min(len(h.document), MAX_PER_MEM)
-        if recente or len(cheias) >= MAX_MEMORIES or custo > orcamento:
-            ponteiros.append(h)
+        ultima = seen_map.get(h.id)
+        recent = isinstance(ultima, int) and (round_no - ultima) < REINJECT_AFTER
+        cost = min(len(h.document), MAX_PER_MEM)
+        if recent or len(full_hits) >= MAX_MEMORIES or cost > budget:
+            pointers.append(h)
             continue
-        cheias.append(h)
-        vistas[h.id] = rodada
-        orcamento -= custo
+        full_hits.append(h)
+        seen_map[h.id] = round_no
+        budget -= cost
 
-    podadas = poda_estado(estado)
-    salva_estado(caminho_estado, estado)
-    if rodada % 20 == 0:
+    pruned = prune_state(state)
+    save_state(state_path, state)
+    if round_no % 20 == 0:
         # Varredura barata e ocasional: uma vez a cada 20 rodadas basta para o
         # diretório não crescer, e não paga `glob` em todo prompt.
-        mortas = limpa_sessoes_mortas()
+        mortas = purge_dead_sessions()
         if mortas:
             log(f"limpeza: {mortas} estado(s) de sessão morta removido(s)")
-    escala = " (escala convertida)" if fora.scale_converted else ""
-    log(f"round {rodada}: {len(cheias)} injetadas + {len(ponteiros)} ponteiros "
-        f"(de {len(hits)} relevantes / {fora.candidates} candidatos) em {decorrido:.1f}s | "
-        f"{len(angulos)} ângulos | CE={fora.by_rerank}{escala} | {prompt[:60]!r}")
+    escala = " (escala convertida)" if outcome.scale_converted else ""
+    log(f"round {round_no}: {len(full_hits)} injetadas + {len(pointers)} ponteiros "
+        f"(de {len(hits)} relevantes / {outcome.candidates} candidatos) em {elapsed:.1f}s | "
+        f"{len(angles)} ângulos | CE={outcome.by_rerank}{escala} | {prompt[:60]!r}")
 
-    emitir(monta_bloco(cheias, ponteiros, len(angulos), fora))
+    emit(build_block(full_hits, pointers, len(angles), outcome))
 
 
 if __name__ == "__main__":

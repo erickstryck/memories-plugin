@@ -55,10 +55,10 @@ STOPWORDS = {
 }
 
 SO_SLASH = re.compile(r"/[\w:-]+\Z")
-PALAVRA = re.compile(r"[\wÀ-ÿ_./-]{2,}")
+WORD_RE = re.compile(r"[\wÀ-ÿ_./-]{2,}")
 
 
-def _so_confirmacao(texto: str) -> bool:
+def _only_confirmation(text: str) -> bool:
     """True quando TODAS as palavras do texto são de confirmação.
 
     Palavra por palavra, e não o texto inteiro comparado ao conjunto: comparar o
@@ -67,46 +67,46 @@ def _so_confirmacao(texto: str) -> bool:
     está justamente nas confirmações de várias palavras — "ok, pode continuar",
     "beleza, segue" — que passam do tamanho mínimo e não têm assunto nenhum.
     """
-    palavras = [p for p in PALAVRA.findall(texto.lower()) if p.strip()]
-    if not palavras:
+    words = [p for p in WORD_RE.findall(text.lower()) if p.strip()]
+    if not words:
         return False
 
-    return all(p in TRIVIAIS for p in palavras)
+    return all(p in TRIVIAIS for p in words)
 
 
-def motivo_para_pular(prompt: str) -> str | None:
+def skip_reason(prompt: str) -> str | None:
     """Devolve o motivo de não buscar, ou None quando vale buscar."""
-    texto = (prompt or "").strip()
-    if SO_SLASH.fullmatch(texto):
+    text = (prompt or "").strip()
+    if SO_SLASH.fullmatch(text):
         return "comando sem argumento"
-    if _so_confirmacao(texto):
+    if _only_confirmation(text):
         return "prompt trivial"
-    if len(texto) < MIN_CHARS:
+    if len(text) < MIN_CHARS:
         return "prompt curto"
 
     return None
 
 
-def palavras_conteudo(texto: str) -> str:
-    vistas, saida = set(), []
-    for p in PALAVRA.findall(texto.lower()):
-        if p in STOPWORDS or p in vistas:
+def content_words(text: str) -> str:
+    seen_map, output = set(), []
+    for p in WORD_RE.findall(text.lower()):
+        if p in STOPWORDS or p in seen_map:
             continue
-        vistas.add(p)
-        saida.append(p)
+        seen_map.add(p)
+        output.append(p)
 
-    return " ".join(saida)
+    return " ".join(output)
 
 
-def frase_mais_longa(texto: str) -> str:
-    partes = [p.strip() for p in re.split(r"[.!?\n;]+", texto) if p.strip()]
-    if len(partes) < 2:
+def longest_sentence(text: str) -> str:
+    parts = [p.strip() for p in re.split(r"[.!?\n;]+", text) if p.strip()]
+    if len(parts) < 2:
         return ""
 
-    return max(partes, key=len)
+    return max(parts, key=len)
 
 
-def angulos(prompt: str, limite_chars: int = 1500) -> list[str]:
+def angles(prompt: str, limite_chars: int = 1500) -> list[str]:
     """Três ângulos do mesmo texto, para uma única chamada de embeddings.
 
     A busca é semântica, e ângulos diferentes do mesmo prompt pescam registros
@@ -117,12 +117,12 @@ def angulos(prompt: str, limite_chars: int = 1500) -> list[str]:
     é gasto sem retorno.
     """
     base = (prompt or "")[:limite_chars]
-    saida = [base]
-    conteudo = palavras_conteudo(base)
-    if conteudo and conteudo != base.lower():
-        saida.append(conteudo)
-    longa = frase_mais_longa(base)
+    output = [base]
+    content = content_words(base)
+    if content and content != base.lower():
+        output.append(content)
+    longa = longest_sentence(base)
     if longa and longa != base and len(longa) > 20:
-        saida.append(longa)
+        output.append(longa)
 
-    return saida
+    return output

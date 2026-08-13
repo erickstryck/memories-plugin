@@ -23,7 +23,7 @@ class Embedder:
         self.api_key = api_key
         self.timeout = timeout
 
-    def embed(self, textos: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """Vetores na mesma ordem dos textos.
 
         Ordena por `index` mesmo que o contrato prometa ordem: já vi servidor
@@ -31,13 +31,13 @@ class Embedder:
         nenhum erro visível. Resposta incompleta LEVANTA em vez de devolver menos —
         gravar metade de um lote é o pior estado possível para um acervo.
         """
-        if not textos:
+        if not texts:
             return []
-        saida: list[list[float]] = []
-        for i in range(0, len(textos), EMBED_BATCH):
-            lote = textos[i:i + EMBED_BATCH]
+        output: list[list[float]] = []
+        for i in range(0, len(texts), EMBED_BATCH):
+            batch = texts[i:i + EMBED_BATCH]
             try:
-                res = post_json(self.url, {"model": self.model, "input": lote},
+                res = post_json(self.url, {"model": self.model, "input": batch},
                                 headers=bearer(self.api_key), timeout=self.timeout)
             except HttpError as exc:
                 # Traduz para o erro do domínio: quem chama fala de embedding, não
@@ -45,19 +45,19 @@ class Embedder:
                 # conhecer a camada de baixo.
                 raise EmbeddingError(str(exc)) from exc
             data = res.get("data")
-            if not isinstance(data, list) or len(data) != len(lote):
+            if not isinstance(data, list) or len(data) != len(batch):
                 quantos = len(data) if isinstance(data, list) else "?"
                 raise EmbeddingError(
-                    f"endpoint devolveu {quantos} vetores para {len(lote)} textos — "
+                    f"endpoint devolveu {quantos} vetores para {len(batch)} textos — "
                     f"resposta incompleta, nada foi gravado"
                 )
             for d in sorted(data, key=lambda x: x.get("index", 0)):
-                saida.append(d["embedding"])
+                output.append(d["embedding"])
 
-        return saida
+        return output
 
-    def embed_one(self, texto: str) -> list[float]:
-        return self.embed([texto])[0]
+    def embed_one(self, text: str) -> list[float]:
+        return self.embed([text])[0]
 
     def detect_dimension(self) -> int:
         """Pergunta ao endpoint quantas dimensões o modelo devolve.

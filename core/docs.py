@@ -52,7 +52,7 @@ class DocsError(CoreError):
 @dataclass
 class Hit:
     score: float
-    origem: str          # "CE" quando o cross-encoder julgou, "denso" quando não
+    origin: str          # "CE" quando o cross-encoder julgou, "denso" quando não
     scope: str           # tmp | library
     path: str
     start_line: int
@@ -77,10 +77,10 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
 
-def doc_id_for(caminho: str) -> str:
+def doc_id_for(path: str) -> str:
     """Id derivado do caminho absoluto, para que reindexar o mesmo arquivo
     SUBSTITUA o índice anterior em vez de acumular duas versões competindo."""
-    return hashlib.sha1(os.path.abspath(caminho).encode()).hexdigest()[:12]
+    return hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:12]
 
 
 def _point_id(doc_id: str, ix: int) -> int:
@@ -114,17 +114,17 @@ def source_changed(path: str, src_mtime, src_size) -> str | None:
     return None
 
 
-def _read_source(caminho: str) -> tuple[str, os.stat_result, str]:
-    caminho = os.path.abspath(os.path.expanduser(caminho))
-    if not os.path.isfile(caminho):
-        raise DocsError(f"não é um arquivo: {caminho}")
-    st = os.stat(caminho)
-    with open(caminho, encoding="utf-8", errors="replace") as fh:
-        conteudo = fh.read()
-    if is_probably_binary(conteudo[:8192]):
+def _read_source(path: str) -> tuple[str, os.stat_result, str]:
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        raise DocsError(f"não é um arquivo: {path}")
+    st = os.stat(path)
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+    if is_probably_binary(content[:8192]):
         raise DocsError("arquivo parece binário — converta para texto antes de indexar")
 
-    return caminho, st, conteudo
+    return path, st, content
 
 
 class DocIndex:
@@ -145,11 +145,11 @@ class DocIndex:
         return self.collections[scope]
 
     def ensure(self, scope: str) -> None:
-        nome = self._collection(scope)
-        if self.q.ensure_collection(nome, self.vector_size):
-            self.q.ensure_payload_index(nome, "doc_id", "keyword")
+        name = self._collection(scope)
+        if self.q.ensure_collection(name, self.vector_size):
+            self.q.ensure_payload_index(name, "doc_id", "keyword")
             if scope == "tmp":
-                self.q.ensure_payload_index(nome, "expires_at_ts", "float")
+                self.q.ensure_payload_index(name, "expires_at_ts", "float")
 
     def sweep(self) -> None:
         """Apaga o que venceu — só no temporário. A biblioteca nunca é varrida."""
@@ -161,26 +161,26 @@ class DocIndex:
 
     # ---- indexação ---------------------------------------------------------
 
-    def index_file(self, caminho: str, ttl_seconds: float = DEFAULT_TTL_SECONDS,
+    def index_file(self, path: str, ttl_seconds: float = DEFAULT_TTL_SECONDS,
                    doc_id: str | None = None) -> dict:
         """Indexa como TEMPORÁRIO, com TTL."""
-        return self._write(caminho, "tmp", ttl_seconds, doc_id)
+        return self._write(path, "tmp", ttl_seconds, doc_id)
 
-    def keep_file(self, caminho: str, doc_id: str | None = None) -> dict:
+    def keep_file(self, path: str, doc_id: str | None = None) -> dict:
         """Guarda na BIBLIOTECA, sem expiração."""
-        return self._write(caminho, "library", None, doc_id)
+        return self._write(path, "library", None, doc_id)
 
-    def _write(self, caminho: str, scope: str, ttl_seconds: float | None,
+    def _write(self, path: str, scope: str, ttl_seconds: float | None,
                doc_id: str | None) -> dict:
-        caminho, st, conteudo = _read_source(caminho)
-        trechos = chunk_text(conteudo)
-        if not trechos:
+        path, st, content = _read_source(path)
+        chunks = chunk_text(content)
+        if not chunks:
             raise DocsError("nada indexável (arquivo vazio ou só espaço em branco)")
 
-        doc_id = doc_id or doc_id_for(caminho)
-        modo = mode_for_suffix(os.path.splitext(caminho)[1])
-        agora = time.time()
-        nome = self._collection(scope)
+        doc_id = doc_id or doc_id_for(path)
+        mode = mode_for_suffix(os.path.splitext(path)[1])
+        now_ts = time.time()
+        name = self._collection(scope)
 
         self.ensure(scope)
         if scope == "tmp":
@@ -189,41 +189,41 @@ class DocIndex:
         # busca mistura trechos de dois estados do mesmo arquivo.
         self.drop(doc_id, scope)
 
-        vetores = self.embedder.embed([t.text for t in trechos])
-        pontos = []
-        for ix, (trecho, vetor) in enumerate(zip(trechos, vetores)):
+        vectors = self.embedder.embed([t.text for t in chunks])
+        points = []
+        for ix, (chunk, vector) in enumerate(zip(chunks, vectors)):
             payload = {
-                "document": trecho.text,
+                "document": chunk.text,
                 "doc_id": doc_id,
                 "metadata": {
-                    "path": caminho,
-                    "start_line": trecho.start_line,
-                    "end_line": trecho.end_line,
-                    "mode": modo,
+                    "path": path,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "mode": mode,
                     "scope": scope,
                     "chunk_ix": ix,
-                    "n_chunks": len(trechos),
-                    "indexed_at": _iso(agora),
+                    "n_chunks": len(chunks),
+                    "indexed_at": _iso(now_ts),
                     "src_mtime": round(st.st_mtime, 3),
                     "src_size": st.st_size,
                 },
             }
             if ttl_seconds is not None:
-                expira = agora + ttl_seconds
-                payload["expires_at_ts"] = expira
-                payload["metadata"]["expires_at"] = _iso(expira)
+                expires_at = now_ts + ttl_seconds
+                payload["expires_at_ts"] = expires_at
+                payload["metadata"]["expires_at"] = _iso(expires_at)
                 # Guarda a DURAÇÃO, não só o instante: sem ela o `refresh` não tem
                 # como saber que você pediu 1 hora e reindexava com o padrão de 24h,
                 # esticando em silêncio o prazo que você mesmo escolheu.
                 payload["metadata"]["ttl_seconds"] = ttl_seconds
-            pontos.append({"id": _point_id(doc_id, ix), "vector": vetor, "payload": payload})
-        self.q.upsert(nome, pontos)
+            points.append({"id": _point_id(doc_id, ix), "vector": vector, "payload": payload})
+        self.q.upsert(name, points)
 
         return {
-            "doc_id": doc_id, "path": caminho, "scope": scope, "collection": nome,
-            "chunks": len(trechos), "lines": conteudo.count("\n") + 1,
-            "chars": len(conteudo), "mode": modo,
-            "expires_at": _iso(agora + ttl_seconds) if ttl_seconds is not None else None,
+            "doc_id": doc_id, "path": path, "scope": scope, "collection": name,
+            "chunks": len(chunks), "lines": content.count("\n") + 1,
+            "chars": len(content), "mode": mode,
+            "expires_at": _iso(now_ts + ttl_seconds) if ttl_seconds is not None else None,
         }
 
     def refresh(self, scope: str = "library") -> list[dict]:
@@ -233,27 +233,27 @@ class DocIndex:
         arquivo mudou em outubro devolve trecho que não existe mais. O aviso em
         cada hit alerta; isto conserta.
         """
-        relatorio = []
+        report = []
         for doc in self.list_docs(scope):
-            caminho = doc["path"]
-            motivo = source_changed(caminho, doc.get("src_mtime"), doc.get("src_size"))
-            if motivo == "arquivo não existe mais":
-                relatorio.append({"doc_id": doc["doc_id"], "path": caminho, "acao": "ausente"})
+            path = doc["path"]
+            reason = source_changed(path, doc.get("src_mtime"), doc.get("src_size"))
+            if reason == "arquivo não existe mais":
+                report.append({"doc_id": doc["doc_id"], "path": path, "acao": "ausente"})
                 continue
-            if motivo is None:
-                relatorio.append({"doc_id": doc["doc_id"], "path": caminho, "acao": "ok"})
+            if reason is None:
+                report.append({"doc_id": doc["doc_id"], "path": path, "acao": "ok"})
                 continue
             if scope == "library":
-                res = self.keep_file(caminho, doc["doc_id"])
+                res = self.keep_file(path, doc["doc_id"])
             else:
                 # Reusa a duração original. Cair no default aqui ignoraria o prazo
                 # que o usuário pediu na indexação.
-                res = self.index_file(caminho, doc.get("ttl_seconds") or DEFAULT_TTL_SECONDS,
+                res = self.index_file(path, doc.get("ttl_seconds") or DEFAULT_TTL_SECONDS,
                                       doc["doc_id"])
-            relatorio.append({"doc_id": doc["doc_id"], "path": caminho,
+            report.append({"doc_id": doc["doc_id"], "path": path,
                               "acao": "reindexado", "chunks": res["chunks"]})
 
-        return relatorio
+        return report
 
     # ---- busca -------------------------------------------------------------
 
@@ -274,7 +274,7 @@ class DocIndex:
         """
         if scope not in SCOPES:
             raise DocsError(f"escopo inválido: {scope!r} (use {', '.join(SCOPES)})")
-        escopos = ("tmp", "library") if scope == "all" else (scope,)
+        scopes = ("tmp", "library") if scope == "all" else (scope,)
 
         # Os dois pisos IGUAIS, de propósito: sem veto, "voltar ao corte estrito"
         # quando o julgamento não acontece tem de ser um no-op. Se fossem diferentes,
@@ -284,46 +284,46 @@ class DocIndex:
             dense_floor=DENSE_FLOOR, strict_floor=DENSE_FLOOR, min_score=min_score,
             max_results=limit, veto=False, detect_collapse=True, order_matters=True,
         )
-        vetor = self.embedder.embed_one(pergunta)
-        candidatos: list[dict] = []
-        for esc in escopos:
-            for bruto in self._busca_escopo(esc, vetor, doc_id):
-                candidatos.append(bruto)
-        candidatos.sort(key=lambda b: -(b.get("score") or 0.0))
+        vector = self.embedder.embed_one(pergunta)
+        candidates: list[dict] = []
+        for esc in scopes:
+            for bruto in self._search_scope(esc, vector, doc_id):
+                candidates.append(bruto)
+        candidates.sort(key=lambda b: -(b.get("score") or 0.0))
 
-        fora = retrieval.two_stage(candidatos, pergunta, self.reranker, policy,
-                                  texto_de=lambda b: b["payload"]["document"])
+        outcome = retrieval.two_stage(candidates, pergunta, self.reranker, policy,
+                                  text_of=lambda b: b["payload"]["document"])
 
-        return [self._to_hit(s.item, s.score, s.origin) for s in fora.scored], fora
+        return [self._to_hit(s.item, s.score, s.origin) for s in outcome.scored], outcome
 
-    def _busca_escopo(self, escopo: str, vetor: list[float],
+    def _search_scope(self, scope: str, vector: list[float],
                       doc_id: str | None) -> list[dict]:
         """Primeiro estágio num acervo. Só o temporário filtra por validade."""
-        self.ensure(escopo)
+        self.ensure(scope)
         must = []
-        if escopo == "tmp":
+        if scope == "tmp":
             self.sweep()
             must.append({"key": "expires_at_ts", "range": {"gt": time.time()}})
         if doc_id:
             must.append({"key": "doc_id", "match": {"value": doc_id}})
-        filtro = {"must": must} if must else None
-        brutos = self.q.search(self._collection(escopo), vetor, DENSE_TOP_K, filtro)
+        filter_ = {"must": must} if must else None
+        brutos = self.q.search(self._collection(scope), vector, DENSE_TOP_K, filter_)
         for b in brutos:
-            b["_scope"] = escopo
+            b["_scope"] = scope
 
         return brutos
 
-    def _to_hit(self, bruto: dict, score: float, origem: str) -> Hit:
+    def _to_hit(self, bruto: dict, score: float, origin: str) -> Hit:
         """Traduz o hit cru + o veredito do pipeline no formato de apresentação."""
         p = bruto.get("payload", {})
         md = p.get("metadata", {})
-        caminho = md.get("path", "?")
-        motivo = source_changed(caminho, md.get("src_mtime"), md.get("src_size"))
-        stale = f"{motivo} ({md.get('indexed_at')})" if motivo else None
+        path = md.get("path", "?")
+        reason = source_changed(path, md.get("src_mtime"), md.get("src_size"))
+        stale = f"{reason} ({md.get('indexed_at')})" if reason else None
 
         return Hit(
-            score=score, origem=origem, scope=bruto.get("_scope", md.get("scope", "?")),
-            path=caminho, start_line=md.get("start_line", 0), end_line=md.get("end_line", 0),
+            score=score, origin=origin, scope=bruto.get("_scope", md.get("scope", "?")),
+            path=path, start_line=md.get("start_line", 0), end_line=md.get("end_line", 0),
             mode=md.get("mode", "snapshot"), text=p.get("document", ""),
             indexed_at=md.get("indexed_at", "?"), stale=stale,
         )
@@ -333,17 +333,17 @@ class DocIndex:
     def list_docs(self, scope: str = "all") -> list[dict]:
         if scope not in SCOPES:
             raise DocsError(f"escopo inválido: {scope!r}")
-        escopos = ("tmp", "library") if scope == "all" else (scope,)
-        agregado: dict[tuple[str, str], dict] = {}
-        for esc in escopos:
+        scopes = ("tmp", "library") if scope == "all" else (scope,)
+        by_scope_doc: dict[tuple[str, str], dict] = {}
+        for esc in scopes:
             self.ensure(esc)
             if esc == "tmp":
                 self.sweep()
-            for ponto in self.q.scroll_all(self._collection(esc)):
-                p = ponto.get("payload", {})
+            for point in self.q.scroll_all(self._collection(esc)):
+                p = point.get("payload", {})
                 md = p.get("metadata", {})
-                chave = (esc, p.get("doc_id", "?"))
-                d = agregado.setdefault(chave, {
+                key = (esc, p.get("doc_id", "?"))
+                d = by_scope_doc.setdefault(key, {
                     "doc_id": p.get("doc_id", "?"), "scope": esc, "chunks": 0,
                     "path": md.get("path", "?"), "mode": md.get("mode", "?"),
                     "indexed_at": md.get("indexed_at", "?"),
@@ -353,11 +353,11 @@ class DocIndex:
                 })
                 d["chunks"] += 1
 
-        return sorted(agregado.values(), key=lambda d: (d["scope"], d["path"]))
+        return sorted(by_scope_doc.values(), key=lambda d: (d["scope"], d["path"]))
 
     def drop(self, doc_id: str, scope: str = "all") -> None:
-        escopos = ("tmp", "library") if scope == "all" else (scope,)
-        for esc in escopos:
+        scopes = ("tmp", "library") if scope == "all" else (scope,)
+        for esc in scopes:
             self.ensure(esc)
             self.q.delete_by_filter(self._collection(esc),
                                     {"must": [{"key": "doc_id", "match": {"value": doc_id}}]})
@@ -368,7 +368,7 @@ class DocIndex:
         Só existe para o temporário. A biblioteca não tem equivalente de propósito:
         acervo permanente se remove documento por documento, com o id na mão.
         """
-        nome = self._collection("tmp")
-        self.q.delete_collection(nome)
+        name = self._collection("tmp")
+        self.q.delete_collection(name)
 
-        return nome
+        return name

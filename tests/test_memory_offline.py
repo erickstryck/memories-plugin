@@ -16,7 +16,7 @@ import core
 from core import retrieval
 from core.docs import DocIndex
 from core.memory import MemoryError_, MemoryStore
-from tests.fakes import (FakeEmbedder, FakeEmbedderQueQuebra, FakeReranker,
+from tests.fakes import (FakeEmbedder, FailingFakeEmbedder, FakeReranker,
                          FakeVectorStore)
 
 #: As quatro chaves que o servidor MCP anterior gravava. Mudar isto torna o acervo
@@ -40,8 +40,8 @@ class TestFormaDoPayload(unittest.TestCase):
     def test_store_grava_exatamente_as_quatro_chaves(self):
         s, q, _ = store()
         r = s.store("um fato", {"type": "reference"})
-        ponto = q.get_point("mem", r["id"])
-        self.assertEqual(set(ponto["payload"]), CHAVES)
+        point = q.get_point("mem", r["id"])
+        self.assertEqual(set(point["payload"]), CHAVES)
 
     def test_store_many_grava_as_mesmas_chaves(self):
         s, q, _ = store()
@@ -76,62 +76,62 @@ class TestFormaDoPayload(unittest.TestCase):
     def test_update_de_id_inexistente_nao_cria(self):
         s, q, _ = store()
         self.assertEqual(s.update("nao-existe", information="x")["status"], "not_found")
-        self.assertEqual(len(q.colecoes["mem"]["pontos"]), 0)
+        self.assertEqual(len(q.collections["mem"]["pontos"]), 0)
 
 
 class TestEscritaRecusada(unittest.TestCase):
     def test_memoria_vazia(self):
         s, _, _ = store()
-        for ruim in ("", "   ", "\n"):
+        for bad in ("", "   ", "\n"):
             with self.assertRaises(MemoryError_):
-                s.store(ruim)
+                s.store(bad)
 
     def test_lote_valida_antes_de_gravar_qualquer_coisa(self):
         s, q, _ = store()
         with self.assertRaises(MemoryError_):
             s.store_many([{"information": "válido"}, {"information": "  "}])
-        self.assertEqual(len(q.colecoes["mem"]["pontos"]), 0,
+        self.assertEqual(len(q.collections["mem"]["pontos"]), 0,
                          "validação tem de ser ANTES de escrever, não durante")
 
     def test_lote_faz_UMA_chamada_de_embedding(self):
         s, _, emb = store()
         s.store_many([{"information": f"fato {i}"} for i in range(5)])
-        self.assertEqual(len(emb.chamadas), 1, "o ganho do lote é uma ida à rede, não N")
+        self.assertEqual(len(emb.calls), 1, "o ganho do lote é uma ida à rede, não N")
 
 
 class TestLeituraNaoCria(unittest.TestCase):
     """Ler não pode CRIAR coleção: com um typo no nome, a busca devolveria zero e o
     consumidor concluiria 'não há precedente' — a afirmação mais perigosa possível."""
 
-    def _sem_colecao(self):
+    def _missing_collection(self):
         q, emb = FakeVectorStore(), FakeEmbedder()
 
         return MemoryStore(q, emb, None, "nao_existe", emb.dim), q
 
     def test_find_falha_alto(self):
-        s, q = self._sem_colecao()
+        s, q = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.find("x")
         self.assertEqual(q.list_collections(), [], "nada pode ter sido criado")
 
     def test_recall_falha_alto(self):
-        s, _ = self._sem_colecao()
+        s, _ = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.recall(["x"], POL, top_k=5)
 
     def test_list_page_falha_alto(self):
-        s, _ = self._sem_colecao()
+        s, _ = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.list_page()
 
     def test_store_PODE_criar(self):
-        s, q = self._sem_colecao()
+        s, q = self._missing_collection()
         s.store("primeiro fato")
         self.assertIn("nao_existe", q.list_collections(), "escrita cria, leitura não")
 
 
 class TestRecall(unittest.TestCase):
-    def _povoa(self, reranker=None):
+    def _populate(self, reranker=None):
         s, q, _ = store(reranker)
         s.store("paginação do poll trunca em 100 itens", {"type": "reference"})
         s.store("o cursor regride quando o relógio recua", {"type": "reference"})
@@ -140,24 +140,24 @@ class TestRecall(unittest.TestCase):
         return s, q
 
     def test_recupera_por_similaridade_e_devolve_Recalled(self):
-        s, _ = self._povoa()
-        hits, fora = s.recall(["paginação do poll trunca"], POL, top_k=10)
+        s, _ = self._populate()
+        hits, outcome = s.recall(["paginação do poll trunca"], POL, top_k=10)
         self.assertTrue(hits)
         self.assertIsInstance(hits[0], core.Recalled)
         self.assertIn("paginação", hits[0].document,
                       "a consulta compartilha três palavras com este registro")
-        self.assertEqual(hits[0].origem, "denso")
+        self.assertEqual(hits[0].origin, "denso")
 
     def test_piso_relaxa_SO_quando_ha_reranker(self):
-        sem, _ = self._povoa(None)
-        com, _ = self._povoa(FakeReranker(scores=[0.9, 0.8, 0.7]))
+        sem, _ = self._populate(None)
+        com, _ = self._populate(FakeReranker(scores=[0.9, 0.8, 0.7]))
         _, f_sem = sem.recall(["poll"], POL, top_k=10)
         _, f_com = com.recall(["poll"], POL, top_k=10)
         self.assertGreaterEqual(f_com.candidates, f_sem.candidates,
                                 "com segundo estágio o primeiro pode ser mais generoso")
 
     def test_fusao_de_angulos_nao_duplica(self):
-        s, _ = self._povoa()
+        s, _ = self._populate()
         hits, _ = s.recall(["paginação do poll", "poll paginação", "trunca 100 itens"],
                            POL, top_k=10)
         ids = [h.id for h in hits]
@@ -166,11 +166,11 @@ class TestRecall(unittest.TestCase):
     def test_best_dense_reporta_o_melhor_de_TODOS_os_hits(self):
         """Para dizer 'nada passou do corte, o melhor foi X', o número útil é o
         melhor de todos — não o melhor dos que passaram o piso."""
-        s, _ = self._povoa()
+        s, _ = self._populate()
         estrito = retrieval.Policy(0.99, 0.99, 0.10, 6, veto=True)
-        hits, fora = s.recall(["assunto totalmente ausente xyz"], estrito, top_k=10)
+        hits, outcome = s.recall(["assunto totalmente ausente xyz"], estrito, top_k=10)
         self.assertEqual(hits, [])
-        self.assertGreater(fora.best_dense, 0.0)
+        self.assertGreater(outcome.best_dense, 0.0)
 
     def test_registro_sem_documento_e_descartado(self):
         s, q, _ = store()
@@ -183,7 +183,7 @@ class TestRecall(unittest.TestCase):
     def test_erro_de_embedding_propaga_como_erro_do_dominio(self):
         q = FakeVectorStore()
         q.ensure_collection("mem", 8)
-        s = MemoryStore(q, FakeEmbedderQueQuebra(core.EmbeddingError("fora")), None, "mem", 8)
+        s = MemoryStore(q, FailingFakeEmbedder(core.EmbeddingError("fora")), None, "mem", 8)
         with self.assertRaises(core.CoreError):
             s.recall(["x"], POL, top_k=5)
 
@@ -194,49 +194,49 @@ class TestDocsOffline(unittest.TestCase):
 
         return DocIndex(q, emb, reranker, "tmp", "lib", emb.dim), q
 
-    def _arquivo(self, conteudo="# Titulo\n\ncorpo do documento aqui\n"):
+    def _write_file(self, content="# Titulo\n\ncorpo do documento aqui\n"):
         import tempfile
         d = tempfile.mkdtemp()
-        caminho = os.path.join(d, "doc.md")
-        with open(caminho, "w") as fh:
-            fh.write(conteudo)
+        path = os.path.join(d, "doc.md")
+        with open(path, "w") as fh:
+            fh.write(content)
 
-        return caminho
+        return path
 
     def test_temporario_carrega_validade_e_biblioteca_nao(self):
         idx, q = self._index()
-        caminho = self._arquivo()
-        idx.index_file(caminho, ttl_seconds=60)
-        idx.keep_file(caminho)
-        tmp = list(q.colecoes["tmp"]["pontos"].values())[0]["payload"]
-        lib = list(q.colecoes["lib"]["pontos"].values())[0]["payload"]
+        path = self._write_file()
+        idx.index_file(path, ttl_seconds=60)
+        idx.keep_file(path)
+        tmp = list(q.collections["tmp"]["pontos"].values())[0]["payload"]
+        lib = list(q.collections["lib"]["pontos"].values())[0]["payload"]
         self.assertIn("expires_at_ts", tmp)
         self.assertNotIn("expires_at_ts", lib, "biblioteca não expira, por construção")
 
     def test_reindexar_substitui_em_vez_de_acumular(self):
         idx, q = self._index()
-        caminho = self._arquivo()
-        idx.keep_file(caminho)
-        antes = len(q.colecoes["lib"]["pontos"])
-        idx.keep_file(caminho)
-        self.assertEqual(len(q.colecoes["lib"]["pontos"]), antes)
+        path = self._write_file()
+        idx.keep_file(path)
+        antes = len(q.collections["lib"]["pontos"])
+        idx.keep_file(path)
+        self.assertEqual(len(q.collections["lib"]["pontos"]), antes)
 
     def test_sweep_remove_so_o_vencido(self):
         idx, q = self._index()
-        idx.index_file(self._arquivo(), ttl_seconds=-1)
-        idx.index_file(self._arquivo("outro conteudo aqui\n"), ttl_seconds=600)
+        idx.index_file(self._write_file(), ttl_seconds=-1)
+        idx.index_file(self._write_file("outro conteudo aqui\n"), ttl_seconds=600)
         idx.sweep()
-        restantes = [p["payload"]["document"]
-                     for p in q.colecoes["tmp"]["pontos"].values()]
-        self.assertTrue(restantes, "o de 600s tem de sobreviver")
-        self.assertTrue(all("outro" in d for d in restantes),
+        remaining_docs = [p["payload"]["document"]
+                     for p in q.collections["tmp"]["pontos"].values()]
+        self.assertTrue(remaining_docs, "o de 600s tem de sobreviver")
+        self.assertTrue(all("outro" in d for d in remaining_docs),
                         "só o vencido é removido")
 
     def test_purge_do_temporario_nao_toca_a_biblioteca(self):
         idx, q = self._index()
-        caminho = self._arquivo()
-        idx.index_file(caminho, ttl_seconds=600)
-        idx.keep_file(caminho)
+        path = self._write_file()
+        idx.index_file(path, ttl_seconds=600)
+        idx.keep_file(path)
         idx.drop_all_tmp()
         self.assertNotIn("tmp", q.list_collections())
         self.assertIn("lib", q.list_collections())
@@ -244,18 +244,18 @@ class TestDocsOffline(unittest.TestCase):
     def test_binario_e_recusado(self):
         idx, _ = self._index()
         with self.assertRaises(core.DocsError):
-            idx.index_file(self._arquivo("texto\x00binario"))
+            idx.index_file(self._write_file("texto\x00binario"))
 
     def test_intervalo_de_linhas_reproduz_o_trecho(self):
-        conteudo = "\n".join(f"linha {i}" for i in range(1, 21)) + "\n"
-        caminho = self._arquivo(conteudo)
+        content = "\n".join(f"linha {i}" for i in range(1, 21)) + "\n"
+        path = self._write_file(content)
         idx, q = self._index()
-        idx.keep_file(caminho)
-        linhas = conteudo.splitlines()
-        for p in q.colecoes["lib"]["pontos"].values():
+        idx.keep_file(path)
+        lines = content.splitlines()
+        for p in q.collections["lib"]["pontos"].values():
             md, doc = p["payload"]["metadata"], p["payload"]["document"]
-            recorte = "\n".join(linhas[md["start_line"] - 1:md["end_line"]])
-            self.assertEqual(recorte.strip("\n"), doc,
+            slice_text = "\n".join(lines[md["start_line"] - 1:md["end_line"]])
+            self.assertEqual(slice_text.strip("\n"), doc,
                              "é o contrato do modo localizador")
 
 

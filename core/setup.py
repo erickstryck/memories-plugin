@@ -20,11 +20,11 @@ PREFIXOS_RUIDO = ("ws-",)
 
 @dataclass
 class Check:
-    nome: str
+    name: str
     ok: bool
-    detalhe: str
-    correcao: str | None = None
-    aviso: bool = False  # falha que degrada, não impede
+    detail: str
+    fix_hint: str | None = None
+    warning: bool = False  # falha que degrada, não impede
 
 
 def _check_qdrant(cfg: Config) -> tuple[Check, object]:
@@ -34,13 +34,13 @@ def _check_qdrant(cfg: Config) -> tuple[Check, object]:
     from .qdrant import Qdrant, QdrantError
     q = Qdrant(cfg.qdrant_url, cfg.qdrant_api_key, timeout=10.0)
     try:
-        nomes = q.list_collections()
+        names = q.list_collections()
     except QdrantError as exc:
         pista = "confira QCTX_QDRANT_API_KEY" if "401" in str(exc) or "403" in str(exc) \
             else "confira a URL e se o serviço está no ar"
         return Check("Qdrant", False, f"não respondeu: {exc}", pista), None
 
-    return Check("Qdrant", True, f"{len(nomes)} coleções em {cfg.qdrant_url}"), q
+    return Check("Qdrant", True, f"{len(names)} coleções em {cfg.qdrant_url}"), q
 
 
 def _check_embed(cfg: Config) -> tuple[Check, int | None]:
@@ -55,13 +55,13 @@ def _check_embed(cfg: Config) -> tuple[Check, int | None]:
     except CoreError as exc:
         return Check("Embedding", False, f"{url} não respondeu: {exc}",
                      f"confira se o modelo {cfg.embed_model!r} está servido nesse endereço"), None
-    detalhe = f"{cfg.embed_model} devolve {dim} dimensões"
+    detail = f"{cfg.embed_model} devolve {dim} dimensões"
     if dim != cfg.vector_size:
         return Check("Embedding", False,
-                     f"{detalhe}, mas vector_size está {cfg.vector_size}",
+                     f"{detail}, mas vector_size está {cfg.vector_size}",
                      "qctx config detect"), dim
 
-    return Check("Embedding", True, detalhe), dim
+    return Check("Embedding", True, detail), dim
 
 
 def _check_rerank(cfg: Config) -> Check:
@@ -72,69 +72,69 @@ def _check_rerank(cfg: Config) -> Check:
         url = cfg.resolved_rerank_url()
     except ConfigError:
         return Check("Re-rank", False, "não configurado (opcional)",
-                     "export QCTX_RERANK_URL=… para ganhar precisão na busca", aviso=True)
+                     "export QCTX_RERANK_URL=… para ganhar precisão na busca", warning=True)
     rr = Reranker(url, cfg.rerank_model, cfg.api_key, timeout=20.0)
-    pares, info = rr.rank(
+    pairs, info = rr.rank(
         "qual a capital da França?",
         ["Paris é a capital da França.", "receita de bolo de cenoura com cobertura"],
     )
     if not info["ok"]:
         return Check("Re-rank", False, f"{url} falhou: {info['erro']}",
                      f"confira se o servidor subiu com suporte a rerank e se o modelo "
-                     f"{cfg.rerank_model!r} está lá", aviso=True)
+                     f"{cfg.rerank_model!r} está lá", warning=True)
     escala = "logit cru (normalizado para sigmoid)" if info["era_logit"] else "sigmoid 0..1"
-    melhor = max(s for _, s in pares)
-    acertou = pares[0][0] == 0
-    detalhe = f"{cfg.rerank_model} responde em {escala}; melhor score {melhor:.3f}"
+    best = max(s for _, s in pairs)
+    acertou = pairs[0][0] == 0
+    detail = f"{cfg.rerank_model} responde em {escala}; melhor score {best:.3f}"
     if not acertou:
         return Check("Re-rank", False,
-                     f"{detalhe} — mas ordenou a resposta ERRADA em primeiro",
-                     "modelo pode não ser um cross-encoder de rerank", aviso=True)
+                     f"{detail} — mas ordenou a resposta ERRADA em primeiro",
+                     "modelo pode não ser um cross-encoder de rerank", warning=True)
 
-    return Check("Re-rank", True, detalhe)
+    return Check("Re-rank", True, detail)
 
 
 def _check_collections(cfg: Config, q) -> list[Check]:
     checks = []
-    papeis = (
+    roles = (
         ("memory_collection", cfg.memory_collection, "memory-collection", True),
         ("docs_collection", cfg.docs_collection, "docs-collection", False),
         ("library_collection", cfg.library_collection, "library-collection", False),
     )
     vistos: dict[str, str] = {}
-    for campo, valor, chave_cli, obrigatorio in papeis:
-        if not valor:
-            checks.append(Check(campo, not obrigatorio,
+    for field, value, cli_key, required in roles:
+        if not value:
+            checks.append(Check(field, not required,
                                 "não configurada",
-                                f"qctx config set {chave_cli} <nome>",
-                                aviso=not obrigatorio))
+                                f"qctx config set {cli_key} <nome>",
+                                warning=not required))
             continue
-        if valor in vistos:
-            checks.append(Check(campo, False,
-                                f"{valor!r} já é usada por {vistos[valor]}",
-                                f"qctx config set {chave_cli} <outro-nome> — cada papel "
+        if value in vistos:
+            checks.append(Check(field, False,
+                                f"{value!r} já é usada por {vistos[value]}",
+                                f"qctx config set {cli_key} <outro-nome> — cada papel "
                                 f"tem ciclo de vida diferente e precisa de coleção própria"))
             continue
-        vistos[valor] = campo
+        vistos[value] = field
         if q is None:
-            checks.append(Check(campo, True, f"{valor!r} (Qdrant inacessível, não verificada)"))
+            checks.append(Check(field, True, f"{value!r} (Qdrant inacessível, não verificada)"))
             continue
-        info = q.collection_info(valor)
+        info = q.collection_info(value)
         if info is None:
-            checks.append(Check(campo, True, f"{valor!r} será criada no primeiro uso"))
+            checks.append(Check(field, True, f"{value!r} será criada no primeiro uso"))
             continue
         dim = info.get("size")
         if dim not in (None, cfg.vector_size):
-            checks.append(Check(campo, False,
-                                f"{valor!r} tem dimensão {dim}, o modelo usa {cfg.vector_size}",
+            checks.append(Check(field, False,
+                                f"{value!r} tem dimensão {dim}, o modelo usa {cfg.vector_size}",
                                 "escolha outra coleção ou outro modelo de embedding"))
             continue
-        checks.append(Check(campo, True, f"{valor!r} — {info.get('points')} pontos"))
+        checks.append(Check(field, True, f"{value!r} — {info.get('points')} pontos"))
 
     return checks
 
 
-def sugerir_colecoes(q, vector_size: int, limite: int = 8) -> list[dict]:
+def suggest_collections(q, vector_size: int, cutoff: int = 8) -> list[dict]:
     """Coleções existentes que servem como acervo de memória, melhores primeiro.
 
     Ordena por número de pontos porque acervo já povoado é o candidato óbvio, e
@@ -142,17 +142,17 @@ def sugerir_colecoes(q, vector_size: int, limite: int = 8) -> list[dict]:
     """
     if q is None:
         return []
-    saida = []
-    for nome in q.list_collections():
-        if nome.startswith(PREFIXOS_RUIDO):
+    output = []
+    for name in q.list_collections():
+        if name.startswith(PREFIXOS_RUIDO):
             continue
-        info = q.collection_info(nome) or {}
+        info = q.collection_info(name) or {}
         if info.get("size") not in (None, vector_size):
             continue
-        saida.append({"collection": nome, "points": info.get("points") or 0})
-    saida.sort(key=lambda c: -c["points"])
+        output.append({"collection": name, "points": info.get("points") or 0})
+    output.sort(key=lambda c: -c["points"])
 
-    return saida[:limite]
+    return output[:cutoff]
 
 
 def diagnose(cfg: Config) -> dict:
@@ -162,34 +162,34 @@ def diagnose(cfg: Config) -> dict:
     checks = [check_q, check_emb, _check_rerank(cfg)]
     checks += _check_collections(cfg, q)
 
-    bloqueios = [c for c in checks if not c.ok and not c.aviso]
-    avisos = [c for c in checks if not c.ok and c.aviso]
+    blockers = [c for c in checks if not c.ok and not c.warning]
+    warnings = [c for c in checks if not c.ok and c.warning]
 
     return {
-        "pronto": not bloqueios,
+        "pronto": not blockers,
         "checks": [asdict(c) for c in checks],
-        "bloqueios": [asdict(c) for c in bloqueios],
-        "avisos": [asdict(c) for c in avisos],
+        "bloqueios": [asdict(c) for c in blockers],
+        "avisos": [asdict(c) for c in warnings],
         "dim_detectada": dim,
-        "sugestoes_memoria": sugerir_colecoes(q, cfg.vector_size),
+        "sugestoes_memoria": suggest_collections(q, cfg.vector_size),
     }
 
 
-def escolher_por_indice(opcoes: list[str], entrada: str) -> str | None:
+def choose_by_index(options: list[str], entry: str) -> str | None:
     """Resolve a escolha do usuário: número da lista, ou nome digitado.
 
     Separado da leitura do terminal de propósito — é a única parte do wizard com
     lógica, então é a única que precisa de teste. Devolve None quando a entrada
     não seleciona nada (vazio = manter o atual).
     """
-    entrada = (entrada or "").strip()
-    if not entrada:
+    entry = (entry or "").strip()
+    if not entry:
         return None
-    if entrada.isdigit():
-        ix = int(entrada) - 1
-        if 0 <= ix < len(opcoes):
-            return opcoes[ix]
+    if entry.isdigit():
+        ix = int(entry) - 1
+        if 0 <= ix < len(options):
+            return options[ix]
 
         return None
 
-    return entrada
+    return entry

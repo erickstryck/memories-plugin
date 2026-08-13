@@ -121,26 +121,26 @@ class Outcome:
         return any(s.origin in (CE, CE_FRACO) for s in self.scored)
 
 
-def fuse_by_id(lotes: list[list[Any]], id_de: Callable[[Any], str],
-               score_de: Callable[[Any], float] = default_score) -> list[Any]:
+def fuse_by_id(batches: list[list[Any]], id_of: Callable[[Any], str],
+               score_of: Callable[[Any], float] = default_score) -> list[Any]:
     """Funde resultados de vários vetores, mantendo o MAIOR score de cada id.
 
     Ângulos diferentes da mesma pergunta pescam registros diferentes; um registro
     que aparece em dois ângulos não deve ser penalizado pelo pior deles.
     """
-    fundido: dict[str, Any] = {}
-    for lote in lotes:
-        for hit in lote:
-            chave = id_de(hit)
-            atual = fundido.get(chave)
-            if atual is None or score_de(hit) > score_de(atual):
-                fundido[chave] = hit
+    fused: dict[str, Any] = {}
+    for batch in batches:
+        for hit in batch:
+            key = id_of(hit)
+            current = fused.get(key)
+            if current is None or score_of(hit) > score_of(current):
+                fused[key] = hit
 
-    return sorted(fundido.values(), key=lambda h: -score_de(h))
+    return sorted(fused.values(), key=lambda h: -score_of(h))
 
 
-def needs_rerank(candidatos: list[Any], policy: Policy,
-                 score_de: Callable[[Any], float] = default_score) -> bool:
+def needs_rerank(candidates: list[Any], policy: Policy,
+                 score_of: Callable[[Any], float] = default_score) -> bool:
     """O segundo estágio tem dois papéis, e só o segundo obriga a chamada.
 
     ESCOLHER: há mais candidatos que vagas.
@@ -153,19 +153,19 @@ def needs_rerank(candidatos: list[Any], policy: Policy,
     A EXCEÇÃO é quando a ordem é o produto (`order_matters`): aí ORDENAR já é o
     terceiro motivo, e basta ter mais de um candidato.
     """
-    if not candidatos:
+    if not candidates:
         return False
-    if policy.order_matters and len(candidatos) > 1:
+    if policy.order_matters and len(candidates) > 1:
         return True
-    if len(candidatos) > policy.max_results:
+    if len(candidates) > policy.max_results:
         return True
 
-    return any(score_de(c) < policy.strict_floor for c in candidatos)
+    return any(score_of(c) < policy.strict_floor for c in candidates)
 
 
-def two_stage(candidatos: list[Any], query: str, reranker, policy: Policy,
-              texto_de: Callable[[Any], str],
-              score_de: Callable[[Any], float] = default_score) -> Outcome:
+def two_stage(candidates: list[Any], query: str, reranker, policy: Policy,
+              text_of: Callable[[Any], str],
+              score_of: Callable[[Any], float] = default_score) -> Outcome:
     """Aplica o segundo estágio sobre candidatos JÁ recuperados pelo primeiro.
 
     Recebe os candidatos em vez de buscá-los: o primeiro estágio difere entre
@@ -174,53 +174,53 @@ def two_stage(candidatos: list[Any], query: str, reranker, policy: Policy,
 
     Nunca muta a entrada.
     """
-    fora = Outcome(candidates=len(candidatos),
-                   best_dense=score_de(candidatos[0]) if candidatos else 0.0)
-    if not candidatos:
-        return fora
+    outcome = Outcome(candidates=len(candidates),
+                   best_dense=score_of(candidates[0]) if candidates else 0.0)
+    if not candidates:
+        return outcome
 
-    if reranker is None or not needs_rerank(candidatos, policy, score_de):
-        fora.scored = _estrito(candidatos, policy, score_de)
+    if reranker is None or not needs_rerank(candidates, policy, score_of):
+        outcome.scored = _strict_cut(candidates, policy, score_of)
 
-        return fora
+        return outcome
 
-    pares, info = reranker.rank(query, [texto_de(c) for c in candidatos])
-    fora.reranked = bool(info.get("ok"))
-    fora.scale_converted = bool(info.get("era_logit"))
-    fora.rerank_error = info.get("erro")
-    fora.dropped = int(info.get("descartados") or 0)
-    fora.best_rerank = max((s for _, s in pares), default=0.0)
+    pairs, info = reranker.rank(query, [text_of(c) for c in candidates])
+    outcome.reranked = bool(info.get("ok"))
+    outcome.scale_converted = bool(info.get("era_logit"))
+    outcome.rerank_error = info.get("erro")
+    outcome.dropped = int(info.get("descartados") or 0)
+    outcome.best_rerank = max((s for _, s in pairs), default=0.0)
 
     # Sem julgamento, o piso permissivo do primeiro estágio ficou sem quem o limpe.
-    if not fora.reranked:
-        fora.scored = _estrito(candidatos, policy, score_de)
+    if not outcome.reranked:
+        outcome.scored = _strict_cut(candidates, policy, score_of)
 
-        return fora
+        return outcome
 
     # Colapso: o score é baixo por incompatibilidade de idioma, não por
     # irrelevância. A ordem do cross-encoder também é ruído aqui.
-    if policy.detect_collapse and pares and fora.best_rerank < COLLAPSE_MAX:
+    if policy.detect_collapse and pairs and outcome.best_rerank < COLLAPSE_MAX:
         # Colapso é o julgamento sendo DESCARTADO, então o piso permissivo volta a
         # não ter quem o limpe — exatamente como quando o re-rank falha. Devolver a
         # ordem densa sem reaplicar o corte estrito deixava passar candidato que o
         # modo SEM re-rank nunca devolveria, que é o defeito que este pipeline
         # existe para não ter.
-        fora.collapsed = True
-        fora.scored = _estrito(candidatos, policy, score_de)
+        outcome.collapsed = True
+        outcome.scored = _strict_cut(candidates, policy, score_of)
 
-        return fora
+        return outcome
 
-    validos = [(candidatos[i], s) for i, s in pares if 0 <= i < len(candidatos)]
-    acima = [Scored(c, s, CE) for c, s in validos if s >= policy.min_score]
-    abaixo = [Scored(c, s, CE_FRACO) for c, s in validos if s < policy.min_score]
-    escolhidos = acima if policy.veto else acima + abaixo
-    fora.scored = escolhidos[:policy.max_results]
+    valid_keys = [(candidates[i], s) for i, s in pairs if 0 <= i < len(candidates)]
+    above = [Scored(c, s, CE) for c, s in valid_keys if s >= policy.min_score]
+    below = [Scored(c, s, CE_FRACO) for c, s in valid_keys if s < policy.min_score]
+    chosen = above if policy.veto else above + below
+    outcome.scored = chosen[:policy.max_results]
 
-    return fora
+    return outcome
 
 
-def _estrito(candidatos: list[Any], policy: Policy,
-             score_de: Callable[[Any], float]) -> list[Scored]:
+def _strict_cut(candidates: list[Any], policy: Policy,
+             score_of: Callable[[Any], float]) -> list[Scored]:
     """Reaplica o corte estrito. Chamado sempre que o segundo estágio não julgou."""
-    return [Scored(c, score_de(c), DENSO) for c in candidatos
-            if score_de(c) >= policy.strict_floor][:policy.max_results]
+    return [Scored(c, score_of(c), DENSO) for c in candidates
+            if score_of(c) >= policy.strict_floor][:policy.max_results]

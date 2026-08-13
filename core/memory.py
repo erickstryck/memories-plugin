@@ -32,7 +32,7 @@ class MemoryError_(CoreError):
 class Recalled:
     id: str
     score: float
-    origem: str            # "CE" ou "denso"
+    origin: str            # "CE" ou "denso"
     dense_score: float
     document: str
     metadata: dict
@@ -77,72 +77,72 @@ class MemoryStore:
             raise MemoryError_("memória vazia não é gravável")
         self.ensure()
         mid = str(uuid.uuid4())
-        vetor = self.embedder.embed_one(information)
-        agora = _now()
+        vector = self.embedder.embed_one(information)
+        now_ts = _now()
         self.q.upsert(self.collection, [{
             "id": mid,
-            "vector": vetor,
+            "vector": vector,
             "payload": {"document": information, "metadata": metadata or {},
-                        "created_at": agora, "updated_at": agora},
+                        "created_at": now_ts, "updated_at": now_ts},
         }])
 
         return {"status": "created", "id": mid}
 
-    def store_many(self, itens: list[dict]) -> dict:
+    def store_many(self, items: list[dict]) -> dict:
         """Lote com UMA ida ao endpoint de embeddings, tudo-ou-nada.
 
         Os vetores são gerados ANTES de qualquer escrita: um timeout no meio do
         lote não deixa metade gravada, que é o pior estado possível para um acervo
         onde duplicata parcial é indistinguível de fato novo.
         """
-        if not itens:
+        if not items:
             return {"status": "noop", "ids": [], "count": 0}
-        textos = []
-        for i, item in enumerate(itens):
+        texts = []
+        for i, item in enumerate(items):
             info = (item or {}).get("information")
             if not isinstance(info, str) or not info.strip():
                 raise MemoryError_(f"itens[{i}] precisa de 'information' (string não vazia)")
-            textos.append(info)
+            texts.append(info)
         self.ensure()
-        vetores = self.embedder.embed(textos)
-        agora = _now()
-        pontos, ids = [], []
-        for item, texto, vetor in zip(itens, textos, vetores):
+        vectors = self.embedder.embed(texts)
+        now_ts = _now()
+        points, ids = [], []
+        for item, text, vector in zip(items, texts, vectors):
             mid = str(uuid.uuid4())
             ids.append(mid)
-            pontos.append({
+            points.append({
                 "id": mid,
-                "vector": vetor,
-                "payload": {"document": texto, "metadata": (item or {}).get("metadata") or {},
-                            "created_at": agora, "updated_at": agora},
+                "vector": vector,
+                "payload": {"document": text, "metadata": (item or {}).get("metadata") or {},
+                            "created_at": now_ts, "updated_at": now_ts},
             })
-        self.q.upsert(self.collection, pontos)
+        self.q.upsert(self.collection, points)
 
         return {"status": "created", "ids": ids, "count": len(ids)}
 
     def update(self, mid: str, information: str | None = None,
                metadata: dict | None = None) -> dict:
-        ponto = self.q.get_point(self.collection, mid)
-        if ponto is None:
+        point = self.q.get_point(self.collection, mid)
+        if point is None:
             return {"status": "not_found", "id": mid}
-        antigo = ponto.get("payload", {})
-        novo_doc = information if information is not None else antigo.get("document", "")
-        novo_meta = metadata if metadata is not None else antigo.get("metadata", {})
-        payload = {"document": novo_doc, "metadata": novo_meta,
-                   "created_at": antigo.get("created_at", _now()), "updated_at": _now()}
+        previous = point.get("payload", {})
+        new_doc = information if information is not None else previous.get("document", "")
+        new_meta = metadata if metadata is not None else previous.get("metadata", {})
+        payload = {"document": new_doc, "metadata": new_meta,
+                   "created_at": previous.get("created_at", _now()), "updated_at": _now()}
 
         # Texto inalterado significa vetor inalterado: recalcular seria pagar uma ida
         # à rede para obter o mesmo número. Pior, tornava impossível corrigir uma
         # etiqueta enquanto o endpoint de embedding estivesse fora — uma operação que
         # não depende dele.
-        if novo_doc == antigo.get("document"):
+        if new_doc == previous.get("document"):
             self.q.set_payload(self.collection, mid, payload)
 
             return {"status": "updated", "id": mid, "reembedded": False}
 
-        payload_com_vetor = {"id": mid, "vector": self.embedder.embed_one(novo_doc),
+        point_with_vector = {"id": mid, "vector": self.embedder.embed_one(new_doc),
                              "payload": payload}
-        self.q.upsert(self.collection, [payload_com_vetor])
+        self.q.upsert(self.collection, [point_with_vector])
 
         return {"status": "updated", "id": mid, "reembedded": True}
 
@@ -157,11 +157,11 @@ class MemoryStore:
         """Busca densa pura, sem re-rank. Barata; use quando a ordem entre os
         relevantes não importa (por exemplo para deduplicar antes de gravar)."""
         self.require_existing()
-        vetor = self.embedder.embed_one(query)
-        saida = []
-        for hit in self.q.search(self.collection, vetor, limit):
+        vector = self.embedder.embed_one(query)
+        output = []
+        for hit in self.q.search(self.collection, vector, limit):
             p = hit.get("payload", {})
-            saida.append({
+            output.append({
                 "id": hit.get("id"),
                 "score": round(hit.get("score", 0.0), 4),
                 "document": p.get("document"),
@@ -169,7 +169,7 @@ class MemoryStore:
                 "updated_at": p.get("updated_at"),
             })
 
-        return saida
+        return output
 
     def recall(self, queries: list[str], policy: retrieval.Policy,
                top_k: int) -> tuple[list[Recalled], retrieval.Outcome]:
@@ -185,25 +185,25 @@ class MemoryStore:
         em dois ângulos não deve ser penalizado pelo pior deles.
         """
         self.require_existing()
-        vetores = self.embedder.embed(queries)
-        lotes = [[self._normaliza(h) for h in self.q.search(self.collection, v, top_k)]
-                 for v in vetores]
-        lotes = [[h for h in lote if h is not None] for lote in lotes]
-        fundidos = retrieval.fuse_by_id(lotes, id_de=lambda h: h["id"])
+        vectors = self.embedder.embed(queries)
+        batches = [[self._flatten_hit(h) for h in self.q.search(self.collection, v, top_k)]
+                 for v in vectors]
+        batches = [[h for h in batch if h is not None] for batch in batches]
+        fused = retrieval.fuse_by_id(batches, id_of=lambda h: h["id"])
 
-        piso = policy.floor_for(self.reranker is not None)
-        candidatos = [h for h in fundidos if h["score"] >= piso]
-        fora = retrieval.two_stage(candidatos, queries[0], self.reranker, policy,
-                                   texto_de=lambda h: h["document"])
+        floor = policy.floor_for(self.reranker is not None)
+        candidates = [h for h in fused if h["score"] >= floor]
+        outcome = retrieval.two_stage(candidates, queries[0], self.reranker, policy,
+                                   text_of=lambda h: h["document"])
         # `best_dense` do pipeline vê só os candidatos; para dizer "nada passou do
         # corte, o melhor foi X" o número útil é o melhor de TODOS os hits.
-        if fundidos:
-            fora.best_dense = fundidos[0]["score"]
+        if fused:
+            outcome.best_dense = fused[0]["score"]
 
-        return [self._to_recalled(s) for s in fora.scored], fora
+        return [self._to_recalled(s) for s in outcome.scored], outcome
 
     @staticmethod
-    def _normaliza(hit: dict) -> dict | None:
+    def _flatten_hit(hit: dict) -> dict | None:
         """Achata o hit do banco no formato que o pipeline consome.
 
         Devolve None para registro sem documento utilizável: vetor sem texto não tem
@@ -226,31 +226,31 @@ class MemoryStore:
     def _to_recalled(s: retrieval.Scored) -> Recalled:
         h = s.item
 
-        return Recalled(id=h["id"], score=s.score, origem=s.origin,
+        return Recalled(id=h["id"], score=s.score, origin=s.origin,
                         dense_score=h["score"], document=h["document"],
                         metadata=h["metadata"], updated_at=h.get("updated_at"))
 
     def get(self, mid: str) -> dict:
-        ponto = self.q.get_point(self.collection, mid)
-        if ponto is None:
+        point = self.q.get_point(self.collection, mid)
+        if point is None:
             return {"status": "not_found", "id": mid}
-        p = ponto.get("payload", {})
+        p = point.get("payload", {})
 
-        return {"id": ponto.get("id"), "document": p.get("document"),
+        return {"id": point.get("id"), "document": p.get("document"),
                 "metadata": p.get("metadata", {}), "created_at": p.get("created_at"),
                 "updated_at": p.get("updated_at")}
 
     def list_page(self, limit: int = 20, offset=None) -> dict:
         self.require_existing()
-        pontos, proximo = self.q.scroll(self.collection, limit=limit, offset=offset)
-        memorias = [{
+        points, proximo = self.q.scroll(self.collection, limit=limit, offset=offset)
+        memories = [{
             "id": pt.get("id"),
             "document": pt.get("payload", {}).get("document"),
             "metadata": pt.get("payload", {}).get("metadata", {}),
             "updated_at": pt.get("payload", {}).get("updated_at"),
-        } for pt in pontos]
+        } for pt in points]
 
-        return {"count": len(memorias), "memories": memorias, "next_offset": proximo}
+        return {"count": len(memories), "memories": memories, "next_offset": proximo}
 
     def count(self) -> int | None:
         info = self.q.collection_info(self.collection)
@@ -258,7 +258,7 @@ class MemoryStore:
         return info.get("points") if info else None
 
 
-def search_collections(qdrant, embedder, query: str, colecoes: list[str] | None,
+def search_collections(qdrant, embedder, query: str, collections: list[str] | None,
                        vector_size: int, limit: int = 5,
                        max_results: int = 25) -> dict:
     """Busca SOMENTE LEITURA em coleções arbitrárias.
@@ -268,37 +268,37 @@ def search_collections(qdrant, embedder, query: str, colecoes: list[str] | None,
     silenciosamente de um acervo de outro modelo devolve vizinhos aleatórios com
     score plausível, que é pior que devolver nada.
     """
-    vetor = embedder.embed_one(query)
-    alvos = colecoes if colecoes else qdrant.list_collections()
-    pesquisadas, puladas, resultados = [], [], []
-    for nome in alvos:
-        info = qdrant.collection_info(nome)
+    vector = embedder.embed_one(query)
+    targets = collections if collections else qdrant.list_collections()
+    searched, skipped_cols, results = [], [], []
+    for name in targets:
+        info = qdrant.collection_info(name)
         if info is None or info.get("size") is None:
-            puladas.append({"collection": nome, "motivo": "não encontrada / vetor nomeado"})
+            skipped_cols.append({"collection": name, "motivo": "não encontrada / vetor nomeado"})
             continue
         if info["size"] != vector_size:
-            puladas.append({"collection": nome, "motivo": f"dimensão {info['size']} ≠ {vector_size}"})
+            skipped_cols.append({"collection": name, "motivo": f"dimensão {info['size']} ≠ {vector_size}"})
             continue
         try:
-            hits = qdrant.search(nome, vetor, limit)
+            hits = qdrant.search(name, vector, limit)
         except Exception as exc:
-            puladas.append({"collection": nome, "motivo": f"erro: {type(exc).__name__}"})
+            skipped_cols.append({"collection": name, "motivo": f"erro: {type(exc).__name__}"})
             continue
-        pesquisadas.append(nome)
+        searched.append(name)
         for hit in hits:
             p = hit.get("payload", {}) or {}
             doc = None
-            for chave in ("document", "text", "content", "page_content", "chunk", "body"):
-                if isinstance(p.get(chave), str) and p[chave]:
-                    doc = p[chave]
+            for key in ("document", "text", "content", "page_content", "chunk", "body"):
+                if isinstance(p.get(key), str) and p[key]:
+                    doc = p[key]
                     break
-            resultados.append({
-                "collection": nome, "id": hit.get("id"),
+            results.append({
+                "collection": name, "id": hit.get("id"),
                 "score": round(hit.get("score", 0.0), 4), "document": doc,
                 "metadata": p.get("metadata", {}),
                 "payload": None if doc is not None else p,
             })
-    resultados.sort(key=lambda h: -h["score"])
+    results.sort(key=lambda h: -h["score"])
 
-    return {"searched": sorted(pesquisadas), "skipped": puladas,
-            "total_found": len(resultados), "results": resultados[:max_results]}
+    return {"searched": sorted(searched), "skipped": skipped_cols,
+            "total_found": len(results), "results": results[:max_results]}
