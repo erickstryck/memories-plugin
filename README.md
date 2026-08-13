@@ -65,7 +65,7 @@ idioma, não só semântica. Consequências no desenho:
 ```bash
 git clone git@github.com:erickstryck/qdrant-context.git
 cd qdrant-context
-python3 -m unittest discover -s tests    # 51 testes, sem rede, sem dependência
+python3 -m unittest discover -s tests    # 60 testes, sem rede, sem dependência
 ```
 
 Não há `pip install`: o núcleo usa só a biblioteca padrão. Isso é deliberado —
@@ -160,8 +160,9 @@ core/       núcleo portável — nenhuma referência a host ou agente
   chunk.py    fatiamento por fronteira estrutural
   memory.py   CRUD de memórias + recall de dois estágios
   docs.py     índice de documentos, TTL, obsolescência
+  setup.py    diagnóstico e sugestões de configuração
 cli/        interface de linha de comando sobre o núcleo
-tests/      51 testes de lógica pura, sem rede
+tests/      60 testes de lógica pura, sem rede
 ```
 
 ## Portabilidade
