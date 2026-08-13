@@ -128,15 +128,23 @@ class MemoryStore:
         antigo = ponto.get("payload", {})
         novo_doc = information if information is not None else antigo.get("document", "")
         novo_meta = metadata if metadata is not None else antigo.get("metadata", {})
-        vetor = self.embedder.embed_one(novo_doc)
-        self.q.upsert(self.collection, [{
-            "id": mid,
-            "vector": vetor,
-            "payload": {"document": novo_doc, "metadata": novo_meta,
-                        "created_at": antigo.get("created_at", _now()), "updated_at": _now()},
-        }])
+        payload = {"document": novo_doc, "metadata": novo_meta,
+                   "created_at": antigo.get("created_at", _now()), "updated_at": _now()}
 
-        return {"status": "updated", "id": mid}
+        # Texto inalterado significa vetor inalterado: recalcular seria pagar uma ida
+        # à rede para obter o mesmo número. Pior, tornava impossível corrigir uma
+        # etiqueta enquanto o endpoint de embedding estivesse fora — uma operação que
+        # não depende dele.
+        if novo_doc == antigo.get("document"):
+            self.q.set_payload(self.collection, mid, payload)
+
+            return {"status": "updated", "id": mid, "reembedded": False}
+
+        payload_com_vetor = {"id": mid, "vector": self.embedder.embed_one(novo_doc),
+                             "payload": payload}
+        self.q.upsert(self.collection, [payload_com_vetor])
+
+        return {"status": "updated", "id": mid, "reembedded": True}
 
     def delete(self, mid: str) -> dict:
         self.q.delete_points(self.collection, [mid])

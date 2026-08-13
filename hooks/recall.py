@@ -47,17 +47,39 @@ def env(nome: str, legado: str, default: str) -> str:
     return os.environ.get(nome) or os.environ.get(legado) or default
 
 
+def env_num(nome: str, legado: str, default: str, tipo=float):
+    """Lê número do ambiente SEM derrubar o processo se estiver mal escrito.
+
+    Isto é lido no carregamento do módulo, ou seja ANTES do catch-all do `main` — um
+    `QCTX_RECALL_MAX_CHARS=14k` explodia antes de qualquer código nosso rodar, e o
+    usuário perdia o recall recebendo um traceback em vez do aviso de
+    indisponibilidade. Valor inválido cai no default e fica registrado no log.
+    """
+    cru = env(nome, legado, default)
+    try:
+        return tipo(cru)
+    except (TypeError, ValueError):
+        _pendencias.append(f"{nome}={cru!r} não é número — usando {default}")
+
+        return tipo(default)
+
+
+#: Avisos coletados antes de o log existir (o log depende de STATE_DIR, que depende
+#: de env). Despejados na primeira escrita de log.
+_pendencias: list[str] = []
+
+
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 LOG = STATE_DIR / "recall.log"
 LOG_MAX_BYTES = 256 * 1024
 
-STRICT_FLOOR = float(env("QCTX_RECALL_STRICT_FLOOR", "RECALL_MIN_SCORE", "0.58"))
-DENSE_FLOOR = float(env("QCTX_RECALL_DENSE_FLOOR", "RECALL_DENSE_FLOOR", "0.45"))
-MIN_SCORE = float(env("QCTX_RECALL_MIN_SCORE", "RECALL_RERANK_MIN_SCORE", "0.10"))
-MAX_MEMORIES = int(env("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6"))
-MAX_CHARS = int(env("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000"))
-MAX_PER_MEM = int(env("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500"))
-BREAKER_SECONDS = float(env("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300"))
+STRICT_FLOOR = env_num("QCTX_RECALL_STRICT_FLOOR", "RECALL_MIN_SCORE", "0.58")
+DENSE_FLOOR = env_num("QCTX_RECALL_DENSE_FLOOR", "RECALL_DENSE_FLOOR", "0.45")
+MIN_SCORE = env_num("QCTX_RECALL_MIN_SCORE", "RECALL_RERANK_MIN_SCORE", "0.10")
+MAX_MEMORIES = env_num("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6", int)
+MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
+MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
+BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 
 #: Rounds antes de reinjetar uma memória por inteiro em vez do ponteiro de uma
 #: linha. O contexto pode ter sido compactado nesse meio-tempo.
@@ -76,12 +98,18 @@ CORRIJA a memória, não deixe as duas conviverem.
 def log(msg: str) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        while _pendencias:
+            _escreve_log(f"config: {_pendencias.pop(0)}")
         if LOG.exists() and LOG.stat().st_size > LOG_MAX_BYTES:
             LOG.write_text(LOG.read_text(errors="replace")[-LOG_MAX_BYTES // 2:])
-        with LOG.open("a") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+        _escreve_log(msg)
     except Exception:
         pass
+
+
+def _escreve_log(msg: str) -> None:
+    with LOG.open("a") as fh:
+        fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
 
 def extrai_prompt(data: dict) -> str:
@@ -212,6 +240,43 @@ def carrega_estado(path: Path) -> dict:
         return {"round": 0, "seen": {}}
 
 
+def poda_estado(estado: dict) -> int:
+    """Descarta de `seen` o que já não muda decisão nenhuma.
+
+    Uma entrada só importa enquanto `round - visto < REINJECT_AFTER`: passado isso a
+    memória volta INTEIRA de qualquer forma, então guardá-la é só ocupar espaço. Sem
+    poda, uma sessão longa acumula uma entrada por memória por rodada para sempre.
+    """
+    rodada = int(estado.get("round", 0))
+    vistas = estado.get("seen", {})
+    velhas = [mid for mid, r in vistas.items()
+              if not isinstance(r, int) or (rodada - r) >= REINJECT_AFTER]
+    for mid in velhas:
+        vistas.pop(mid, None)
+
+    return len(velhas)
+
+
+def limpa_sessoes_mortas(dias: float = 7.0) -> int:
+    """Apaga estado de sessões que não são tocadas há dias.
+
+    Cada sessão cria um arquivo e nada os removia: o diretório crescia para sempre.
+    Sessão parada há uma semana não vai voltar, e se voltar o custo é começar com
+    `seen` vazio — o pior efeito é uma memória reinjetada uma vez.
+    """
+    limite = time.time() - dias * 86400
+    apagados = 0
+    try:
+        for arquivo in STATE_DIR.glob("recall-*.json"):
+            if arquivo.stat().st_mtime < limite:
+                arquivo.unlink()
+                apagados += 1
+    except Exception:
+        pass
+
+    return apagados
+
+
 def salva_estado(path: Path, estado: dict) -> None:
     try:
         path.write_text(json.dumps(estado))
@@ -316,6 +381,7 @@ def _executa() -> None:
     rodada = estado["round"]
 
     if not hits:
+        poda_estado(estado)
         log(f"round {rodada}: 0 acima do corte (melhor {fora.best_dense:.3f}) "
             f"em {decorrido:.1f}s | {len(angulos)} ângulos | {prompt[:60]!r}")
         salva_estado(caminho_estado, estado)
@@ -338,7 +404,14 @@ def _executa() -> None:
         vistas[h.id] = rodada
         orcamento -= custo
 
+    podadas = poda_estado(estado)
     salva_estado(caminho_estado, estado)
+    if rodada % 20 == 0:
+        # Varredura barata e ocasional: uma vez a cada 20 rodadas basta para o
+        # diretório não crescer, e não paga `glob` em todo prompt.
+        mortas = limpa_sessoes_mortas()
+        if mortas:
+            log(f"limpeza: {mortas} estado(s) de sessão morta removido(s)")
     escala = " (escala convertida)" if fora.scale_converted else ""
     log(f"round {rodada}: {len(cheias)} injetadas + {len(ponteiros)} ponteiros "
         f"(de {len(hits)} relevantes / {fora.candidates} candidatos) em {decorrido:.1f}s | "

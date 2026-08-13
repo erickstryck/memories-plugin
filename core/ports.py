@@ -74,6 +74,15 @@ class VectorStore(Protocol):
     def get_point(self, nome: str, ponto_id) -> dict | None:
         ...
 
+    def set_payload(self, nome: str, ponto_id, payload: dict) -> None:
+        """Substitui o payload SEM tocar no vetor.
+
+        Existe para que alterar metadata não exija recalcular embedding: além do
+        desperdício, sem isto uma correção de etiqueta ficava IMPOSSÍVEL enquanto o
+        endpoint de embedding estivesse fora — uma operação que não precisa dele.
+        """
+        ...
+
     def delete_points(self, nome: str, ids: list) -> None:
         ...
 

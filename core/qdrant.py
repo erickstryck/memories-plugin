@@ -124,6 +124,10 @@ class Qdrant:
 
         return res.get("result")
 
+    def set_payload(self, nome: str, ponto_id, payload: dict) -> None:
+        self.request("POST", f"/collections/{nome}/points/payload?wait=true",
+                     {"payload": payload, "points": [ponto_id]})
+
     def delete_points(self, nome: str, ids: list) -> None:
         self.request("POST", f"/collections/{nome}/points/delete?wait=true", {"points": ids})
 

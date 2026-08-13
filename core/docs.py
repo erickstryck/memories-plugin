@@ -212,6 +212,10 @@ class DocIndex:
                 expira = agora + ttl_seconds
                 payload["expires_at_ts"] = expira
                 payload["metadata"]["expires_at"] = _iso(expira)
+                # Guarda a DURAÇÃO, não só o instante: sem ela o `refresh` não tem
+                # como saber que você pediu 1 hora e reindexava com o padrão de 24h,
+                # esticando em silêncio o prazo que você mesmo escolheu.
+                payload["metadata"]["ttl_seconds"] = ttl_seconds
             pontos.append({"id": _point_id(doc_id, ix), "vector": vetor, "payload": payload})
         self.q.upsert(nome, pontos)
 
@@ -242,7 +246,10 @@ class DocIndex:
             if scope == "library":
                 res = self.keep_file(caminho, doc["doc_id"])
             else:
-                res = self.index_file(caminho, DEFAULT_TTL_SECONDS, doc["doc_id"])
+                # Reusa a duração original. Cair no default aqui ignoraria o prazo
+                # que o usuário pediu na indexação.
+                res = self.index_file(caminho, doc.get("ttl_seconds") or DEFAULT_TTL_SECONDS,
+                                      doc["doc_id"])
             relatorio.append({"doc_id": doc["doc_id"], "path": caminho,
                               "acao": "reindexado", "chunks": res["chunks"]})
 
@@ -342,6 +349,7 @@ class DocIndex:
                     "indexed_at": md.get("indexed_at", "?"),
                     "expires_at_ts": p.get("expires_at_ts"),
                     "src_mtime": md.get("src_mtime"), "src_size": md.get("src_size"),
+                    "ttl_seconds": md.get("ttl_seconds"),
                 })
                 d["chunks"] += 1
 
