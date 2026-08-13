@@ -171,18 +171,18 @@ class TestUpdateWithoutReembedding(unittest.TestCase):
     def test_text_equal_to_the_previous_one_also_skips_the_call(self):
         s, _, emb = self._store()
         mid = s.store("mesmo texto")["id"]
-        antes = len(emb.calls)
+        before = len(emb.calls)
         res = s.update(mid, information="mesmo texto")
         self.assertFalse(res["reembedded"])
-        self.assertEqual(len(emb.calls), antes)
+        self.assertEqual(len(emb.calls), before)
 
     def test_different_text_calls(self):
         s, _, emb = self._store()
         mid = s.store("original")["id"]
-        antes = len(emb.calls)
+        before = len(emb.calls)
         res = s.update(mid, information="mudou de verdade")
         self.assertTrue(res["reembedded"])
-        self.assertEqual(len(emb.calls), antes + 1)
+        self.assertEqual(len(emb.calls), before + 1)
 
     def test_fixing_a_label_WORKS_with_embedding_down(self):
         """O motivo real do conserto: a operação não depende de embedding, então não
@@ -201,9 +201,9 @@ class TestUpdateWithoutReembedding(unittest.TestCase):
     def test_vector_is_preserved_untouched(self):
         s, q, _ = self._store()
         mid = s.store("texto")["id"]
-        vetor_antes = list(q.get_point("mem", mid)["vector"])
+        vector_before = list(q.get_point("mem", mid)["vector"])
         s.update(mid, metadata={"x": 1})
-        self.assertEqual(q.get_point("mem", mid)["vector"], vetor_antes)
+        self.assertEqual(q.get_point("mem", mid)["vector"], vector_before)
 
     def test_the_four_keys_survive_the_no_reembedding_path(self):
         s, q, _ = self._store()

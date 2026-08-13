@@ -71,8 +71,8 @@ class TestStaleness(unittest.TestCase):
 
     def test_float_round_trip_does_not_produce_a_false_positive(self):
         """O bug original: JSON devolvia ...9956775 para ...9956777 gravado."""
-        quase = self.mtime + 2.4e-07
-        self.assertIsNone(source_changed(str(self.file_path), quase, self.size),
+        nearly = self.mtime + 2.4e-07
+        self.assertIsNone(source_changed(str(self.file_path), nearly, self.size),
                           "diferença de 1e-7 é ruído de serialização, não edição")
 
     def test_mtime_rounded_to_the_millisecond_produces_no_false_positive(self):
@@ -85,8 +85,8 @@ class TestStaleness(unittest.TestCase):
         self.assertIn("tamanho", reason)
 
     def test_mtime_change_at_the_same_size_is_detected(self):
-        futuro = self.mtime + 60
-        os.utime(self.file_path, (futuro, futuro))
+        future = self.mtime + 60
+        os.utime(self.file_path, (future, future))
         reason = source_changed(str(self.file_path), self.mtime, self.size)
         self.assertIsNotNone(reason, "edição que preserva o tamanho ainda muda o mtime")
 

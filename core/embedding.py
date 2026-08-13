@@ -46,9 +46,9 @@ class Embedder:
                 raise EmbeddingError(str(exc)) from exc
             data = res.get("data")
             if not isinstance(data, list) or len(data) != len(batch):
-                quantos = len(data) if isinstance(data, list) else "?"
+                how_many = len(data) if isinstance(data, list) else "?"
                 raise EmbeddingError(
-                    f"endpoint devolveu {quantos} vetores para {len(batch)} textos — "
+                    f"endpoint devolveu {how_many} vetores para {len(batch)} textos — "
                     f"resposta incompleta, nada foi gravado"
                 )
             for d in sorted(data, key=lambda x: x.get("index", 0)):

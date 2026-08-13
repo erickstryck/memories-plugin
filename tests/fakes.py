@@ -56,14 +56,14 @@ class FakeVectorStore:
 
         return len(points)
 
-    def get_point(self, name: str, ponto_id):
-        return self.collections.get(name, {}).get("pontos", {}).get(ponto_id)
+    def get_point(self, name: str, point_id):
+        return self.collections.get(name, {}).get("pontos", {}).get(point_id)
 
-    def set_payload(self, name: str, ponto_id, payload: dict) -> None:
-        point = self.collections.get(name, {}).get("pontos", {}).get(ponto_id)
+    def set_payload(self, name: str, point_id, payload: dict) -> None:
+        point = self.collections.get(name, {}).get("pontos", {}).get(point_id)
         if point is not None:
             point["payload"] = payload
-        self.calls.append(("set_payload", name, ponto_id))
+        self.calls.append(("set_payload", name, point_id))
 
     def delete_points(self, name: str, ids: list) -> None:
         for i in ids:

@@ -1,23 +1,23 @@
-"""Raiz da hierarquia de erros do núcleo.
+"""Root of the core error hierarchy.
 
-Existe por causa de um defeito real, encontrado em revisão: o hook de recall
-capturava `EmbeddingError` e `QdrantError`, mas a falha MAIS COMUM — endpoint
-inalcançável — chegava como `HttpError`, que não era nenhum dos dois. Resultado
-exato: traceback para o USUÁRIO e silêncio para o MODELO, ou seja o inverso do
-contrato que o hook existe para cumprir.
+It exists because of a real defect found in review: the recall hook caught
+`EmbeddingError` and `QdrantError`, but the MOST COMMON failure — an unreachable
+endpoint — arrived as `HttpError`, which was neither. The exact result: a traceback
+for the USER and silence for the MODEL, i.e. the inverse of the contract the hook
+exists to fulfil.
 
-A lição não é "faltou um tipo na lista": é que uma lista de tipos a capturar é
-frágil por construção — ela precisa ser atualizada em todo consumidor cada vez que
-um erro novo aparece, e o esquecimento não dá erro de compilação, dá silêncio em
-produção. Com uma raiz, `except CoreError` fica correto POR CONSTRUÇÃO, e erro novo
-já nasce capturado.
+The lesson is not "a type was missing from the list": it is that a list of types to
+catch is fragile by construction — it has to be updated in every consumer each time
+a new error appears, and forgetting does not produce a compile error, it produces
+silence in production. With a root, `except CoreError` is correct BY CONSTRUCTION,
+and a new error is caught the day it is born.
 """
 
 
 class CoreError(Exception):
-    """Qualquer falha esperada do núcleo.
+    """Any expected failure of the core.
 
-    Consumidores devem capturar ISTO. Capturar subclasses específicas é para quando
-    a mensagem ao usuário muda de acordo com o tipo — nunca para decidir SE a falha
-    é tratada.
+    Consumers should catch THIS. Catching specific subclasses is for when the message
+    to the user changes with the type — never for deciding WHETHER the failure is
+    handled.
     """

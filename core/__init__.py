@@ -1,14 +1,14 @@
-"""Núcleo portável: memória semântica de longo prazo + índice efêmero de documentos.
+"""Portable core: long-term semantic memory + ephemeral document index.
 
-Nada aqui conhece o agente ou o host que está chamando. As integrações (plugin de
-um harness, servidor, script) montam os objetos por este módulo e ficam sendo
-cascas finas — é o que permite o mesmo núcleo servir hosts diferentes sem
-duplicar a lógica de embedding, de re-rank ou de acesso ao Qdrant.
+Nothing in here knows about the agent or the host calling it. Integrations (a
+harness plugin, a server, a script) assemble their objects through this module and
+stay thin shells — that is what lets the same core serve different hosts without
+duplicating the embedding, re-ranking or Qdrant access logic.
 
-A duplicação que isto elimina não é hipotética: numa versão anterior o hook e o
-servidor MCP tinham cada um o seu código de embedding, e a normalização de escala
-do re-rank existia só num deles — o outro herdaria o bug de volta no dia em que
-precisasse reranquear.
+The duplication this removes is not hypothetical: in an earlier version the hook
+and the MCP server each had their own embedding code, and the re-rank scale
+normalization existed in only one of them — the other would have inherited the bug
+back the day it needed to rerank.
 """
 from .config import Config, ConfigError, load, save, redacted
 from .errors import CoreError
@@ -43,11 +43,12 @@ def build_embedder(cfg: Config, timeout: float = 60.0) -> Embedder:
 
 
 def build_reranker(cfg: Config, timeout: float = 15.0, **kw) -> Reranker | None:
-    """Devolve None quando não há re-rank configurado.
+    """Returns None when no re-ranking is configured.
 
-    None é resposta válida, não erro: o re-rank melhora a ordenação e nunca é
-    pré-requisito. Quem consome precisa lidar com a ausência dele — e lidar bem
-    significa voltar ao corte estrito, não relaxar o piso e ficar sem filtro.
+    None is a valid answer, not an error: re-ranking improves the ordering and is
+    never a prerequisite. Callers have to cope with its absence — and coping well
+    means going back to the strict cut, not relaxing the floor and ending up with no
+    filter at all.
     """
     try:
         url = cfg.resolved_rerank_url()
@@ -60,13 +61,13 @@ def build_reranker(cfg: Config, timeout: float = 15.0, **kw) -> Reranker | None:
 
 
 def build_memory(cfg: Config, *, timeouts: dict | None = None) -> MemoryStore:
-    """Monta o acesso à memória.
+    """Assembles memory access.
 
-    `timeouts` existe porque quem chama de dentro de um hook tem orçamento próprio:
-    o host mata o hook num prazo, e um timeout de dependência MAIOR que esse prazo
-    significa que o processo morre antes de conseguir avisar o modelo — o usuário
-    paga a latência inteira e ninguém fica sabendo. Os defaults aqui são de uso
-    interativo, não de hook.
+    `timeouts` exists because a caller inside a hook has a budget of its own: the
+    host kills the hook after a deadline, and a dependency timeout LONGER than that
+    deadline means the process dies before it can tell the model anything — the user
+    pays the whole latency and nobody finds out. The defaults here are for
+    interactive use, not for a hook.
     """
     t = timeouts or {}
 

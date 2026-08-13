@@ -58,8 +58,8 @@ class TestFusion(unittest.TestCase):
     def test_keeps_the_highest_score_for_each_id(self):
         fused = fuse_by_id([[hit("a", 0.5), hit("b", 0.9)],
                               [hit("a", 0.8), hit("c", 0.3)]], ID)
-        por_id = {h["id"]: h["score"] for h in fused}
-        self.assertEqual(por_id, {"a": 0.8, "b": 0.9, "c": 0.3},
+        by_id = {h["id"]: h["score"] for h in fused}
+        self.assertEqual(by_id, {"a": 0.8, "b": 0.9, "c": 0.3},
                          "id repetido em dois ângulos fica com o MAIOR score")
 
     def test_comes_out_sorted_by_score(self):
@@ -237,9 +237,9 @@ class TestTrace(unittest.TestCase):
     def test_by_rerank_distinguishes_the_origin(self):
         rr = FakeReranker(scores=[0.9])
         com_ce = two_stage([hit("a", 0.5)], "q", rr, MEMORY_POLICY, TEXT)
-        sem_ce = two_stage([hit("a", 0.9)], "q", None, MEMORY_POLICY, TEXT)
+        without_ce_scores = two_stage([hit("a", 0.9)], "q", None, MEMORY_POLICY, TEXT)
         self.assertTrue(com_ce.by_rerank)
-        self.assertFalse(sem_ce.by_rerank)
+        self.assertFalse(without_ce_scores.by_rerank)
 
     def test_the_query_reaches_the_reranker_and_so_do_the_texts(self):
         rr = FakeReranker(scores=[0.9, 0.8])

@@ -106,7 +106,7 @@ def longest_sentence(text: str) -> str:
     return max(parts, key=len)
 
 
-def angles(prompt: str, limite_chars: int = 1500) -> list[str]:
+def angles(prompt: str, char_limit: int = 1500) -> list[str]:
     """Três ângulos do mesmo texto, para uma única chamada de embeddings.
 
     A busca é semântica, e ângulos diferentes do mesmo prompt pescam registros
@@ -116,13 +116,13 @@ def angles(prompt: str, limite_chars: int = 1500) -> list[str]:
     tem preâmbulo. Duplicatas são descartadas — embedar o mesmo texto duas vezes
     é gasto sem retorno.
     """
-    base = (prompt or "")[:limite_chars]
+    base = (prompt or "")[:char_limit]
     output = [base]
     content = content_words(base)
     if content and content != base.lower():
         output.append(content)
-    longa = longest_sentence(base)
-    if longa and longa != base and len(longa) > 20:
-        output.append(longa)
+    longest = longest_sentence(base)
+    if longest and longest != base and len(longest) > 20:
+        output.append(longest)
 
     return output

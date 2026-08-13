@@ -114,9 +114,9 @@ class Qdrant:
 
         return res.get("result", []) or []
 
-    def get_point(self, name: str, ponto_id) -> dict | None:
+    def get_point(self, name: str, point_id) -> dict | None:
         try:
-            res = self.request("GET", f"/collections/{name}/points/{ponto_id}")
+            res = self.request("GET", f"/collections/{name}/points/{point_id}")
         except QdrantError as exc:
             if "HTTP 404" in str(exc):
                 return None
@@ -124,9 +124,9 @@ class Qdrant:
 
         return res.get("result")
 
-    def set_payload(self, name: str, ponto_id, payload: dict) -> None:
+    def set_payload(self, name: str, point_id, payload: dict) -> None:
         self.request("POST", f"/collections/{name}/points/payload?wait=true",
-                     {"payload": payload, "points": [ponto_id]})
+                     {"payload": payload, "points": [point_id]})
 
     def delete_points(self, name: str, ids: list) -> None:
         self.request("POST", f"/collections/{name}/points/delete?wait=true", {"points": ids})

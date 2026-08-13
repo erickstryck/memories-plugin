@@ -1,30 +1,30 @@
-"""Contratos das dependências externas.
+"""Contracts for the external dependencies.
 
-São `Protocol` e não classe base abstrata de propósito: tipagem ESTRUTURAL, sem
-herança, sem registro, sem custo em tempo de execução. Um dublê de teste não
-precisa herdar de nada — basta ter os métodos. Classe base abstrata com uma única
-implementação real seria cerimônia sem benefício.
+They are `Protocol`s and not abstract base classes on purpose: STRUCTURAL typing, no
+inheritance, no registration, no runtime cost. A test fake does not have to inherit
+from anything — having the methods is enough. An abstract base class with a single
+real implementation would be ceremony without benefit.
 
-O que estes contratos compram, concretamente:
+What these contracts buy, concretely:
 
-1. As regras de negócio (`retrieval`, `memory`, `docs`) passam a depender destas
-   assinaturas e não de `Qdrant`, `Embedder` ou `Reranker` concretos. Trocar Qdrant
-   por outro banco vetorial, ou o endpoint de embedding por uma biblioteca local, é
-   escrever um adaptador — nenhum arquivo de regra muda.
+1. The business rules (`retrieval`, `memory`, `docs`) come to depend on these
+   signatures rather than on a concrete `Qdrant`, `Embedder` or `Reranker`. Swapping
+   Qdrant for another vector store, or the embedding endpoint for a local library, is
+   writing an adapter — no rule file changes.
 
-2. O pipeline de recuperação, que é a lógica mais delicada do pacote, fica
-   testável SEM rede. Antes só dava para exercitá-lo em teste de integração, o que
-   significa que ninguém o roda enquanto edita.
+2. The retrieval pipeline, the most delicate logic in the package, becomes testable
+   WITHOUT the network. Before, it could only be exercised in an integration test,
+   which means nobody runs it while editing.
 """
 from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
 class EmbeddingModel(Protocol):
-    """Transforma texto em vetor."""
+    """Turns text into a vector."""
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Vetores na MESMA ordem dos textos. Erro se a resposta vier incompleta."""
+        """Vectors in the SAME order as the texts. Raises if the response is short."""
         ...
 
     def embed_one(self, text: str) -> list[float]:
@@ -33,21 +33,21 @@ class EmbeddingModel(Protocol):
 
 @runtime_checkable
 class RerankModel(Protocol):
-    """Julga a relevância de documentos para uma pergunta, olhando os dois juntos."""
+    """Judges how relevant documents are to a query, looking at both together."""
 
     def rank(self, query: str, documents: list[str]) -> tuple[list[tuple[int, float]], dict]:
-        """Devolve (pares (índice, score 0..1) ordenados por score desc, info).
+        """Returns ((index, score 0..1) pairs sorted by score desc, info).
 
-        `info` PRECISA trazer pelo menos `ok: bool`. Quem chama tem de saber se o
-        julgamento aconteceu: um pipeline que relaxa o primeiro estágio contando com
-        o segundo fica PIOR que o estágio único quando o segundo falha em silêncio.
+        `info` MUST carry at least `ok: bool`. The caller has to know whether the
+        judgement happened: a pipeline that relaxes the first stage counting on the
+        second ends up WORSE than the single stage when the second fails silently.
         """
         ...
 
 
 @runtime_checkable
 class VectorStore(Protocol):
-    """Armazena e busca vetores com payload, agrupados em coleções."""
+    """Stores and searches vectors with a payload, grouped into collections."""
 
     def ensure_collection(self, name: str, size: int, distance: str = ...) -> bool:
         ...
@@ -71,15 +71,15 @@ class VectorStore(Protocol):
                filter_: dict | None = ..., with_payload: bool = ...) -> list[dict]:
         ...
 
-    def get_point(self, name: str, ponto_id) -> dict | None:
+    def get_point(self, name: str, point_id) -> dict | None:
         ...
 
-    def set_payload(self, name: str, ponto_id, payload: dict) -> None:
-        """Substitui o payload SEM tocar no vetor.
+    def set_payload(self, name: str, point_id, payload: dict) -> None:
+        """Replaces the payload WITHOUT touching the vector.
 
-        Existe para que alterar metadata não exija recalcular embedding: além do
-        desperdício, sem isto uma correção de etiqueta ficava IMPOSSÍVEL enquanto o
-        endpoint de embedding estivesse fora — uma operação que não precisa dele.
+        It exists so that changing metadata does not require recomputing an
+        embedding: beyond the waste, without it fixing a label was IMPOSSIBLE while
+        the embedding endpoint was down — an operation that does not need it.
         """
         ...
 

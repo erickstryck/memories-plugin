@@ -58,18 +58,18 @@ class TestAngles(unittest.TestCase):
 
     def test_content_angle_strips_structure(self):
         content = content_words("como funciona a paginação do poll no conector?")
-        for estrutura in ("como", "a", "do", "no"):
-            self.assertNotIn(f" {estrutura} ", f" {content} ")
-        for termo in ("funciona", "paginação", "poll", "conector"):
-            self.assertIn(termo, content)
+        for structure in ("como", "a", "do", "no"):
+            self.assertNotIn(f" {structure} ", f" {content} ")
+        for term in ("funciona", "paginação", "poll", "conector"):
+            self.assertIn(term, content)
 
     def test_repeated_words_appear_once(self):
         self.assertEqual(content_words("poll poll poll cursor"), "poll cursor")
 
     def test_longest_sentence_only_with_several_sentences(self):
         self.assertEqual(longest_sentence("uma frase só"), "")
-        longa = longest_sentence("curta. esta aqui é bem mais longa que a outra. fim")
-        self.assertIn("bem mais longa", longa)
+        longest = longest_sentence("curta. esta aqui é bem mais longa que a outra. fim")
+        self.assertIn("bem mais longa", longest)
 
     def test_no_duplicates_across_angles(self):
         for p in ("paginação poll cursor", "ABC DEF GHI", "termo"):
@@ -82,7 +82,7 @@ class TestAngles(unittest.TestCase):
         self.assertLessEqual(len(angles(p)), 3)
 
     def test_respects_the_char_limit(self):
-        for a in angles("x" * 5000, limite_chars=100):
+        for a in angles("x" * 5000, char_limit=100):
             self.assertLessEqual(len(a), 100)
 
 
@@ -100,9 +100,9 @@ class TestBreaker(unittest.TestCase):
     def test_after_arming_it_stays_open(self):
         b = Breaker(self.path, 300)
         b.arm()
-        ocioso = b.is_open()
-        self.assertIsNotNone(ocioso)
-        self.assertLess(ocioso, 5)
+        idle = b.is_open()
+        self.assertIsNotNone(idle)
+        self.assertLess(idle, 5)
 
     def test_expired_wait_allows_another_attempt(self):
         b = Breaker(self.path, 0.05)
@@ -127,9 +127,9 @@ class TestBreaker(unittest.TestCase):
                           "disjuntor com defeito não pode ser o motivo de a busca parar")
 
     def test_missing_directory_is_created_on_arm(self):
-        fundo = Path(self.tmp.name) / "a" / "b" / "breaker"
-        Breaker(fundo, 300).arm()
-        self.assertTrue(fundo.exists())
+        deep_path = Path(self.tmp.name) / "a" / "b" / "breaker"
+        Breaker(deep_path, 300).arm()
+        self.assertTrue(deep_path.exists())
 
     def test_arming_on_an_impossible_path_does_not_raise(self):
         Breaker("/proc/impossivel/breaker", 300).arm()  # não pode explodir

@@ -17,13 +17,13 @@ class TestBoundaries(unittest.TestCase):
 
     def test_paragraph_after_blank_line_opens_a_block(self):
         lines = ["um\n", "\n", "dois\n"]
-        inicios = [ini for ini, _ in split_blocks(lines)]
-        self.assertIn(2, inicios)
+        starts = [ini for ini, _ in split_blocks(lines)]
+        self.assertIn(2, starts)
 
     def test_top_level_code_definition_opens_a_block(self):
         lines = ["def a():\n", "    return 1\n", "def b():\n", "    return 2\n"]
-        inicios = [ini for ini, _ in split_blocks(lines)]
-        self.assertIn(2, inicios, "linha na coluna 0 depois de linha indentada é fronteira")
+        starts = [ini for ini, _ in split_blocks(lines)]
+        self.assertIn(2, starts, "linha na coluna 0 depois de linha indentada é fronteira")
 
     def test_empty_file_produces_no_block(self):
         self.assertEqual(split_blocks([]), [])
@@ -55,15 +55,15 @@ class TestPacking(unittest.TestCase):
                              "do modo localizador, que manda alguém reler essa região")
 
     def test_oversized_block_falls_back_to_the_fixed_window(self):
-        gigante = ["x" * 200 + "\n" for _ in range(100)]  # 20k chars num só bloco
-        chunks = pack_chunks(gigante, target=2000, hard_max=4000)
+        oversized = ["x" * 200 + "\n" for _ in range(100)]  # 20k chars num só bloco
+        chunks = pack_chunks(oversized, target=2000, hard_max=4000)
         self.assertGreater(len(chunks), 1, "bloco acima do teto tem de ser dividido")
         for t in chunks:
             self.assertLessEqual(len(t.text), 5000)
 
     def test_fixed_window_overlaps(self):
-        gigante = ["y" * 300 + "\n" for _ in range(40)]
-        chunks = pack_chunks(gigante, target=1500, hard_max=2000)
+        oversized = ["y" * 300 + "\n" for _ in range(40)]
+        chunks = pack_chunks(oversized, target=1500, hard_max=2000)
         pairs = list(zip(chunks, chunks[1:]))
         self.assertTrue(any(b.start_line <= a.end_line for a, b in pairs),
                         "janelas consecutivas têm de se sobrepor para não perder a costura")
@@ -81,9 +81,9 @@ class TestPacking(unittest.TestCase):
     def test_no_chunk_loses_meaningful_content(self):
         lines = [f"conteudo unico {i}\n" for i in range(50)]
         chunks = pack_chunks(lines, target=100)
-        juntos = "\n".join(t.text for t in chunks)
+        together = "\n".join(t.text for t in chunks)
         for i in range(50):
-            self.assertIn(f"conteudo unico {i}", juntos)
+            self.assertIn(f"conteudo unico {i}", together)
 
 
 class TestMode(unittest.TestCase):

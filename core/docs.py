@@ -287,8 +287,8 @@ class DocIndex:
         vector = self.embedder.embed_one(query)
         candidates: list[dict] = []
         for esc in scopes:
-            for bruto in self._search_scope(esc, vector, doc_id):
-                candidates.append(bruto)
+            for raw in self._search_scope(esc, vector, doc_id):
+                candidates.append(raw)
         candidates.sort(key=lambda b: -(b.get("score") or 0.0))
 
         outcome = retrieval.two_stage(candidates, query, self.reranker, policy,
@@ -307,22 +307,22 @@ class DocIndex:
         if doc_id:
             must.append({"key": "doc_id", "match": {"value": doc_id}})
         filter_ = {"must": must} if must else None
-        brutos = self.q.search(self._collection(scope), vector, DENSE_TOP_K, filter_)
-        for b in brutos:
+        raw_points = self.q.search(self._collection(scope), vector, DENSE_TOP_K, filter_)
+        for b in raw_points:
             b["_scope"] = scope
 
-        return brutos
+        return raw_points
 
-    def _to_hit(self, bruto: dict, score: float, origin: str) -> Hit:
+    def _to_hit(self, raw: dict, score: float, origin: str) -> Hit:
         """Traduz o hit cru + o veredito do pipeline no formato de apresentação."""
-        p = bruto.get("payload", {})
+        p = raw.get("payload", {})
         md = p.get("metadata", {})
         path = md.get("path", "?")
         reason = source_changed(path, md.get("src_mtime"), md.get("src_size"))
         stale = f"{reason} ({md.get('indexed_at')})" if reason else None
 
         return Hit(
-            score=score, origin=origin, scope=bruto.get("_scope", md.get("scope", "?")),
+            score=score, origin=origin, scope=raw.get("_scope", md.get("scope", "?")),
             path=path, start_line=md.get("start_line", 0), end_line=md.get("end_line", 0),
             mode=md.get("mode", "snapshot"), text=p.get("document", ""),
             indexed_at=md.get("indexed_at", "?"), stale=stale,

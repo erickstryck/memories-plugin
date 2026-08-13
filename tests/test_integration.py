@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core
 
-LIGADO = os.environ.get("QCTX_INTEGRATION") == "1"
+ENABLED = os.environ.get("QCTX_INTEGRATION") == "1"
 THROWAWAY_COLLECTION = f"qctx_test_{uuid.uuid4().hex[:8]}"
 
 #: Chaves que o servidor MCP anterior gravava. O núcleo tem de ler e escrever
@@ -47,7 +47,7 @@ def write_config():
     return core.Config(**fields)
 
 
-@unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
+@unittest.skipUnless(ENABLED, "defina QCTX_INTEGRATION=1")
 class TestReadingTheRealArchive(unittest.TestCase):
     """SOMENTE LEITURA. Prova que o núcleo entende o que já está gravado."""
 
@@ -64,16 +64,16 @@ class TestReadingTheRealArchive(unittest.TestCase):
         self.assertGreater(total, 0, "o acervo real deveria ter memórias")
 
     def test_payload_written_by_the_old_mcp_is_readable(self):
-        pagina = self.store.list_page(limit=5)
-        self.assertGreater(pagina["count"], 0)
-        for m in pagina["memories"]:
+        page = self.store.list_page(limit=5)
+        self.assertGreater(page["count"], 0)
+        for m in page["memories"]:
             self.assertIsInstance(m["document"], str)
             self.assertTrue(m["document"].strip(), "documento não pode vir vazio")
             self.assertIsInstance(m["metadata"], dict)
 
     def test_get_by_id_returns_the_four_keys(self):
-        pagina = self.store.list_page(limit=1)
-        mid = pagina["memories"][0]["id"]
+        page = self.store.list_page(limit=1)
+        mid = page["memories"][0]["id"]
         m = self.store.get(mid)
         self.assertNotEqual(m.get("status"), "not_found")
         for key in ("document", "metadata", "created_at", "updated_at"):
@@ -107,7 +107,7 @@ class TestReadingTheRealArchive(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)), "fusão por id não pode duplicar")
 
 
-@unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
+@unittest.skipUnless(ENABLED, "defina QCTX_INTEGRATION=1")
 class TestCrudInAThrowawayCollection(unittest.TestCase):
     """Escrita SÓ aqui. A coleção é criada e destruída pelo próprio teste."""
 
@@ -126,38 +126,38 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
             pass
 
     def test_full_cycle(self):
-        criado = self.store.store("O poll do conector trunca em 100 itens por página.",
+        created_at = self.store.store("O poll do conector trunca em 100 itens por página.",
                                   {"type": "reference", "date": "2026-08-13"})
-        self.assertEqual(criado["status"], "created")
-        mid = criado["id"]
+        self.assertEqual(created_at["status"], "created")
+        mid = created_at["id"]
 
-        lido = self.store.get(mid)
-        self.assertIn("trunca em 100", lido["document"])
-        self.assertEqual(lido["metadata"]["type"], "reference")
+        read_back = self.store.get(mid)
+        self.assertIn("trunca em 100", read_back["document"])
+        self.assertEqual(read_back["metadata"]["type"], "reference")
 
-        achado = self.store.find("paginação do poll", limit=5)
-        self.assertIn(mid, [h["id"] for h in achado])
+        found_hit = self.store.find("paginação do poll", limit=5)
+        self.assertIn(mid, [h["id"] for h in found_hit])
 
-        atualizado = self.store.update(mid, information="Corrigido: trunca em 50 itens.")
-        self.assertEqual(atualizado["status"], "updated")
-        relido = self.store.get(mid)
-        self.assertIn("50 itens", relido["document"])
-        self.assertEqual(relido["metadata"]["type"], "reference",
+        updated_at = self.store.update(mid, information="Corrigido: trunca em 50 itens.")
+        self.assertEqual(updated_at["status"], "updated")
+        reread = self.store.get(mid)
+        self.assertIn("50 itens", reread["document"])
+        self.assertEqual(reread["metadata"]["type"], "reference",
                          "update sem metadata tem de PRESERVAR a metadata anterior")
-        self.assertEqual(relido["created_at"], lido["created_at"],
+        self.assertEqual(reread["created_at"], read_back["created_at"],
                          "created_at não pode ser reescrito por um update")
-        self.assertNotEqual(relido["updated_at"], lido["updated_at"])
+        self.assertNotEqual(reread["updated_at"], read_back["updated_at"])
 
         self.store.delete(mid)
         self.assertEqual(self.store.get(mid)["status"], "not_found")
 
     def test_written_payload_has_the_same_keys_as_the_old_mcp(self):
-        criado = self.store.store("fato para conferir a forma do payload", {"type": "test"})
-        point = self.q.get_point(THROWAWAY_COLLECTION, criado["id"])
+        created_at = self.store.store("fato para conferir a forma do payload", {"type": "test"})
+        point = self.q.get_point(THROWAWAY_COLLECTION, created_at["id"])
         self.assertEqual(set(point["payload"].keys()), PAYLOAD_KEYS,
                          "o payload tem de ser idêntico ao do servidor anterior, "
                          "senão o acervo existente fica inconsistente")
-        self.store.delete(criado["id"])
+        self.store.delete(created_at["id"])
 
     def test_store_many_is_all_or_nothing(self):
         items = [{"information": f"fato de lote número {i}", "metadata": {"type": "test"}}
@@ -170,11 +170,11 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
             self.store.delete(mid)
 
     def test_store_many_refuses_an_invalid_item_before_writing(self):
-        antes = self.store.count() or 0
+        before = self.store.count() or 0
         with self.assertRaises(core.memory.MemoryError_):
             self.store.store_many([{"information": "válido"}, {"information": "  "}])
         time.sleep(0.2)
-        self.assertEqual(self.store.count() or 0, antes,
+        self.assertEqual(self.store.count() or 0, before,
                          "validação tem de acontecer ANTES de qualquer escrita")
 
     def test_empty_store_is_refused(self):
@@ -182,7 +182,7 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
             self.store.store("   ")
 
 
-@unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
+@unittest.skipUnless(ENABLED, "defina QCTX_INTEGRATION=1")
 class TestDocsIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -198,25 +198,25 @@ class TestDocsIntegration(unittest.TestCase):
         # Documento realista: cada seção precisa ser grande o bastante para o
         # fatiamento ter trabalho, senão o teste "acha a seção certa" é vacuidade
         # — com um trecho único, acertar é inevitável.
-        recheio = ("Detalhe operacional relevante para esta seção, repetido para dar "
+        filler = ("Detalhe operacional relevante para esta seção, repetido para dar "
                    "corpo ao documento sem mudar o assunto dela. ")
         cls.file_path.write_text("\n".join([
             "# Autenticação",
             "",
             "Para autenticar, envie o header Authorization com um token Bearer.",
             "O token expira em uma hora e precisa ser renovado pelo endpoint de refresh.",
-            recheio * 12,
+            filler * 12,
             "",
             "# Paginação",
             "",
             "As listagens devolvem no máximo 100 itens por página.",
             "Use o cursor devolvido em next_page para buscar a página seguinte.",
-            recheio * 12,
+            filler * 12,
             "",
             "# Limites de uso",
             "",
             "O limite é de 5000 requisições por hora, com janela deslizante de 180 segundos.",
-            recheio * 12,
+            filler * 12,
         ]) + "\n")
 
     @classmethod

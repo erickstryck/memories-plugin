@@ -20,11 +20,11 @@ import os
 import sys
 from pathlib import Path
 
-INTERVALO = int(os.environ.get("QCTX_CHECKPOINT_INTERVAL")
+INTERVAL = int(os.environ.get("QCTX_CHECKPOINT_INTERVAL")
                 or os.environ.get("REMEMBER_INTERVAL") or "5")
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
-PROCEDIMENTO = """[checkpoint de memória — escrita no acervo de longo prazo]
+PROCEDURE = """[checkpoint de memória — escrita no acervo de longo prazo]
 Interação {count} desta conversa (a cada {intervalo}). Faça o checkpoint AGORA, em uma
 passada curta, sem desviar da tarefa em andamento. Se nada durável surgiu desde o
 último checkpoint, não salve nada e diga isso em uma linha — memória vazia é melhor
@@ -89,13 +89,13 @@ def main() -> None:
     n += 1
     counter.write_text(str(n))
 
-    if INTERVALO <= 0 or n % INTERVALO != 0:
+    if INTERVAL <= 0 or n % INTERVAL != 0:
         return  # silencioso nas interações intermediárias
 
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": PROCEDIMENTO.format(count=n, intervalo=INTERVALO),
+            "additionalContext": PROCEDURE.format(count=n, interval=INTERVAL),
         }
     }))
 

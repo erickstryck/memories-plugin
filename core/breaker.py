@@ -30,12 +30,12 @@ class Breaker:
         if self.cooldown <= 0:
             return None
         try:
-            ultima = float(self.path.read_text().strip())
+            last_ts = float(self.path.read_text().strip())
         except Exception:
             return None
-        ocioso = time.time() - ultima
-        if ocioso < self.cooldown:
-            return ocioso
+        idle = time.time() - last_ts
+        if idle < self.cooldown:
+            return idle
 
         return None
 

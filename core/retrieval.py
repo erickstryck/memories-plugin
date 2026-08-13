@@ -72,9 +72,9 @@ class Policy:
     Aplicar a mesma regra aos dois foi um erro de desenho que só apareceu quando o
     pipeline virou um só e ganhou teste com dublê."""
 
-    def floor_for(self, tem_reranker: bool) -> float:
+    def floor_for(self, has_reranker: bool) -> float:
         """Piso do primeiro estágio. Só relaxa quando há segundo estágio para limpar."""
-        return self.dense_floor if tem_reranker else self.strict_floor
+        return self.dense_floor if has_reranker else self.strict_floor
 
 
 @dataclass(frozen=True)

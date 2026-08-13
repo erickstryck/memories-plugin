@@ -72,29 +72,29 @@ def split_blocks(lines: list[str]) -> list[tuple[int, int]]:
         if not anterior.strip() and current.strip():
             boundaries.add(i)
             continue
-        comeca_na_coluna_zero = current[:1] not in ("", " ", "\t", "\n")
-        anterior_indentado = anterior[:1] in (" ", "\t")
-        if comeca_na_coluna_zero and anterior_indentado:
+        starts_at_column_zero = current[:1] not in ("", " ", "\t", "\n")
+        previous_is_indented = anterior[:1] in (" ", "\t")
+        if starts_at_column_zero and previous_is_indented:
             boundaries.add(i)
     ordered = sorted(boundaries) + [len(lines)]
 
     return [(ordered[i], ordered[i + 1]) for i in range(len(ordered) - 1)]
 
 
-def _window(lines: list[str], ini: int, fim: int, target: int) -> list[tuple[int, int]]:
+def _window(lines: list[str], ini: int, end: int, target: int) -> list[tuple[int, int]]:
     """Janela fixa com sobreposição, para bloco que estoura o teto sozinho."""
     windows = []
-    passo = ini
-    while passo < fim:
-        acumulado = 0
-        cursor = passo
-        while cursor < fim and acumulado < target:
-            acumulado += len(lines[cursor])
+    step = ini
+    while step < end:
+        accumulated = 0
+        cursor = step
+        while cursor < end and accumulated < target:
+            accumulated += len(lines[cursor])
             cursor += 1
-        windows.append((passo, cursor))
-        if cursor >= fim:
+        windows.append((step, cursor))
+        if cursor >= end:
             break
-        passo = max(passo + 1, cursor - OVERLAP_LINES)
+        step = max(step + 1, cursor - OVERLAP_LINES)
 
     return windows
 
@@ -110,10 +110,10 @@ def pack_chunks(lines: list[str], target: int = TARGET_CHARS,
         return []
     chunks: list[Chunk] = []
 
-    def emit(ini: int, fim: int) -> None:
-        text = "".join(lines[ini:fim]).strip("\n")
+    def emit(ini: int, end: int) -> None:
+        text = "".join(lines[ini:end]).strip("\n")
         if text.strip():
-            chunks.append(Chunk(ini + 1, fim, text))
+            chunks.append(Chunk(ini + 1, end, text))
 
     is_open: int | None = None
     size = 0

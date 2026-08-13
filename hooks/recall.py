@@ -43,11 +43,11 @@ from core import query  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 
 
-def env(name: str, legado: str, default: str) -> str:
-    return os.environ.get(name) or os.environ.get(legado) or default
+def env(name: str, legacy: str, default: str) -> str:
+    return os.environ.get(name) or os.environ.get(legacy) or default
 
 
-def env_num(name: str, legado: str, default: str, kind=float):
+def env_num(name: str, legacy: str, default: str, kind=float):
     """Lê número do ambiente SEM derrubar o processo se estiver mal escrito.
 
     Isto é lido no carregamento do módulo, ou seja ANTES do catch-all do `main` — um
@@ -55,7 +55,7 @@ def env_num(name: str, legado: str, default: str, kind=float):
     usuário perdia o recall recebendo um traceback em vez do aviso de
     indisponibilidade. Valor inválido cai no default e fica registrado no log.
     """
-    raw = env(name, legado, default)
+    raw = env(name, legacy, default)
     try:
         return kind(raw)
     except (TypeError, ValueError):
@@ -173,11 +173,11 @@ def empty_block(outcome, n_angles: int) -> str:
     if outcome.rerank_error or outcome.collapsed:
         # Com o julgamento degradado, "não há precedente" seria uma afirmação que
         # os dados não sustentam.
-        conclusao = ("O acervo foi consultado mas o julgamento foi PARCIAL, então isto "
+        conclusion = ("O acervo foi consultado mas o julgamento foi PARCIAL, então isto "
                      "não é evidência de ausência de precedente — se o assunto puder ter "
                      "histórico, faça uma busca dirigida.")
     else:
-        conclusao = ("Não há precedente registrado sobre este assunto — não repita esta "
+        conclusion = ("Não há precedente registrado sobre este assunto — não repita esta "
                      "busca genérica. Se o trabalho abrir um sub-assunto específico, aí "
                      "sim vale uma busca dirigida.")
 
@@ -185,7 +185,7 @@ def empty_block(outcome, n_angles: int) -> str:
         "[recall automático — memória de longo prazo]\n"
         f"Busca executada a partir do seu prompt ({n_angles} ângulos semânticos): nenhuma "
         f"memória acima do corte de relevância (melhor score {outcome.best_dense:.3f}).\n"
-        + _degradation_note(outcome) + conclusao +
+        + _degradation_note(outcome) + conclusion +
         " E considere se a resposta que você vai produzir merece ser salva no fim."
     )
 
@@ -203,9 +203,9 @@ def build_block(full_hits: list, pointers: list, n_angles: int, outcome) -> str:
         "semânticos, fundidos pelo maior score). O que segue é conhecimento de sessões "
         "anteriores — leia ANTES de responder, investigar ou propor design.",
     ]
-    nota = _degradation_note(outcome)
-    if nota:
-        parts.append(nota.rstrip())
+    note = _degradation_note(outcome)
+    if note:
+        parts.append(note.rstrip())
     parts += ["", INSTRUCTIONS, ""]
     for i, h in enumerate(full_hits, 1):
         doc = h.document
@@ -249,12 +249,12 @@ def prune_state(state: dict) -> int:
     """
     round_no = int(state.get("round", 0))
     seen_map = state.get("seen", {})
-    velhas = [mid for mid, r in seen_map.items()
+    old_entries = [mid for mid, r in seen_map.items()
               if not isinstance(r, int) or (round_no - r) >= REINJECT_AFTER]
-    for mid in velhas:
+    for mid in old_entries:
         seen_map.pop(mid, None)
 
-    return len(velhas)
+    return len(old_entries)
 
 
 def purge_dead_sessions(days: float = 7.0) -> int:
@@ -340,10 +340,10 @@ def _run() -> None:
     # em vez de dentro do núcleo, é o que faz o `recall` aplicar sozinho o corte
     # estrito: sem o segundo portão, o piso permissivo não tem quem o limpe.
     breaker = Breaker(STATE_DIR / "rerank-breaker", BREAKER_SECONDS)
-    ocioso = breaker.is_open()
-    if ocioso is not None:
+    idle = breaker.is_open()
+    if idle is not None:
         store.reranker = None
-        log(f"re-rank em disjuntor: falhou há {ocioso:.0f}s — corte denso estrito")
+        log(f"re-rank em disjuntor: falhou há {idle:.0f}s — corte denso estrito")
 
     top_k = int(env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20" if store.reranker else "8"))
     # Política da MEMÓRIA: o cross-encoder VETA (falso positivo polui o contexto do
@@ -394,8 +394,8 @@ def _run() -> None:
     full_hits, pointers = [], []
     budget = MAX_CHARS
     for h in hits:
-        ultima = seen_map.get(h.id)
-        recent = isinstance(ultima, int) and (round_no - ultima) < REINJECT_AFTER
+        last_ts = seen_map.get(h.id)
+        recent = isinstance(last_ts, int) and (round_no - last_ts) < REINJECT_AFTER
         cost = min(len(h.document), MAX_PER_MEM)
         if recent or len(full_hits) >= MAX_MEMORIES or cost > budget:
             pointers.append(h)
@@ -409,13 +409,13 @@ def _run() -> None:
     if round_no % 20 == 0:
         # Varredura barata e ocasional: uma vez a cada 20 rodadas basta para o
         # diretório não crescer, e não paga `glob` em todo prompt.
-        mortas = purge_dead_sessions()
-        if mortas:
-            log(f"limpeza: {mortas} estado(s) de sessão morta removido(s)")
-    escala = " (escala convertida)" if outcome.scale_converted else ""
+        dead = purge_dead_sessions()
+        if dead:
+            log(f"limpeza: {dead} estado(s) de sessão morta removido(s)")
+    scale = " (escala convertida)" if outcome.scale_converted else ""
     log(f"round {round_no}: {len(full_hits)} injetadas + {len(pointers)} ponteiros "
         f"(de {len(hits)} relevantes / {outcome.candidates} candidatos) em {elapsed:.1f}s | "
-        f"{len(angles)} ângulos | CE={outcome.by_rerank}{escala} | {prompt[:60]!r}")
+        f"{len(angles)} ângulos | CE={outcome.by_rerank}{scale} | {prompt[:60]!r}")
 
     emit(build_block(full_hits, pointers, len(angles), outcome))
 

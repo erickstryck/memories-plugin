@@ -242,7 +242,7 @@ class MemoryStore:
 
     def list_page(self, limit: int = 20, offset=None) -> dict:
         self.require_existing()
-        points, proximo = self.q.scroll(self.collection, limit=limit, offset=offset)
+        points, next_offset = self.q.scroll(self.collection, limit=limit, offset=offset)
         memories = [{
             "id": pt.get("id"),
             "document": pt.get("payload", {}).get("document"),
@@ -250,7 +250,7 @@ class MemoryStore:
             "updated_at": pt.get("payload", {}).get("updated_at"),
         } for pt in points]
 
-        return {"count": len(memories), "memories": memories, "next_offset": proximo}
+        return {"count": len(memories), "memories": memories, "next_offset": next_offset}
 
     def count(self) -> int | None:
         info = self.q.collection_info(self.collection)

@@ -15,7 +15,7 @@ from .errors import CoreError
 from .reranking import Reranker
 
 #: Prefixos de coleção gerada por outro sistema — não são candidatas úteis.
-PREFIXOS_RUIDO = ("ws-",)
+NOISE_PREFIXES = ("ws-",)
 
 
 @dataclass
@@ -36,9 +36,9 @@ def _check_qdrant(cfg: Config) -> tuple[Check, object]:
     try:
         names = q.list_collections()
     except QdrantError as exc:
-        pista = "confira QCTX_QDRANT_API_KEY" if "401" in str(exc) or "403" in str(exc) \
+        hint = "confira QCTX_QDRANT_API_KEY" if "401" in str(exc) or "403" in str(exc) \
             else "confira a URL e se o serviço está no ar"
-        return Check("Qdrant", False, f"não respondeu: {exc}", pista), None
+        return Check("Qdrant", False, f"não respondeu: {exc}", hint), None
 
     return Check("Qdrant", True, f"{len(names)} coleções em {cfg.qdrant_url}"), q
 
@@ -82,11 +82,11 @@ def _check_rerank(cfg: Config) -> Check:
         return Check("Re-rank", False, f"{url} falhou: {info['erro']}",
                      f"confira se o servidor subiu com suporte a rerank e se o modelo "
                      f"{cfg.rerank_model!r} está lá", warning=True)
-    escala = "logit cru (normalizado para sigmoid)" if info["era_logit"] else "sigmoid 0..1"
+    scale = "logit cru (normalizado para sigmoid)" if info["era_logit"] else "sigmoid 0..1"
     best = max(s for _, s in pairs)
-    acertou = pairs[0][0] == 0
-    detail = f"{cfg.rerank_model} responde em {escala}; melhor score {best:.3f}"
-    if not acertou:
+    top_is_right = pairs[0][0] == 0
+    detail = f"{cfg.rerank_model} responde em {scale}; melhor score {best:.3f}"
+    if not top_is_right:
         return Check("Re-rank", False,
                      f"{detail} — mas ordenou a resposta ERRADA em primeiro",
                      "modelo pode não ser um cross-encoder de rerank", warning=True)
@@ -101,7 +101,7 @@ def _check_collections(cfg: Config, q) -> list[Check]:
         ("docs_collection", cfg.docs_collection, "docs-collection", False),
         ("library_collection", cfg.library_collection, "library-collection", False),
     )
-    vistos: dict[str, str] = {}
+    seen_values: dict[str, str] = {}
     for field, value, cli_key, required in roles:
         if not value:
             checks.append(Check(field, not required,
@@ -109,13 +109,13 @@ def _check_collections(cfg: Config, q) -> list[Check]:
                                 f"qctx config set {cli_key} <nome>",
                                 warning=not required))
             continue
-        if value in vistos:
+        if value in seen_values:
             checks.append(Check(field, False,
-                                f"{value!r} já é usada por {vistos[value]}",
+                                f"{value!r} já é usada por {seen_values[value]}",
                                 f"qctx config set {cli_key} <outro-nome> — cada papel "
                                 f"tem ciclo de vida diferente e precisa de coleção própria"))
             continue
-        vistos[value] = field
+        seen_values[value] = field
         if q is None:
             checks.append(Check(field, True, f"{value!r} (Qdrant inacessível, não verificada)"))
             continue
@@ -144,7 +144,7 @@ def suggest_collections(q, vector_size: int, cutoff: int = 8) -> list[dict]:
         return []
     output = []
     for name in q.list_collections():
-        if name.startswith(PREFIXOS_RUIDO):
+        if name.startswith(NOISE_PREFIXES):
             continue
         info = q.collection_info(name) or {}
         if info.get("size") not in (None, vector_size):

@@ -47,7 +47,7 @@ def output(obj, como_json: bool) -> None:
 # Prefixos de coleção gerada por outro sistema. Com 84 coleções no Qdrant, uma
 # listagem crua afoga o que interessa — e escolher acervo é justamente a operação
 # em que a pessoa precisa VER as opções. Escondidas por padrão, `--all` mostra.
-RUIDO = ("ws-",)
+NOISE = ("ws-",)
 
 
 def cmd_collections(args, cfg):
@@ -56,7 +56,7 @@ def cmd_collections(args, cfg):
     configured = {cfg.memory_collection, cfg.docs_collection, cfg.library_collection}
     if not args.all:
         visible = [n for n in names
-                    if n in configured or not n.startswith(RUIDO)]
+                    if n in configured or not n.startswith(NOISE)]
     else:
         visible = list(names)
     hidden = len(names) - len(visible)
@@ -163,8 +163,8 @@ def cmd_setup(args, cfg):
     else:
         print(f"\n{len(rel['bloqueios'])} item(ns) impedem o uso — os comandos acima resolvem.")
 
-    interativo = sys.stdin.isatty() and not args.check
-    if not interativo:
+    interactive = sys.stdin.isatty() and not args.check
+    if not interactive:
         if rel["sugestoes_memoria"] and not cfg.memory_collection:
             print("\ncoleções candidatas para memória (mais povoadas primeiro):")
             for i, s_ in enumerate(rel["sugestoes_memoria"], 1):
@@ -179,11 +179,11 @@ def cmd_setup(args, cfg):
     options = [s_["collection"] for s_ in rel["sugestoes_memoria"]]
     for i, s_ in enumerate(options, 1):
         print(f"  {i}. {s_}")
-    escolha = core.setup.choose_by_index(
+    choice = core.setup.choose_by_index(
         options, input(f"coleção de memória [{cfg.memory_collection or 'nenhuma'}]: "))
-    if escolha:
-        core.save({"memory_collection": escolha})
-        print(f"  memory_collection = {escolha}")
+    if choice:
+        core.save({"memory_collection": choice})
+        print(f"  memory_collection = {choice}")
     for key, current in (("docs_collection", cfg.docs_collection),
                          ("library_collection", cfg.library_collection)):
         resp = input(f"{key} [{current}]: ").strip()
@@ -275,8 +275,8 @@ def cmd_memory_store_many(args, cfg):
     custava N processos e N chamadas de embedding, e perdia a atomicidade que o
     método foi escrito para dar.
     """
-    bruto = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
-    items = json.loads(bruto)
+    raw = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+    items = json.loads(raw)
     if not isinstance(items, list):
         print("erro: esperado um array JSON de {information, metadata?}", file=sys.stderr)
         raise SystemExit(2)
@@ -313,8 +313,8 @@ def _report_write(res: dict, como_json: bool) -> None:
         output(res, True)
 
         return
-    rotulo = "guardado na biblioteca" if res["scope"] == "library" else "indexado (temporário)"
-    print(f"{rotulo}: {os.path.basename(res['path'])} -> doc_id={res['doc_id']}")
+    label = "guardado na biblioteca" if res["scope"] == "library" else "indexado (temporário)"
+    print(f"{label}: {os.path.basename(res['path'])} -> doc_id={res['doc_id']}")
     print(f"  {res['lines']} linhas, {res['chars']} chars -> {res['chunks']} trechos "
           f"(modo {res['mode']}, coleção {res['collection']})")
     if res["expires_at"]:

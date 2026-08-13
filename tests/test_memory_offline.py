@@ -52,13 +52,13 @@ class TestPayloadShape(unittest.TestCase):
     def test_update_preserves_created_at(self):
         s, q, _ = store()
         mid = s.store("original")["id"]
-        antes = q.get_point("mem", mid)["payload"]["created_at"]
+        before = q.get_point("mem", mid)["payload"]["created_at"]
         time.sleep(0.01)
         s.update(mid, information="corrigido")
-        depois = q.get_point("mem", mid)["payload"]
-        self.assertEqual(depois["created_at"], antes, "created_at não pode ser reescrito")
-        self.assertNotEqual(depois["updated_at"], antes)
-        self.assertEqual(set(depois), KEYS)
+        after = q.get_point("mem", mid)["payload"]
+        self.assertEqual(after["created_at"], before, "created_at não pode ser reescrito")
+        self.assertNotEqual(after["updated_at"], before)
+        self.assertEqual(set(after), KEYS)
 
     def test_update_without_metadata_keeps_the_previous_one(self):
         s, q, _ = store()
@@ -149,11 +149,11 @@ class TestRecall(unittest.TestCase):
         self.assertEqual(hits[0].origin, "dense")
 
     def test_floor_relaxes_ONLY_when_a_reranker_exists(self):
-        sem, _ = self._populate(None)
-        com, _ = self._populate(FakeReranker(scores=[0.9, 0.8, 0.7]))
-        _, f_sem = sem.recall(["poll"], POL, top_k=10)
-        _, f_com = com.recall(["poll"], POL, top_k=10)
-        self.assertGreaterEqual(f_com.candidates, f_sem.candidates,
+        without_ce, _ = self._populate(None)
+        with_ce, _ = self._populate(FakeReranker(scores=[0.9, 0.8, 0.7]))
+        _, out_without_ce = without_ce.recall(["poll"], POL, top_k=10)
+        _, out_with_ce = with_ce.recall(["poll"], POL, top_k=10)
+        self.assertGreaterEqual(out_with_ce.candidates, out_without_ce.candidates,
                                 "com segundo estágio o primeiro pode ser mais generoso")
 
     def test_fusing_angles_does_not_duplicate(self):
@@ -167,8 +167,8 @@ class TestRecall(unittest.TestCase):
         """Para dizer 'nada passou do corte, o melhor foi X', o número útil é o
         melhor de todos — não o melhor dos que passaram o piso."""
         s, _ = self._populate()
-        estrito = retrieval.Policy(0.99, 0.99, 0.10, 6, veto=True)
-        hits, outcome = s.recall(["assunto totalmente ausente xyz"], estrito, top_k=10)
+        strict_hits = retrieval.Policy(0.99, 0.99, 0.10, 6, veto=True)
+        hits, outcome = s.recall(["assunto totalmente ausente xyz"], strict_hits, top_k=10)
         self.assertEqual(hits, [])
         self.assertGreater(outcome.best_dense, 0.0)
 
@@ -217,9 +217,9 @@ class TestDocsOffline(unittest.TestCase):
         idx, q = self._index()
         path = self._write_file()
         idx.keep_file(path)
-        antes = len(q.collections["lib"]["pontos"])
+        before = len(q.collections["lib"]["pontos"])
         idx.keep_file(path)
-        self.assertEqual(len(q.collections["lib"]["pontos"]), antes)
+        self.assertEqual(len(q.collections["lib"]["pontos"]), before)
 
     def test_sweep_removes_only_what_expired(self):
         idx, q = self._index()
