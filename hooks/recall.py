@@ -171,9 +171,18 @@ def _degradation_note(outcome) -> str:
 
 
 def empty_block(outcome, n_angles: int) -> str:
-    if outcome.rerank_error or outcome.collapsed:
-        # With the judgement degraded, "there is no precedent" would be a claim the data
-        # does not support.
+    # The conclusion is chosen by whether a degradation note EXISTS, not by re-testing
+    # which degradation happened. The two used to be separate conditions, and they drifted:
+    # the note warned about candidates left unjudged by the pair ceiling while the
+    # conclusion still asserted flatly that no precedent exists. Both sentences went into
+    # the same block, contradicting each other — and the flat claim is the exact failure
+    # this hook exists to prevent, so it is the one that has to yield.
+    #
+    # It is not a rare corner: the dense stage routinely clears more candidates than the
+    # cross-encoder's pair ceiling accepts, so an empty result usually means "the top N
+    # by vector proximity failed the cutoff", not "the archive holds nothing".
+    note = _degradation_note(outcome)
+    if note:
         conclusion = ("The archive was consulted but the judgement was PARTIAL, so this is "
                      "not evidence that no precedent exists — if the subject might have "
                      "history, run a targeted search.")
@@ -186,7 +195,7 @@ def empty_block(outcome, n_angles: int) -> str:
         "[automatic recall — long-term memory]\n"
         f"Search executed from your prompt ({n_angles} semantic angles): no memory above "
         f"the relevance cutoff (best score {outcome.best_dense:.3f}).\n"
-        + _degradation_note(outcome) + conclusion +
+        + note + conclusion +
         " And consider whether the answer you are about to produce deserves to be saved at the end."
     )
 
