@@ -1,33 +1,37 @@
-"""Preparação da pergunta antes da busca.
+"""Preparing the question before the search.
 
-Mora no núcleo porque não tem nada de host: transformar o texto do usuário em
-consultas é a mesma coisa em qualquer agente, e é uma decisão de qualidade de
-busca, não de apresentação.
+It lives in the core because there is nothing host-specific about it: turning the
+user's text into queries is the same thing in any agent, and it is a search-quality
+decision, not a presentation one.
 """
 import re
 
-#: Prompt abaixo disto não descreve assunto nenhum — buscar seria pagar uma ida à
-#: rede para devolver ruído.
+#: A prompt shorter than this describes no subject at all — searching would pay a
+#: network round trip to get noise back.
 MIN_CHARS = 12
 
-#: Continuações e confirmações. Não vale ida à rede: o assunto é o do turno
-#: anterior, que já foi buscado quando chegou.
+#: Continuations and acknowledgements. Not worth a network round trip: the subject is
+#: the previous turn's, which was already searched when it arrived.
+#:
+#: The CONTENTS of this set and of STOPWORDS stay in Portuguese on purpose. They are
+#: linguistic data matched against what the user actually types, not prose —
+#: translating them would silently disable both filters.
 TRIVIAL_WORDS = {
-    # confirmação
+    # acknowledgement
     "ok", "okay", "beleza", "blz", "sim", "isso", "certo", "correto", "exato",
     "exatamente", "claro", "perfeito", "top", "boa", "legal", "ótimo", "otimo",
     "bom", "tudo", "bem", "não", "nao", "yes", "no",
-    # seguir adiante — com as inflexões, porque o filtro exige que TODAS as
-    # palavras sejam triviais e uma inflexão faltando deixa a frase passar
+    # carry on — with the inflections, because the filter requires ALL words to be
+    # trivial and one missing inflection lets the whole phrase through
     "vai", "vamos", "bora", "continua", "continue", "continuar", "segue",
     "seguir", "prossiga", "prosseguir", "pode", "manda", "mandar", "faz",
     "faça", "faca", "fazer", "next", "go",
-    # agradecimento
+    # thanks
     "obrigado", "obrigada", "valeu", "thanks", "thx", "ty", "please",
 }
 
-#: Palavras sem carga semântica. Removidas no ângulo "só conteúdo" para o vetor
-#: não ficar diluído pela estrutura da frase.
+#: Words with no semantic load. Removed in the "content only" angle so the vector is
+#: not diluted by the structure of the sentence.
 STOPWORDS = {
     # pt
     "a", "à", "às", "ao", "aos", "o", "os", "as", "um", "uma", "uns", "umas",
@@ -54,18 +58,18 @@ STOPWORDS = {
     "about", "into", "from", "as", "so", "not", "no", "yes",
 }
 
-SO_SLASH = re.compile(r"/[\w:-]+\Z")
+BARE_SLASH_CMD = re.compile(r"/[\w:-]+\Z")
 WORD_RE = re.compile(r"[\wÀ-ÿ_./-]{2,}")
 
 
 def _only_confirmation(text: str) -> bool:
-    """True quando TODAS as palavras do texto são de confirmação.
+    """True when EVERY word in the text is an acknowledgement.
 
-    Palavra por palavra, e não o texto inteiro comparado ao conjunto: comparar o
-    texto inteiro deixava a checagem INALCANÇÁVEL, porque toda palavra do conjunto
-    é mais curta que MIN_CHARS e o filtro de tamanho a pegava primeiro. O valor
-    está justamente nas confirmações de várias palavras — "ok, pode continuar",
-    "beleza, segue" — que passam do tamanho mínimo e não têm assunto nenhum.
+    Word by word, and not the whole text compared against the set: comparing the whole
+    text made the check UNREACHABLE, because every word in the set is shorter than
+    MIN_CHARS and the length filter caught it first. The value is precisely in
+    multi-word acknowledgements — "ok, pode continuar", "beleza, segue" — which clear
+    the minimum length and carry no subject at all.
     """
     words = [p for p in WORD_RE.findall(text.lower()) if p.strip()]
     if not words:
@@ -75,14 +79,14 @@ def _only_confirmation(text: str) -> bool:
 
 
 def skip_reason(prompt: str) -> str | None:
-    """Devolve o motivo de não buscar, ou None quando vale buscar."""
+    """Returns the reason not to search, or None when searching is worth it."""
     text = (prompt or "").strip()
-    if SO_SLASH.fullmatch(text):
-        return "comando sem argumento"
+    if BARE_SLASH_CMD.fullmatch(text):
+        return "command with no argument"
     if _only_confirmation(text):
-        return "prompt trivial"
+        return "trivial prompt"
     if len(text) < MIN_CHARS:
-        return "prompt curto"
+        return "short prompt"
 
     return None
 
@@ -107,14 +111,13 @@ def longest_sentence(text: str) -> str:
 
 
 def angles(prompt: str, char_limit: int = 1500) -> list[str]:
-    """Três ângulos do mesmo texto, para uma única chamada de embeddings.
+    """Three angles on the same text, for a single embeddings call.
 
-    A busca é semântica, e ângulos diferentes do mesmo prompt pescam registros
-    diferentes: o texto cru carrega a intenção completa; só as palavras de
-    conteúdo empurram o vetor para o assunto em vez da estrutura da frase; e a
-    frase mais longa costuma ser onde a pergunta de fato está, quando o prompt
-    tem preâmbulo. Duplicatas são descartadas — embedar o mesmo texto duas vezes
-    é gasto sem retorno.
+    The search is semantic, and different angles on the same prompt catch different
+    records: the raw text carries the full intent; the content words alone push the
+    vector toward the subject rather than the shape of the sentence; and the longest
+    sentence is usually where the actual question is, when the prompt has a preamble.
+    Duplicates are dropped — embedding the same text twice is spend with no return.
     """
     base = (prompt or "")[:char_limit]
     output = [base]

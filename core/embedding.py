@@ -1,14 +1,15 @@
-"""Cliente de embedding, contra endpoint OpenAI-compatible.
+"""Embedding client, against an OpenAI-compatible endpoint.
 
-Uma responsabilidade: texto -> vetor. O que era um módulo `models.py` com duas
-famílias de modelo virou dois, porque nada aqui muda quando o contrato do re-rank
-muda, e vice-versa — juntá-los fazia toda alteração num tocar o outro.
+One responsibility: text -> vector. What used to be a `models.py` module holding two
+model families became two, because nothing here changes when the re-rank contract
+changes, and vice versa — keeping them together made every change to one touch the
+other.
 """
 from .errors import CoreError
 from .http import HttpError, bearer, post_json
 
-#: Lote por requisição. O endpoint aceita `input` como array, então N textos custam
-#: N/EMBED_BATCH idas à rede em vez de N.
+#: Batch per request. The endpoint accepts `input` as an array, so N texts cost
+#: N/EMBED_BATCH network round trips instead of N.
 EMBED_BATCH = 32
 
 
@@ -24,12 +25,12 @@ class Embedder:
         self.timeout = timeout
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Vetores na mesma ordem dos textos.
+        """Vectors in the same order as the texts.
 
-        Ordena por `index` mesmo que o contrato prometa ordem: já vi servidor
-        devolver fora de ordem, e um vetor trocado de lugar produz busca errada sem
-        nenhum erro visível. Resposta incompleta LEVANTA em vez de devolver menos —
-        gravar metade de um lote é o pior estado possível para um acervo.
+        It sorts by `index` even though the contract promises order: I have seen a
+        server return them out of order, and a vector in the wrong slot produces a wrong
+        search with no visible error. An incomplete response RAISES instead of returning
+        fewer — storing half a batch is the worst possible state for an archive.
         """
         if not texts:
             return []
@@ -40,16 +41,16 @@ class Embedder:
                 res = post_json(self.url, {"model": self.model, "input": batch},
                                 headers=bearer(self.api_key), timeout=self.timeout)
             except HttpError as exc:
-                # Traduz para o erro do domínio: quem chama fala de embedding, não
-                # de transporte, e capturar HttpError obrigaria todo consumidor a
-                # conhecer a camada de baixo.
+                # Translate into the domain error: the caller talks about embedding, not
+                # about transport, and catching HttpError would force every consumer to
+                # know about the layer below.
                 raise EmbeddingError(str(exc)) from exc
             data = res.get("data")
             if not isinstance(data, list) or len(data) != len(batch):
                 how_many = len(data) if isinstance(data, list) else "?"
                 raise EmbeddingError(
-                    f"endpoint devolveu {how_many} vetores para {len(batch)} textos — "
-                    f"resposta incompleta, nada foi gravado"
+                    f"endpoint returned {how_many} vectors for {len(batch)} texts — "
+                    f"incomplete response, nothing was stored"
                 )
             for d in sorted(data, key=lambda x: x.get("index", 0)):
                 output.append(d["embedding"])
@@ -60,10 +61,10 @@ class Embedder:
         return self.embed([text])[0]
 
     def detect_dimension(self) -> int:
-        """Pergunta ao endpoint quantas dimensões o modelo devolve.
+        """Asks the endpoint how many dimensions the model returns.
 
-        Existe para `vector_size` não ser número digitado à mão: trocar o modelo e
-        esquecer de ajustar faz a guarda de compatibilidade recusar coleções que
-        estavam boas, culpando a coleção em vez da configuração.
+        It exists so `vector_size` is not a hand-typed number: swapping the model and
+        forgetting to adjust it makes the compatibility guard refuse collections that
+        were fine, blaming the collection instead of the configuration.
         """
         return len(self.embed_one("dimension probe"))

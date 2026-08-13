@@ -26,7 +26,7 @@ class TestSkipping(unittest.TestCase):
         e que ficava inalcançável quando ela comparava o texto inteiro."""
         for p in ("ok, pode continuar", "beleza, segue", "sim, perfeito",
                   "ok obrigado", "isso, pode fazer"):
-            self.assertEqual(skip_reason(p), "prompt trivial", p)
+            self.assertEqual(skip_reason(p), "trivial prompt", p)
 
     def test_confirmation_with_ONE_content_word_is_not_skipped(self):
         """"pode continuar o poll" tem assunto: `poll`. Não pode ser descartado."""
@@ -38,7 +38,7 @@ class TestSkipping(unittest.TestCase):
         self.assertIsNotNone(skip_reason("  ok.  "))
 
     def test_bare_command_is_skipped(self):
-        self.assertEqual(skip_reason("/memoria-status"), "comando sem argumento")
+        self.assertEqual(skip_reason("/memoria-status"), "command with no argument")
 
     def test_command_with_an_argument_is_not_skipped(self):
         self.assertIsNone(skip_reason("/buscar paginação do poll"))

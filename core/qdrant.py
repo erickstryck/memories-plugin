@@ -1,12 +1,12 @@
-"""Adaptador do Qdrant: implementa o contrato `ports.VectorStore`.
+"""Qdrant adapter: implements the `ports.VectorStore` contract.
 
-Por que não o SDK oficial: este pacote é dependência de hooks que rodam a CADA
-prompt do usuário. Um `pip install` faltando, um venv errado ou um import lento
-transformam falha de dependência em perda SILENCIOSA de funcionalidade.
+Why not the official SDK: this package is a dependency of hooks that run on EVERY
+user prompt. A missing `pip install`, the wrong venv or a slow import turn a
+dependency failure into a SILENT loss of functionality.
 
-Nenhuma regra de negócio mora aqui — só tradução entre as operações do contrato e
-a API HTTP. É o que permite trocar o banco vetorial escrevendo outro adaptador,
-sem tocar em `memory`, `docs` ou `retrieval`.
+No business rule lives here — only translation between the contract's operations and
+the HTTP API. That is what makes it possible to swap the vector store by writing
+another adapter, without touching `memory`, `docs` or `retrieval`.
 """
 from .errors import CoreError
 from .http import HttpError, request_json
@@ -28,13 +28,13 @@ class Qdrant:
             return request_json(f"{self.base}{path}", method=method, body=body,
                                 headers=headers, timeout=self.timeout)
         except HttpError as exc:
-            # Preserva o status no objeto: distinguir 404 por substring da mensagem
-            # quebra quando a mensagem muda.
+            # Keep the status on the object: telling a 404 apart by a substring of the
+            # message breaks the day the message changes.
             error = QdrantError(str(exc))
             error.status = exc.status
             raise error from exc
 
-    # ---- coleções ----------------------------------------------------------
+    # ---- collections -------------------------------------------------------
 
     def list_collections(self) -> list[str]:
         res = self.request("GET", "/collections")
@@ -42,10 +42,11 @@ class Qdrant:
         return [c["name"] for c in res.get("result", {}).get("collections", [])]
 
     def collection_info(self, name: str) -> dict | None:
-        """Devolve {size, distance, points} ou None se não existe.
+        """Returns {size, distance, points}, or None if it does not exist.
 
-        Só reconhece coleção com um único vetor não-nomeado; coleção com vetores
-        nomeados tem outra forma de busca e não é compatível com este cliente.
+        It only recognizes a collection with a single unnamed vector; a collection with
+        named vectors has a different search shape and is not compatible with this
+        client.
         """
         try:
             res = self.request("GET", f"/collections/{name}")
@@ -65,18 +66,19 @@ class Qdrant:
         }
 
     def ensure_collection(self, name: str, size: int, distance: str = "Cosine") -> bool:
-        """Cria se não existir. Devolve True se criou.
+        """Creates it if absent. Returns True if it created it.
 
-        Se existir com dimensão DIFERENTE, levanta em vez de seguir: gravar vetor
-        de dimensão errada é recusado pelo Qdrant ponto a ponto, mas gravar num
-        acervo de outro modelo de embedding passa e degrada a busca em silêncio.
+        If it exists with a DIFFERENT dimension, this raises instead of carrying on:
+        writing a vector of the wrong dimension is refused by Qdrant point by point, but
+        writing into an archive built by another embedding model goes through and degrades
+        search silently.
         """
         info = self.collection_info(name)
         if info is not None:
             if info["size"] not in (None, size):
                 raise QdrantError(
-                    f"coleção {name!r} tem dimensão {info['size']}, incompatível com "
-                    f"o modelo configurado ({size}). Escolha outra coleção ou outro modelo."
+                    f"collection {name!r} has dimension {info['size']}, incompatible with "
+                    f"the configured model ({size}). Pick another collection or another model."
                 )
 
             return False
@@ -85,8 +87,8 @@ class Qdrant:
         return True
 
     def ensure_payload_index(self, name: str, field: str, schema: str) -> None:
-        """Índice de payload é otimização de filtro, nunca requisito — falha aqui
-        não pode derrubar a operação que o chamador queria fazer."""
+        """A payload index is a filter optimization, never a requirement — a failure here
+        must not bring down the operation the caller actually wanted."""
         try:
             self.request("PUT", f"/collections/{name}/index?wait=true",
                          {"field_name": field, "field_schema": schema})
@@ -96,7 +98,7 @@ class Qdrant:
     def delete_collection(self, name: str) -> None:
         self.request("DELETE", f"/collections/{name}")
 
-    # ---- pontos ------------------------------------------------------------
+    # ---- points ------------------------------------------------------------
 
     def upsert(self, name: str, points: list[dict], batch: int = 256) -> int:
         for i in range(0, len(points), batch):
@@ -146,7 +148,7 @@ class Qdrant:
         return res.get("points", []), res.get("next_page_offset")
 
     def scroll_all(self, name: str, filter_: dict | None = None, with_vector: bool = False):
-        """Itera a coleção inteira, paginando. Gerador para não materializar tudo."""
+        """Iterates the whole collection, paging. A generator, so nothing is materialized."""
         offset = None
         while True:
             points, offset = self.scroll(name, offset=offset, with_vector=with_vector, filter_=filter_)

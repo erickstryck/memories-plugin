@@ -1,16 +1,16 @@
-"""Resolução de configuração.
+"""Configuration resolution.
 
-Precedência, do mais forte para o mais fraco: variável de ambiente > arquivo de
-config > default. O arquivo existe para o que é escolha durável (qual coleção
-usar), o ambiente para o que muda por máquina ou por deploy (endereços, chaves).
+Precedence, strongest to weakest: environment variable > config file > default. The
+file exists for durable choices (which collection to use), the environment for what
+changes per machine or per deploy (addresses, keys).
 
-Os nomes canônicos são `QCTX_*`. Os nomes LEGADOS também são aceitos, porque este
-pacote nasceu substituindo um servidor MCP feito à mão que já usava
-`SERVER_BASE_URL` / `QDRANT_SERVICE_API_KEY` / `RECALL_*`; quebrar isso obrigaria
-a reconfigurar um ambiente que já funciona, sem ganho nenhum.
+The canonical names are `QCTX_*`. The LEGACY names are accepted too, because this
+package was born replacing a hand-made MCP server that already used
+`SERVER_BASE_URL` / `QDRANT_SERVICE_API_KEY` / `RECALL_*`; breaking that would force
+someone to reconfigure a working environment for no gain at all.
 
-Nada aqui conhece o host que está chamando — este módulo é a fronteira entre o
-núcleo portável e o mundo.
+Nothing here knows about the host calling it — this module is the boundary between
+the portable core and the world.
 """
 import json
 import os
@@ -24,8 +24,8 @@ DEFAULT_CONFIG_PATH = Path(
     or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memories-plugin" / "config.json"
 )
 
-# Cada campo lista os nomes de ambiente que o alimentam, em ordem de precedência.
-# O primeiro é o canônico; os seguintes são legado aceito por compatibilidade.
+# Each field lists the environment names that feed it, in order of precedence.
+# The first is the canonical one; the rest are legacy, accepted for compatibility.
 ENV_ALIASES = {
     "qdrant_url": ("QCTX_QDRANT_URL", "QDRANT_URL"),
     "qdrant_api_key": ("QCTX_QDRANT_API_KEY", "QDRANT_SERVICE_API_KEY", "QDRANT_API_KEY"),
@@ -77,17 +77,17 @@ class Config:
     vector_size: int
 
     def resolved_embed_url(self) -> str:
-        """URL completa do /embeddings.
+        """The full /embeddings URL.
 
-        Aceita as duas formas porque os dois consumidores históricos diferem: um
-        guarda o caminho completo, o outro guarda a base e concatena.
+        It accepts both forms because the two historical consumers differ: one stores
+        the full path, the other stores the base and concatenates.
         """
         if self.embed_url:
             return self.embed_url
         if self.api_base_url:
             return f"{self.api_base_url.rstrip('/')}/embeddings"
 
-        raise ConfigError("nem embed_url nem api_base_url configurados")
+        raise ConfigError("neither embed_url nor api_base_url is configured")
 
     def resolved_rerank_url(self) -> str:
         if self.rerank_url:
@@ -95,25 +95,25 @@ class Config:
         if self.api_base_url:
             return f"{self.api_base_url.rstrip('/')}/rerank"
 
-        raise ConfigError("nem rerank_url nem api_base_url configurados")
+        raise ConfigError("neither rerank_url nor api_base_url is configured")
 
     def require_qdrant(self) -> None:
         if not self.qdrant_url:
-            raise ConfigError("qdrant_url não configurado (env QCTX_QDRANT_URL ou `config set qdrant-url`)")
+            raise ConfigError("qdrant_url is not configured (env QCTX_QDRANT_URL or `config set qdrant-url`)")
 
     def require_memory_collection(self) -> str:
-        """Coleção de memória, validada.
+        """The memory collection, validated.
 
-        A checagem de distinção roda AQUI também, e não só nos acervos de documento:
-        antes só `build_docs` a executava, então a colisão passava batido em todo
-        caminho de memória — hook de recall, `store`, `find` — e só aparecia depois,
-        como erro num comando de documento, quando a poluição do acervo já havia
-        acontecido. Guarda que só um caminho executa não é guarda.
+        The distinctness check runs HERE too, and not only on the document archives:
+        before, only `build_docs` ran it, so a collision went unnoticed on every memory
+        path — the recall hook, `store`, `find` — and only surfaced later, as an error in
+        a document command, once the archive had already been polluted. A guard that only
+        one path runs is not a guard.
         """
         if not self.memory_collection:
             raise ConfigError(
-                "memory_collection não configurada. Veja as existentes com "
-                "`collections list` e escolha com `config set memory-collection <nome>`"
+                "memory_collection is not configured. See the existing ones with "
+                "`collections list` and pick one with `config set memory-collection <name>`"
             )
 
         return self._require_distinct("memory_collection", self.memory_collection)
@@ -126,22 +126,22 @@ class Config:
 
     def _require_doc_collection(self, field_name: str, value: str) -> str:
         if not value:
-            raise ConfigError(f"{field_name} não configurada")
+            raise ConfigError(f"{field_name} is not configured")
 
         return self._require_distinct(field_name, value)
 
     def _require_distinct(self, field_name: str, value: str) -> str:
-        """Garante que as TRÊS coleções sejam distintas.
+        """Ensures the THREE collections are distinct.
 
-        Cada colisão possível tem uma consequência concreta, e nenhuma delas dá
-        erro na hora — todas degradam em silêncio:
+        Every possible collision has a concrete consequence, and none of them raises at
+        the time — they all degrade silently:
 
-        - documento na coleção de MEMÓRIA: um arquivo longo vira dezenas de
-          trechos verbosos que competem com fato curado em toda busca e ganham por
-          volume. É poluição permanente do acervo que mais importa.
-        - biblioteca na coleção TEMPORÁRIA: a temporária é destruível por
-          construção (`drop --all` apaga a coleção), então um comando de limpeza
-          passaria a ser capaz de apagar acervo permanente.
+        - a document in the MEMORY collection: one long file becomes dozens of verbose
+          chunks that compete with curated facts in every search and win on volume. It is
+          permanent pollution of the archive that matters most.
+        - the library in the TEMPORARY collection: the temporary one is destroyable by
+          construction (`drop --all` deletes the collection), so a cleanup command would
+          become able to erase a permanent archive.
         """
         others = {
             "memory_collection": self.memory_collection,
@@ -153,9 +153,9 @@ class Config:
                 continue
             if other_value == value:
                 raise ConfigError(
-                    f"{field_name} e {other_field} apontam para a mesma coleção "
-                    f"({value!r}). As três coleções têm ciclos de vida diferentes e "
-                    f"precisam ser distintas — veja `collections list`."
+                    f"{field_name} and {other_field} point at the same collection "
+                    f"({value!r}). The three collections have different lifecycles and "
+                    f"have to be distinct — see `collections list`."
                 )
 
         return value
@@ -168,12 +168,12 @@ def read_file(path: Path | None = None) -> dict:
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as exc:
-        raise ConfigError(f"config inválido em {p}: {exc}") from exc
+        raise ConfigError(f"invalid config at {p}: {exc}") from exc
 
 
 def load(path: Path | None = None, env: dict | None = None) -> Config:
     env = os.environ if env is None else env
-    file_path = read_file(path)
+    from_file = read_file(path)
     values = {}
     for field, aliases in ENV_ALIASES.items():
         value = None
@@ -182,33 +182,34 @@ def load(path: Path | None = None, env: dict | None = None) -> Config:
                 value = env[name]
                 break
         if value is None:
-            value = file_path.get(field, DEFAULTS[field])
+            value = from_file.get(field, DEFAULTS[field])
         values[field] = value
     values["vector_size"] = int(values["vector_size"])
 
     return Config(**values)
 
 
-#: Campos que NUNCA vão para o arquivo de config. Segredo em arquivo de texto é
-#: segredo vazado: entra em backup, em sincronização de dotfiles e em `cat` casual.
-#: O ambiente já resolve, e é onde as chaves deste stack sempre viveram.
+#: Fields that NEVER go into the config file. A secret in a text file is a leaked
+#: secret: it ends up in backups, in dotfile sync and in a casual `cat`.
+#: The environment already solves this, and it is where this stack's keys have always
+#: lived.
 SECRET_FIELDS = frozenset({"qdrant_api_key", "api_key"})
 
 
 def save(patch: dict, path: Path | None = None) -> Path:
-    """Grava só o que mudou, preservando o resto do arquivo."""
+    """Writes only what changed, preserving the rest of the file."""
     p = path or DEFAULT_CONFIG_PATH
     valid_keys = {f.name for f in fields(Config)}
     unknown_keys = set(patch) - valid_keys
     if unknown_keys:
-        raise ConfigError(f"chave(s) desconhecida(s): {', '.join(sorted(unknown_keys))}")
+        raise ConfigError(f"unknown key(s): {', '.join(sorted(unknown_keys))}")
     secret_keys = set(patch) & SECRET_FIELDS
     if secret_keys:
         names = ", ".join(sorted(secret_keys))
         canonical = ", ".join(ENV_ALIASES[s][0] for s in sorted(secret_keys))
         raise ConfigError(
-            f"{names} não vai para o arquivo de config — segredo em texto puro entra "
-            f"em backup e em sincronização de dotfiles. Exporte no ambiente: {canonical}"
+            f"{names} does not go into the config file — a plaintext secret ends up in "
+            f"backups and in dotfile sync. Export it in the environment: {canonical}"
         )
     current = read_file(p)
     current.update(patch)
@@ -219,7 +220,7 @@ def save(patch: dict, path: Path | None = None) -> Path:
 
 
 def redacted(cfg: Config) -> dict:
-    """Config para exibição, sem vazar segredo em log ou terminal."""
+    """Config for display, without leaking a secret into a log or a terminal."""
     d = asdict(cfg)
     for key in ("qdrant_api_key", "api_key"):
         if d[key]:

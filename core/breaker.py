@@ -1,15 +1,14 @@
-"""Disjuntor de arquivo, para dependência que fica indisponível por MINUTOS.
+"""A file-backed circuit breaker, for a dependency that goes away for MINUTES.
 
-O caso concreto que motivou: o cross-encoder roda numa GPU compartilhada. Quando
-outro processo satura a placa, a indisponibilidade dura minutos — e sem disjuntor
-TODA invocação paga o timeout inteiro para redescobrir o que a anterior já sabia.
-Num caminho disparado a cada interação do usuário, isso é um imposto direto no
-tempo de resposta.
+The concrete case that motivated it: the cross-encoder runs on a shared GPU. When
+another process saturates the card, the outage lasts minutes — and without a breaker
+EVERY invocation pays the full timeout to rediscover what the previous one already
+knew. On a path fired at every user interaction, that is a direct tax on response
+time.
 
-O estado é um ARQUIVO, não memória de processo, por duas razões: cada invocação de
-hook é um processo novo (memória não sobrevive), e a dependência é compartilhada
-entre sessões (a GPU é uma só, então o que uma sessão descobriu vale para as
-outras).
+The state is a FILE, not process memory, for two reasons: each hook invocation is a
+fresh process (memory does not survive), and the dependency is shared between
+sessions (there is only one GPU, so what one session found out holds for the others).
 """
 import time
 from pathlib import Path
@@ -21,11 +20,10 @@ class Breaker:
         self.cooldown = cooldown_seconds
 
     def is_open(self) -> float | None:
-        """Segundos desde a última falha, se ainda estamos no período de espera.
+        """Seconds since the last failure, if we are still inside the cooldown.
 
-        None significa "pode tentar". Qualquer problema de leitura resolve para
-        None de propósito: disjuntor com defeito não pode virar o motivo de a
-        funcionalidade parar.
+        None means "go ahead and try". Any read problem resolves to None on purpose: a
+        broken breaker must not become the reason the functionality stops.
         """
         if self.cooldown <= 0:
             return None
