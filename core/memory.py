@@ -18,6 +18,8 @@ senão o modo com re-rank fica pior que o modo sem, que é o oposto da intençã
 """
 import uuid
 from dataclasses import dataclass
+
+from . import retrieval
 from datetime import datetime, timezone
 
 
@@ -144,87 +146,64 @@ class MemoryStore:
 
         return saida
 
-    def recall(self, queries: list[str], dense_floor: float, strict_floor: float,
-               top_k: int, min_score: float, max_results: int) -> tuple[list[Recalled], dict]:
-        """Pipeline de dois portões, com múltiplos ÂNGULOS da mesma pergunta.
+    def recall(self, queries: list[str], policy: retrieval.Policy,
+               top_k: int) -> tuple[list[Recalled], retrieval.Outcome]:
+        """Recupera memórias para vários ÂNGULOS da mesma pergunta.
 
-        Ângulos diferentes do mesmo texto pescam registros diferentes, e vão numa
-        única chamada de embeddings porque o endpoint aceita `input` como array.
-        A fusão é por id pelo MAIOR score: um registro que aparece em dois ângulos
-        não deve ser penalizado pelo pior deles.
+        Esta classe cuida do PRIMEIRO estágio — embeddings, busca por vetor e fusão.
+        O segundo estágio e a política de seleção vivem em `retrieval`, compartilhados
+        com a busca de documentos: enquanto eram dois códigos, uma correção entrava
+        num e não no outro.
+
+        Os ângulos vão numa única chamada de embeddings, porque o endpoint aceita
+        `input` como array. A fusão é por id pelo MAIOR score: um registro que aparece
+        em dois ângulos não deve ser penalizado pelo pior deles.
         """
         self.ensure()
         vetores = self.embedder.embed(queries)
-        fundidos: dict[str, dict] = {}
-        for vetor in vetores:
-            for hit in self.q.search(self.collection, vetor, top_k):
-                p = hit.get("payload", {})
-                doc = p.get("document")
-                if not isinstance(doc, str) or not doc.strip():
-                    continue
-                mid = str(hit.get("id"))
-                score = float(hit.get("score") or 0.0)
-                anterior = fundidos.get(mid)
-                if anterior is None or score > anterior["score"]:
-                    fundidos[mid] = {
-                        "id": mid, "score": score, "document": doc.strip(),
-                        "metadata": p.get("metadata") or {}, "updated_at": p.get("updated_at"),
-                    }
+        lotes = [[self._normaliza(h) for h in self.q.search(self.collection, v, top_k)]
+                 for v in vetores]
+        lotes = [[h for h in lote if h is not None] for lote in lotes]
+        fundidos = retrieval.fuse_by_id(lotes, id_de=lambda h: h["id"])
 
-        ordenados = sorted(fundidos.values(), key=lambda h: -h["score"])
-        candidatos = [h for h in ordenados if h["score"] >= dense_floor]
-        info = {"hits": len(ordenados), "candidatos": len(candidatos), "rerank": None,
-                "ce_ran": False, "melhor_denso": ordenados[0]["score"] if ordenados else 0.0}
-        if not candidatos:
-            return [], info
+        piso = policy.floor_for(self.reranker is not None)
+        candidatos = [h for h in fundidos if h["score"] >= piso]
+        fora = retrieval.two_stage(candidatos, queries[0], self.reranker, policy,
+                                   texto_de=lambda h: h["document"])
+        # `best_dense` do pipeline vê só os candidatos; para dizer "nada passou do
+        # corte, o melhor foi X" o número útil é o melhor de TODOS os hits.
+        if fundidos:
+            fora.best_dense = fundidos[0]["score"]
 
-        # O cross-encoder tem dois papéis e só o segundo obriga a chamada:
-        # ESCOLHER (mais candidatos que vagas) e FILTRAR (existe candidato na faixa
-        # permissiva, que só entrou porque alguém ia julgá-lo). Sem nenhum dos dois,
-        # reordenar não muda o que sai e a chamada é trabalho inútil.
-        precisa_escolher = len(candidatos) > max_results
-        precisa_filtrar = any(h["score"] < strict_floor for h in candidatos)
-        if self.reranker is not None and (precisa_escolher or precisa_filtrar):
-            pares, rinfo = self.reranker.rank(queries[0], [h["document"] for h in candidatos])
-            info["rerank"] = rinfo
-            info["ce_ran"] = rinfo["ok"]
-            if rinfo["ok"]:
-                selecionados = []
-                for i, s in pares:
-                    if s < min_score:
-                        continue
-                    h = dict(candidatos[i])
-                    h["dense_score"] = h["score"]
-                    h["score"] = s
-                    h["origem"] = "CE"
-                    selecionados.append(h)
-            else:
-                selecionados = self._strict(candidatos, strict_floor)
-        else:
-            selecionados = self._strict(candidatos, strict_floor)
-
-        resultados = [
-            Recalled(id=h["id"], score=h["score"], origem=h.get("origem", "denso"),
-                     dense_score=h.get("dense_score", h["score"]), document=h["document"],
-                     metadata=h["metadata"], updated_at=h.get("updated_at"))
-            for h in selecionados
-        ]
-
-        return resultados, info
+        return [self._to_recalled(s) for s in fora.scored], fora
 
     @staticmethod
-    def _strict(candidatos: list[dict], strict_floor: float) -> list[dict]:
-        """Volta ao corte estrito. Necessário sempre que o cross-encoder não
-        julgou: o piso permissivo só era seguro porque ele ia limpar depois."""
-        saida = []
-        for h in candidatos:
-            if h["score"] < strict_floor:
-                continue
-            h = dict(h)
-            h["origem"] = "denso"
-            saida.append(h)
+    def _normaliza(hit: dict) -> dict | None:
+        """Achata o hit do banco no formato que o pipeline consome.
 
-        return saida
+        Devolve None para registro sem documento utilizável: vetor sem texto não tem
+        como ser julgado pelo cross-encoder nem apresentado a ninguém.
+        """
+        p = hit.get("payload", {}) or {}
+        doc = p.get("document")
+        if not isinstance(doc, str) or not doc.strip():
+            return None
+
+        return {
+            "id": str(hit.get("id")),
+            "score": float(hit.get("score") or 0.0),
+            "document": doc.strip(),
+            "metadata": p.get("metadata") or {},
+            "updated_at": p.get("updated_at"),
+        }
+
+    @staticmethod
+    def _to_recalled(s: retrieval.Scored) -> Recalled:
+        h = s.item
+
+        return Recalled(id=h["id"], score=s.score, origem=s.origin,
+                        dense_score=h["score"], document=h["document"],
+                        metadata=h["metadata"], updated_at=h.get("updated_at"))
 
     def get(self, mid: str) -> dict:
         ponto = self.q.get_point(self.collection, mid)

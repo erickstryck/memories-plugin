@@ -28,27 +28,18 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import retrieval
 from .chunk import chunk_text, is_probably_binary, mode_for_suffix
 
 DEFAULT_TTL_SECONDS = 24 * 3600
 DENSE_TOP_K = 20
 RERANK_MIN_SCORE = 0.10
+#: Piso do primeiro estágio na busca de documentos. Mais generoso que na memória
+#: porque aqui o segundo estágio não veta — o objetivo é não perder candidato.
+DENSE_FLOOR = 0.30
 
-# COLAPSO CROSS-LINGUAL DO CROSS-ENCODER — medido em 2026-08-13, e é a razão pela
-# qual o re-rank NÃO tem poder de veto aqui. O mesmo documento em inglês, a mesma
-# pergunta em duas línguas, com bge-reranker-v2-m3:
-#     "what does the hook not cover?"  -> melhor CE 0.2073
-#     "o que o hook nao cobre?"        -> melhor CE 0.0004   (500x menor)
-# Já o denso (bge-m3) é praticamente indiferente à língua: 0.475 contra 0.460 nas
-# mesmas duas perguntas. Ou seja o cross-encoder está casando IDIOMA, não só
-# semântica. Com veto, uma pergunta em português sobre documentação em inglês
-# devolveria silêncio — e silêncio aqui é pior que ordem imperfeita, porque quem
-# pergunta JÁ escolheu o documento e sabe que a resposta está lá.
-#
-# Pior: quando o CE colapsa, a ORDEM dele também é ruído, então não basta parar de
-# filtrar — é preciso detectar e voltar à ordem densa. O separador é largo: colapso
-# deu 4e-4, casos saudáveis deram 0.21 e 0.53.
-RERANK_COLLAPSE_MAX = 0.01
+# O limiar de detecção de colapso cross-lingual mora em `retrieval`, junto com
+# a lógica que o usa — aqui só se escolhe a política.
 
 SCOPES = ("all", "tmp", "library")
 
@@ -259,63 +250,59 @@ class DocIndex:
     # ---- busca -------------------------------------------------------------
 
     def search(self, pergunta: str, scope: str = "all", doc_id: str | None = None,
-               limit: int = 5, min_score: float = RERANK_MIN_SCORE) -> tuple[list[Hit], dict]:
-        """Busca nos dois acervos e reranqueia a UNIÃO.
+               limit: int = 5, min_score: float = RERANK_MIN_SCORE
+               ) -> tuple[list[Hit], retrieval.Outcome]:
+        """Busca nos acervos pedidos e reranqueia a UNIÃO.
 
         Reranquear a união, e não cada acervo em separado, é o que torna os scores
-        comparáveis entre si: o cross-encoder julga todos os candidatos contra a
-        mesma pergunta, então um trecho da biblioteca e um do temporário disputam a
-        mesma vaga em pé de igualdade.
+        comparáveis: o cross-encoder julga todos os candidatos contra a mesma
+        pergunta, então um trecho da biblioteca e um do temporário disputam a mesma
+        vaga em pé de igualdade.
+
+        A política aqui difere da memória em dois pontos, e os dois são deliberados:
+        SEM VETO, porque quem pergunta já escolheu o documento e silêncio é pior que
+        ordem imperfeita; e A ORDEM É O PRODUTO, porque o resultado é uma lista lida
+        de cima para baixo — então vale reranquear mesmo quando tudo cabe.
         """
         if scope not in SCOPES:
             raise DocsError(f"escopo inválido: {scope!r} (use {', '.join(SCOPES)})")
         escopos = ("tmp", "library") if scope == "all" else (scope,)
 
+        policy = retrieval.Policy(
+            dense_floor=DENSE_FLOOR, strict_floor=DENSE_FLOOR, min_score=min_score,
+            max_results=limit, veto=False, detect_collapse=True, order_matters=True,
+        )
         vetor = self.embedder.embed_one(pergunta)
         candidatos: list[dict] = []
         for esc in escopos:
-            self.ensure(esc)
-            must = []
-            if esc == "tmp":
-                self.sweep()
-                must.append({"key": "expires_at_ts", "range": {"gt": time.time()}})
-            if doc_id:
-                must.append({"key": "doc_id", "match": {"value": doc_id}})
-            filtro = {"must": must} if must else None
-            for bruto in self.q.search(self._collection(esc), vetor, DENSE_TOP_K, filtro):
-                bruto["_scope"] = esc
+            for bruto in self._busca_escopo(esc, vetor, doc_id):
                 candidatos.append(bruto)
-
-        if not candidatos:
-            return [], {"dense": 0, "rerank": None, "escopos": list(escopos)}
-
         candidatos.sort(key=lambda b: -(b.get("score") or 0.0))
-        pares, info = self.reranker.rank(
-            pergunta, [c["payload"]["document"] for c in candidatos]
-        ) if self.reranker else ([], {"ok": False, "erro": "re-rank não configurado"})
 
-        melhor_ce = max((s for _, s in pares), default=0.0)
-        colapsou = bool(pares) and melhor_ce < RERANK_COLLAPSE_MAX
-        info["colapsou"] = colapsou
-        info["melhor_ce"] = melhor_ce
+        fora = retrieval.two_stage(candidatos, pergunta, self.reranker, policy,
+                                  texto_de=lambda b: b["payload"]["document"])
 
-        if info.get("ok") and not colapsou:
-            # O CE ordena, mas não veta: quem pergunta já escolheu o documento, então
-            # entregar os melhores com o score à vista é mais útil que silêncio. O
-            # que estiver abaixo do corte vem marcado como baixa confiança.
-            acima = [(candidatos[i], s, "CE") for i, s in pares if s >= min_score]
-            abaixo = [(candidatos[i], s, "CE?") for i, s in pares if s < min_score]
-            escolhidos = (acima + abaixo)[:limit]
-        else:
-            # Sem CE utilizável, a ordem densa é entregue como tal, marcada, para que
-            # ninguém a confunda com veredito de relevância.
-            escolhidos = [(c, c.get("score", 0.0), "denso") for c in candidatos[:limit]]
+        return [self._to_hit(s.item, s.score, s.origin) for s in fora.scored], fora
 
-        hits = [self._to_hit(c, s, o) for c, s, o in escolhidos]
+    def _busca_escopo(self, escopo: str, vetor: list[float],
+                      doc_id: str | None) -> list[dict]:
+        """Primeiro estágio num acervo. Só o temporário filtra por validade."""
+        self.ensure(escopo)
+        must = []
+        if escopo == "tmp":
+            self.sweep()
+            must.append({"key": "expires_at_ts", "range": {"gt": time.time()}})
+        if doc_id:
+            must.append({"key": "doc_id", "match": {"value": doc_id}})
+        filtro = {"must": must} if must else None
+        brutos = self.q.search(self._collection(escopo), vetor, DENSE_TOP_K, filtro)
+        for b in brutos:
+            b["_scope"] = escopo
 
-        return hits, {"dense": len(candidatos), "rerank": info, "escopos": list(escopos)}
+        return brutos
 
     def _to_hit(self, bruto: dict, score: float, origem: str) -> Hit:
+        """Traduz o hit cru + o veredito do pipeline no formato de apresentação."""
         p = bruto.get("payload", {})
         md = p.get("metadata", {})
         caminho = md.get("path", "?")

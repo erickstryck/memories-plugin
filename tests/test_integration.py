@@ -86,15 +86,15 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
         self.assertEqual(scores, sorted(scores, reverse=True))
 
     def test_recall_de_dois_portoes_no_acervo_real(self):
-        hits, info = self.store.recall(["memória de longo prazo e recall automático"],
-                                       dense_floor=0.45, strict_floor=0.58, top_k=20,
-                                       min_score=0.10, max_results=6)
-        self.assertGreater(info["hits"], 0)
+        politica = core.Policy(0.45, 0.58, 0.10, 6, veto=True)
+        hits, fora = self.store.recall(["memória de longo prazo e recall automático"],
+                                       politica, top_k=20)
+        self.assertGreater(fora.candidates, 0)
         for h in hits:
             self.assertIsInstance(h, core.Recalled)
             self.assertIn(h.origem, ("CE", "denso"))
             self.assertGreaterEqual(h.dense_score, 0.0)
-        if info["ce_ran"]:
+        if fora.by_rerank:
             self.assertTrue(all(h.origem == "CE" for h in hits))
 
     def test_recall_com_multiplos_angulos_funde_por_id(self):
@@ -102,7 +102,7 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
             ["como funciona o hook de recall",
              "hook recall funciona como",
              "recall automático a cada prompt"],
-            dense_floor=0.45, strict_floor=0.58, top_k=10, min_score=0.10, max_results=6)
+            core.Policy(0.45, 0.58, 0.10, 6, veto=True), top_k=10)
         ids = [h.id for h in hits]
         self.assertEqual(len(ids), len(set(ids)), "fusão por id não pode duplicar")
 

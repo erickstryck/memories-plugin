@@ -234,18 +234,18 @@ def cmd_memory_find(args, cfg):
 
 def cmd_memory_recall(args, cfg):
     store = core.build_memory(cfg)
-    hits, info = store.recall([args.query], dense_floor=args.dense_floor,
-                              strict_floor=args.strict_floor, top_k=args.top_k,
-                              min_score=args.min_score, max_results=args.limit)
+    politica = core.Policy(dense_floor=args.dense_floor, strict_floor=args.strict_floor,
+                           min_score=args.min_score, max_results=args.limit,
+                           veto=True, order_matters=False)
+    hits, fora = store.recall([args.query], politica, args.top_k)
     if args.json:
-        saida({"info": info, "hits": [h.__dict__ for h in hits]}, True)
+        saida({"info": fora.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
 
         return
-    ce = info.get("rerank")
-    if ce and ce.get("era_logit"):
+    if fora.scale_converted:
         print("(escala logit detectada e normalizada para sigmoid)")
     if not hits:
-        print(f"nada acima do corte (melhor denso {info['melhor_denso']:.3f})")
+        print(f"nada acima do corte (melhor denso {fora.best_dense:.3f})")
 
         return
     for i, h in enumerate(hits[:args.limit], 1):
@@ -316,22 +316,22 @@ def cmd_docs_refresh(args, cfg):
 
 
 def cmd_docs_search(args, cfg):
-    hits, info = core.build_docs(cfg).search(args.query, args.scope, args.doc_id, args.limit)
+    hits, fora = core.build_docs(cfg).search(args.query, args.scope, args.doc_id, args.limit)
     if args.json:
-        saida({"info": info, "hits": [h.__dict__ for h in hits]}, True)
+        saida({"info": fora.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
 
         return
     if not hits:
         print("nenhum trecho relevante (ou o índice expirou — veja `qctx docs list`)")
 
         return
-    rr = info.get("rerank") or {}
-    if rr.get("colapsou"):
-        print(f"(re-rank colapsou — melhor CE {rr.get('melhor_ce', 0):.4f}, típico de pergunta "
+    if fora.collapsed:
+        print(f"(re-rank colapsou — melhor CE {fora.best_rerank:.4f}, típico de pergunta "
               f"e documento em línguas diferentes; usando ordem DENSA, que é indiferente "
               f"à língua)\n")
-    elif not rr.get("ok"):
-        print(f"(aviso: re-rank não rodou — {rr.get('erro')}; ordem DENSA, não é veredito)\n")
+    elif not fora.reranked:
+        print(f"(aviso: re-rank não rodou — {fora.rerank_error}; ordem DENSA, "
+              f"não é veredito)\n")
     for i, h in enumerate(hits, 1):
         aviso = f"  ⚠ {h.stale}" if h.stale else ""
         etiqueta = "biblioteca" if h.scope == "library" else "temporário"
@@ -508,7 +508,7 @@ def main() -> None:
     args = build_parser().parse_args()
     try:
         args.fn(args, core.load())
-    except (ConfigError, core.DocsError, core.QdrantError, core.ModelError) as exc:
+    except (ConfigError, core.DocsError, core.QdrantError, core.EmbeddingError) as exc:
         print(f"erro: {exc}", file=sys.stderr)
         raise SystemExit(1)
 

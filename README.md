@@ -65,7 +65,7 @@ idioma, não só semântica. Consequências no desenho:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 101 testes, sem rede, sem dependência
+python3 -m unittest discover -s tests    # 127 testes, sem rede, sem dependência
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # para `qctx` funcionar de qualquer lugar
 ```
 
@@ -183,6 +183,31 @@ core/       núcleo portável — nenhuma referência a host ou agente
 cli/        interface de linha de comando sobre o núcleo
 tests/      60 testes de lógica pura, sem rede
 ```
+
+## Desenho
+
+O núcleo depende de CONTRATOS (`core/ports.py`, `typing.Protocol`) e não de
+implementações: `VectorStore`, `EmbeddingModel`, `RerankModel`. Trocar Qdrant por
+outro banco vetorial, ou o endpoint de embedding por uma biblioteca local, é
+escrever um adaptador — nenhum arquivo de regra muda.
+
+São `Protocol` e não classe base abstrata de propósito: tipagem estrutural, sem
+herança e sem custo em tempo de execução. O ganho concreto é teste — o pipeline de
+recuperação, que é a lógica mais delicada do pacote, roda com dublês em
+milissegundos. Antes só dava para exercitá-lo com infra real, o que significa que
+ninguém o rodava enquanto editava.
+
+O pipeline de dois estágios vive em UM lugar (`core/retrieval.py`) e as diferenças
+entre consumidores são POLÍTICA, não código duplicado:
+
+| | memória | documentos |
+|---|---|---|
+| o re-rank pode eliminar? | sim, veta | não, só ordena |
+| a ordem importa? | não — tudo é injetado junto | sim — é uma lista lida de cima para baixo |
+| por quê | falso positivo polui o contexto do agente | quem pergunta já escolheu o documento; silêncio é pior que ordem imperfeita |
+
+Antes existiam três implementações da mesma ideia, e isso já custou: a normalização
+de escala do re-rank existiu num consumidor e não no outro.
 
 ## Portabilidade
 

@@ -1,0 +1,88 @@
+"""Contratos das dependências externas.
+
+São `Protocol` e não classe base abstrata de propósito: tipagem ESTRUTURAL, sem
+herança, sem registro, sem custo em tempo de execução. Um dublê de teste não
+precisa herdar de nada — basta ter os métodos. Classe base abstrata com uma única
+implementação real seria cerimônia sem benefício.
+
+O que estes contratos compram, concretamente:
+
+1. As regras de negócio (`retrieval`, `memory`, `docs`) passam a depender destas
+   assinaturas e não de `Qdrant`, `Embedder` ou `Reranker` concretos. Trocar Qdrant
+   por outro banco vetorial, ou o endpoint de embedding por uma biblioteca local, é
+   escrever um adaptador — nenhum arquivo de regra muda.
+
+2. O pipeline de recuperação, que é a lógica mais delicada do pacote, fica
+   testável SEM rede. Antes só dava para exercitá-lo em teste de integração, o que
+   significa que ninguém o roda enquanto edita.
+"""
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class EmbeddingModel(Protocol):
+    """Transforma texto em vetor."""
+
+    def embed(self, textos: list[str]) -> list[list[float]]:
+        """Vetores na MESMA ordem dos textos. Erro se a resposta vier incompleta."""
+        ...
+
+    def embed_one(self, texto: str) -> list[float]:
+        ...
+
+
+@runtime_checkable
+class RerankModel(Protocol):
+    """Julga a relevância de documentos para uma pergunta, olhando os dois juntos."""
+
+    def rank(self, query: str, documentos: list[str]) -> tuple[list[tuple[int, float]], dict]:
+        """Devolve (pares (índice, score 0..1) ordenados por score desc, info).
+
+        `info` PRECISA trazer pelo menos `ok: bool`. Quem chama tem de saber se o
+        julgamento aconteceu: um pipeline que relaxa o primeiro estágio contando com
+        o segundo fica PIOR que o estágio único quando o segundo falha em silêncio.
+        """
+        ...
+
+
+@runtime_checkable
+class VectorStore(Protocol):
+    """Armazena e busca vetores com payload, agrupados em coleções."""
+
+    def ensure_collection(self, nome: str, size: int, distance: str = ...) -> bool:
+        ...
+
+    def ensure_payload_index(self, nome: str, campo: str, schema: str) -> None:
+        ...
+
+    def collection_info(self, nome: str) -> dict | None:
+        ...
+
+    def list_collections(self) -> list[str]:
+        ...
+
+    def delete_collection(self, nome: str) -> None:
+        ...
+
+    def upsert(self, nome: str, pontos: list[dict], batch: int = ...) -> int:
+        ...
+
+    def search(self, nome: str, vector: list[float], limit: int,
+               filtro: dict | None = ..., with_payload: bool = ...) -> list[dict]:
+        ...
+
+    def get_point(self, nome: str, ponto_id) -> dict | None:
+        ...
+
+    def delete_points(self, nome: str, ids: list) -> None:
+        ...
+
+    def delete_by_filter(self, nome: str, filtro: dict) -> None:
+        ...
+
+    def scroll(self, nome: str, limit: int = ..., offset=...,
+               with_vector: bool = ..., filtro: dict | None = ...) -> tuple[list[dict], object]:
+        ...
+
+    def scroll_all(self, nome: str, filtro: dict | None = ..., with_vector: bool = ...):
+        ...

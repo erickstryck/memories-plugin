@@ -10,7 +10,8 @@ o que fazer obriga quem lê a ir procurar a documentação, e é aí que se desi
 from dataclasses import dataclass, asdict
 
 from .config import Config, ConfigError
-from .models import Embedder, ModelError, Reranker
+from .embedding import Embedder
+from .reranking import Reranker
 
 #: Prefixos de coleção gerada por outro sistema — não são candidatas úteis.
 PREFIXOS_RUIDO = ("ws-",)
@@ -50,7 +51,7 @@ def _check_embed(cfg: Config) -> tuple[Check, int | None]:
     emb = Embedder(url, cfg.embed_model, cfg.api_key, timeout=30.0)
     try:
         dim = emb.detect_dimension()
-    except ModelError as exc:
+    except EmbeddingError as exc:
         return Check("Embedding", False, f"{url} não respondeu: {exc}",
                      f"confira se o modelo {cfg.embed_model!r} está servido nesse endereço"), None
     detalhe = f"{cfg.embed_model} devolve {dim} dimensões"

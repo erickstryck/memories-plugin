@@ -217,13 +217,16 @@ def main() -> None:
         log(f"re-rank em disjuntor: falhou há {ocioso:.0f}s — corte denso estrito")
 
     top_k = int(env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20" if store.reranker else "8"))
+    # Política da MEMÓRIA: o cross-encoder VETA (falso positivo polui o contexto do
+    # agente) e a ordem entre os aprovados é cosmética, porque todos são injetados.
+    politica = core.Policy(dense_floor=DENSE_FLOOR, strict_floor=STRICT_FLOOR,
+                           min_score=MIN_SCORE, max_results=MAX_MEMORIES,
+                           veto=True, order_matters=False)
     angulos = query.angulos(prompt)
     t0 = time.monotonic()
     try:
-        hits, info = store.recall(angulos, dense_floor=DENSE_FLOOR if store.reranker else STRICT_FLOOR,
-                                  strict_floor=STRICT_FLOOR, top_k=top_k,
-                                  min_score=MIN_SCORE, max_results=MAX_MEMORIES)
-    except core.ModelError as exc:
+        hits, fora = store.recall(angulos, politica, top_k)
+    except core.EmbeddingError as exc:
         log(f"embeddings falhou ({exc}) — sem recall neste prompt")
         emitir(bloco_indisponivel("embeddings", type(exc).__name__))
         return
@@ -233,11 +236,10 @@ def main() -> None:
         return
     decorrido = time.monotonic() - t0
 
-    rr = info.get("rerank") or {}
-    if rr and not rr.get("ok") and rr.get("erro"):
+    if fora.rerank_error:
         breaker.armar()
-        log(f"re-rank falhou ({rr['erro']}) — disjuntor armado por {BREAKER_SECONDS:.0f}s")
-    elif info.get("ce_ran"):
+        log(f"re-rank falhou ({fora.rerank_error}) — disjuntor armado por {BREAKER_SECONDS:.0f}s")
+    elif fora.by_rerank:
         breaker.limpar()
 
     sessao = "".join(c if c.isalnum() or c in "-_" else "_"
@@ -250,10 +252,10 @@ def main() -> None:
     rodada = estado["round"]
 
     if not hits:
-        log(f"round {rodada}: 0 acima do corte (melhor {info['melhor_denso']:.3f}) "
+        log(f"round {rodada}: 0 acima do corte (melhor {fora.best_dense:.3f}) "
             f"em {decorrido:.1f}s | {len(angulos)} ângulos | {prompt[:60]!r}")
         salva_estado(caminho_estado, estado)
-        emitir(bloco_vazio(info["melhor_denso"], len(angulos)))
+        emitir(bloco_vazio(fora.best_dense, len(angulos)))
         return
 
     # Orça contexto. Memória já injetada há pouco volta como ponteiro de uma linha:
@@ -273,12 +275,12 @@ def main() -> None:
         orcamento -= custo
 
     salva_estado(caminho_estado, estado)
-    escala = " (escala convertida)" if rr.get("era_logit") else ""
+    escala = " (escala convertida)" if fora.scale_converted else ""
     log(f"round {rodada}: {len(cheias)} injetadas + {len(ponteiros)} ponteiros "
-        f"(de {len(hits)} relevantes / {info['hits']} hits) em {decorrido:.1f}s | "
-        f"{len(angulos)} ângulos | CE={info.get('ce_ran')}{escala} | {prompt[:60]!r}")
+        f"(de {len(hits)} relevantes / {fora.candidates} candidatos) em {decorrido:.1f}s | "
+        f"{len(angulos)} ângulos | CE={fora.by_rerank}{escala} | {prompt[:60]!r}")
 
-    emitir(monta_bloco(cheias, ponteiros, len(angulos), rr.get("era_logit", False)))
+    emitir(monta_bloco(cheias, ponteiros, len(angulos), fora.scale_converted))
 
 
 if __name__ == "__main__":

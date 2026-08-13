@@ -1,13 +1,14 @@
-"""Cliente mínimo do Qdrant, sobre a stdlib.
+"""Adaptador do Qdrant: implementa o contrato `ports.VectorStore`.
 
 Por que não o SDK oficial: este pacote é dependência de hooks que rodam a CADA
 prompt do usuário. Um `pip install` faltando, um venv errado ou um import lento
-transformam uma falha de dependência em perda de funcionalidade silenciosa. Com
-`urllib` não existe essa classe de falha, e o custo é uma centena de linhas.
+transformam falha de dependência em perda SILENCIOSA de funcionalidade.
+
+Nenhuma regra de negócio mora aqui — só tradução entre as operações do contrato e
+a API HTTP. É o que permite trocar o banco vetorial escrevendo outro adaptador,
+sem tocar em `memory`, `docs` ou `retrieval`.
 """
-import json
-import urllib.error
-import urllib.request
+from .http import HttpError, request_json
 
 
 class QdrantError(Exception):
@@ -21,21 +22,14 @@ class Qdrant:
         self.timeout = timeout
 
     def request(self, method: str, path: str, body=None):
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(f"{self.base}{path}", data=data, method=method)
-        if self.api_key:
-            req.add_header("api-key", self.api_key)
-        req.add_header("Content-Type", "application/json")
+        headers = {"api-key": self.api_key} if self.api_key else {}
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read()
-
-                return json.loads(raw.decode()) if raw else {}
-        except urllib.error.HTTPError as exc:
-            corpo = exc.read().decode()[:400]
-            raise QdrantError(f"HTTP {exc.code} em {method} {path}: {corpo}") from exc
-        except urllib.error.URLError as exc:
-            raise QdrantError(f"não alcancei o Qdrant em {self.base}: {exc.reason}") from exc
+            return request_json(f"{self.base}{path}", method=method, body=body,
+                                headers=headers, timeout=self.timeout)
+        except HttpError as exc:
+            # Traduz para o erro do domínio, preservando o status: `collection_info`
+            # e `ensure_collection` distinguem 404 de falha real por ele.
+            raise QdrantError(str(exc)) from exc
 
     # ---- coleções ----------------------------------------------------------
 

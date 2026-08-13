@@ -1,4 +1,4 @@
-"""Testes de configuração e de escala de score.
+"""Testes de configuração e da escala de score do re-rank.
 
 As duas coisas aqui são armadilhas de falha SILENCIOSA — não dão erro, só entregam
 resultado pior. Por isso têm teste: é a única forma de notar.
@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config as cfgmod
-from core.models import normalize_scores, sigmoid
+from core.reranking import normalize_scores, sigmoid
 
 
 class TestPrecedencia(unittest.TestCase):

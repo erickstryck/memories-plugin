@@ -13,14 +13,18 @@ precisasse reranquear.
 from .config import Config, ConfigError, load, save, redacted
 from .docs import DocIndex, DocsError, parse_ttl, doc_id_for
 from .memory import MemoryStore, Recalled, search_collections
-from .models import Embedder, Reranker, ModelError, normalize_scores, sigmoid
+from .embedding import Embedder, EmbeddingError
+from .reranking import Reranker, RerankError, normalize_scores, sigmoid
 from .qdrant import Qdrant, QdrantError
+from .retrieval import (CE, CE_FRACO, DENSO, Outcome, Policy, Scored,
+                        fuse_by_id, needs_rerank, two_stage)
 
 __all__ = [
     "Config", "ConfigError", "load", "save", "redacted",
     "DocIndex", "DocsError", "parse_ttl", "doc_id_for",
     "MemoryStore", "Recalled", "search_collections",
-    "Embedder", "Reranker", "ModelError", "normalize_scores", "sigmoid",
+    "Embedder", "EmbeddingError", "Reranker", "RerankError",
+    "normalize_scores", "sigmoid", "Policy", "two_stage", "fuse_by_id",
     "Qdrant", "QdrantError",
     "build_qdrant", "build_embedder", "build_reranker", "build_memory", "build_docs",
 ]
