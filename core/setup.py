@@ -82,7 +82,7 @@ def _check_rerank(cfg: Config) -> Check:
         return Check("Re-rank", False, f"{url} falhou: {info['erro']}",
                      f"confira se o servidor subiu com suporte a rerank e se o modelo "
                      f"{cfg.rerank_model!r} está lá", warning=True)
-    scale = "logit cru (normalizado para sigmoid)" if info["era_logit"] else "sigmoid 0..1"
+    scale = "logit cru (normalizado para sigmoid)" if info["was_logit"] else "sigmoid 0..1"
     best = max(s for _, s in pairs)
     top_is_right = pairs[0][0] == 0
     detail = f"{cfg.rerank_model} responde em {scale}; melhor score {best:.3f}"

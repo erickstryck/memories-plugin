@@ -190,8 +190,8 @@ class FakeReranker:
     def rank(self, query, documents):
         self.calls.append((query, list(documents)))
         if not self.ok:
-            return [], {"ok": False, "erro": self.error or "falhou", "era_logit": False}
+            return [], {"ok": False, "error": self.error or "failed", "was_logit": False}
         scores = self.scores if self.scores is not None else [1.0] * len(documents)
         pairs = sorted(enumerate(scores[:len(documents)]), key=lambda p: -p[1])
 
-        return pairs, {"ok": True, "erro": None, "era_logit": self.was_logit}
+        return pairs, {"ok": True, "error": None, "was_logit": self.was_logit}

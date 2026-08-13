@@ -1,20 +1,21 @@
-"""Cliente de re-rank (cross-encoder), com o contrato de rede como ESTRATÉGIA.
+"""Re-rank (cross-encoder) client, with the wire contract as a STRATEGY.
 
-Duas coisas moram aqui, e nenhuma é o algoritmo de recuperação — esse está em
-`retrieval`, compartilhado. Aqui é só a conversa com o servidor:
+Two things live here, and neither is the retrieval algorithm — that one is in
+`retrieval`, shared. This is only the conversation with the server:
 
-1. O CONTRATO DE REDE, que varia por implementação de servidor. Antes era um `if`
-   dentro do método de ranquear, olhando o sufixo da URL. Agora cada forma é uma
-   classe pequena: acrescentar um servidor novo é escrever uma estratégia e
-   registrá-la, sem tocar no caminho que já funciona (OCP). O `if` também escondia
-   que as duas formas diferem no CORPO e na LEITURA da resposta, não só no caminho.
+1. The WIRE CONTRACT, which varies per server implementation. It used to be an `if`
+   inside the ranking method, looking at the URL suffix. Now each shape is a small
+   class: adding a new server means writing a strategy and registering it, without
+   touching the path that already works (OCP). The `if` also hid the fact that the two
+   shapes differ in the BODY and in how the response is READ, not just in the path.
 
-2. A NORMALIZAÇÃO DE ESCALA, que é obrigatória e não opcional: o MESMO modelo
-   devolve sigmoid (0..1) num servidor e logit cru noutro. Medido com
-   bge-reranker-v2-m3 no mesmo documento irrelevante: 1.6e-05 num servidor e -11.04
-   no outro, sendo -11.04 exatamente logit(1.6e-05). Um corte calibrado numa escala
-   é INÓCUO na outra — 0.10 em escala de logit fica no centro da distribuição e
-   aceita quase tudo. A falha é silenciosa: nenhum erro, só relevância pior.
+2. The SCALE NORMALIZATION, which is mandatory rather than optional: the SAME model
+   returns a sigmoid (0..1) on one server and a raw logit on another. Measured with
+   bge-reranker-v2-m3 on the same irrelevant document: 1.6e-05 on one server and
+   -11.04 on the other, where -11.04 is exactly logit(1.6e-05). A cutoff calibrated on
+   one scale is INERT on the other — 0.10 on a logit scale sits in the middle of the
+   distribution and accepts nearly everything. The failure is silent: no error, just
+   worse relevance.
 """
 import math
 from dataclasses import dataclass
@@ -30,19 +31,19 @@ class RerankError(CoreError):
 def sigmoid(x: float) -> float:
     if x >= 0:
         return 1.0 / (1.0 + math.exp(-x))
-    e = math.exp(x)  # evita overflow quando x é muito negativo
+    e = math.exp(x)  # avoids overflow when x is very negative
 
     return e / (1.0 + e)
 
 
 def normalize_scores(pairs: list[tuple[int, float]]) -> tuple[list[tuple[int, float]], bool]:
-    """Converte para a faixa 0..1 quando a resposta veio em logit.
+    """Converts to the 0..1 range when the response came back as logits.
 
-    Detecta pela FAIXA e não por configuração: configuração erra em silêncio quando
-    alguém troca o servidor e esquece de atualizar. Equivalência útil de cabeça:
-    sigmoid 0.10 corresponde a logit -2.197.
+    It detects by RANGE and not by configuration: configuration is wrong silently when
+    someone swaps the server and forgets to update it. A useful equivalence to keep in
+    mind: sigmoid 0.10 corresponds to logit -2.197.
 
-    Devolve (pares normalizados, era_logit).
+    Returns (normalized pairs, was_logit).
     """
     if not pairs:
         return [], False
@@ -53,11 +54,11 @@ def normalize_scores(pairs: list[tuple[int, float]]) -> tuple[list[tuple[int, fl
     return pairs, was_logit
 
 
-# ---- estratégias de contrato de rede ---------------------------------------
+# ---- wire contract strategies ----------------------------------------------
 
 @dataclass(frozen=True)
 class WireContract:
-    """Como montar o pedido e como ler a resposta de um servidor de re-rank."""
+    """How to build the request and how to read the response of a re-rank server."""
     name: str
 
     def body(self, model: str, query: str, documents: list[str]) -> dict:
@@ -70,8 +71,8 @@ class WireContract:
 class JinaContract(WireContract):
     """`{model, query, documents}` -> `results[].relevance_score`.
 
-    Forma exposta por servidores que seguem a API de rerank da JinaAI, incluindo o
-    endpoint `/rerank` do llama.cpp e do vLLM.
+    The shape exposed by servers following JinaAI's rerank API, including the
+    `/rerank` endpoint of llama.cpp and of vLLM.
     """
 
     def __init__(self):
@@ -87,8 +88,8 @@ class JinaContract(WireContract):
 class ScoreContract(WireContract):
     """`{model, text_1, text_2}` -> `data[].score`.
 
-    Forma do endpoint `/score`, que existe em paralelo ao `/rerank` em alguns
-    servidores e é a única disponível em outros.
+    The shape of the `/score` endpoint, which exists alongside `/rerank` on some
+    servers and is the only one available on others.
     """
 
     def __init__(self):
@@ -116,12 +117,12 @@ def _pairs(lines: list, field: str) -> list[tuple[int, float]]:
 
 
 def contract_for(url: str) -> WireContract:
-    """Escolhe a estratégia pelo endereço. Sufixo `/score` usa a forma de score;
-    o resto usa a forma Jina, que é a mais comum."""
+    """Picks the strategy from the address. A `/score` suffix uses the score shape;
+    everything else uses the Jina shape, which is the more common one."""
     return ScoreContract() if url.rstrip("/").endswith("score") else JinaContract()
 
 
-# ---- cliente ----------------------------------------------------------------
+# ---- client -----------------------------------------------------------------
 
 class Reranker:
     def __init__(self, url: str, model: str, api_key: str = "", timeout: float = 15.0,
@@ -137,29 +138,30 @@ class Reranker:
         self.contract = contract or contract_for(url)
 
     def rank(self, query: str, documents: list[str]) -> tuple[list[tuple[int, float]], dict]:
-        """Reordena `documentos` para `query`. NUNCA levanta.
+        """Reorders `documents` for `query`. NEVER raises.
 
-        Devolve (pares ordenados por score desc, info com `ok`). Falha é DEGRADAÇÃO,
-        não exceção: o re-rank melhora a ordenação e nunca é pré-requisito dela, e
-        quem chama precisa poder seguir com o primeiro estágio. Mas `ok` tem de ser
-        checado — um pipeline que relaxa o primeiro corte contando com o segundo fica
-        pior que o estágio único quando o segundo falha em silêncio.
+        Returns (pairs sorted by score desc, info carrying `ok`). Failure is
+        DEGRADATION, not an exception: re-ranking improves the ordering and is never a
+        prerequisite for it, and the caller has to be able to carry on with the first
+        stage. But `ok` MUST be checked — a pipeline that relaxes the first cut
+        counting on the second ends up worse than the single stage when the second
+        fails silently.
 
-        Um cross-encoder faz um forward por par (query, documento) e não tem vetor
-        pré-computável: o custo é linear no total de tokens. Daí os tetos — o corte é
-        do JULGAMENTO, não do que o chamador entrega adiante.
+        A cross-encoder does one forward pass per (query, document) pair and has no
+        precomputable vector: the cost is linear in the total token count. Hence the
+        ceilings — the cut applies to the JUDGEMENT, not to what the caller passes on.
         """
-        info = {"ok": False, "era_logit": False, "descartados": 0,
-                "erro": None, "contrato": self.contract.name}
+        info = {"ok": False, "was_logit": False, "dropped": 0,
+                "error": None, "contract": self.contract.name}
         if not documents:
             return [], info
 
-        info["descartados"] = max(0, len(documents) - self.max_docs)
+        info["dropped"] = max(0, len(documents) - self.max_docs)
         candidates = [d[:self.doc_chars] for d in documents[:self.max_docs]]
-        # A LEITURA da resposta fica DENTRO do try: um servidor que responde uma
-        # lista, ou um score em string, fazia o parse explodir e quebrava a promessa
-        # de "nunca levanta" — justamente com a resposta inesperada, que é quando a
-        # promessa importa.
+        # READING the response stays INSIDE the try: a server answering with a list, or
+        # with a score as a string, made the parse blow up and broke the "never raises"
+        # promise — precisely on an unexpected response, which is when the promise
+        # matters.
         try:
             response = post_json(self.url,
                                  self.contract.body(self.model, query[:self.query_chars], candidates),
@@ -167,21 +169,21 @@ class Reranker:
             pairs = [(i, s) for i, s in self.contract.parse(response)
                      if 0 <= i < len(candidates)]
         except HttpError as exc:
-            info["erro"] = str(exc)
+            info["error"] = str(exc)
 
             return [], info
-        except Exception as exc:  # resposta em forma inesperada, e o que mais vier
-            info["erro"] = f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # unexpected response shape, and whatever else comes
+            info["error"] = f"{type(exc).__name__}: {exc}"
 
             return [], info
         if not pairs:
-            info["erro"] = f"resposta sem hits utilizáveis: {str(response)[:200]}"
+            info["error"] = f"response with no usable hits: {str(response)[:200]}"
 
             return [], info
 
         pairs, was_logit = normalize_scores(pairs)
         pairs.sort(key=lambda p: -p[1])
         info["ok"] = True
-        info["era_logit"] = was_logit
+        info["was_logit"] = was_logit
 
         return pairs, info

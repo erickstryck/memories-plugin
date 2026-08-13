@@ -1,20 +1,21 @@
-"""Memória semântica de longo prazo.
+"""Long-term semantic memory.
 
-Substitui, sem migrar dado nenhum, um servidor MCP feito à mão: o FORMATO DO
-PAYLOAD é deliberadamente idêntico ao que já está gravado —
-`{document, metadata, created_at, updated_at}` — então um acervo existente
-continua legível e gravável por este módulo sem conversão, sem reindexação e sem
-janela de risco.
+It replaces a hand-made MCP server without migrating a single record: the PAYLOAD
+FORMAT is deliberately identical to what is already stored —
+`{document, metadata, created_at, updated_at}` — so an existing archive stays
+readable and writable by this module with no conversion, no reindexing and no window
+of risk.
 
-Duas direções, e a de leitura é a que costuma ser esquecida:
-  - `recall` / `find`: buscar ANTES de afirmar, para não re-decidir o que já foi
-    decidido nem contradizer o que já foi medido.
-  - `store` / `update`: persistir fato durável, um por registro.
+Two directions, and the reading one is the one usually forgotten:
+  - `recall` / `find`: search BEFORE asserting, so as not to re-decide what has
+    already been decided nor contradict what has already been measured.
+  - `store` / `update`: persist a durable fact, one per record.
 
-`recall` implementa o pipeline de DOIS PORTÕES: o denso relaxa o piso para ganhar
-alcance e o cross-encoder aplica a precisão. A assimetria importa — se o segundo
-portão não roda, o piso permissivo do primeiro TEM de voltar ao valor estrito,
-senão o modo com re-rank fica pior que o modo sem, que é o oposto da intenção.
+`recall` implements the TWO-GATE pipeline: the dense stage relaxes the floor to gain
+reach and the cross-encoder supplies the precision. The asymmetry matters — if the
+second gate does not run, the first one's permissive floor MUST go back to the strict
+value, otherwise the mode with re-ranking ends up worse than the mode without, which
+is the opposite of the intent.
 """
 import uuid
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ class MemoryError_(CoreError):
 class Recalled:
     id: str
     score: float
-    origin: str            # "CE" ou "denso"
+    origin: str            # "CE" or "dense"
     dense_score: float
     document: str
     metadata: dict
@@ -52,29 +53,29 @@ class MemoryStore:
         self.vector_size = vector_size
 
     def ensure(self) -> None:
-        """Garante a coleção. Só para caminho de ESCRITA."""
+        """Ensures the collection exists. For the WRITE path only."""
         self.q.ensure_collection(self.collection, self.vector_size)
 
     def require_existing(self) -> None:
-        """Exige que a coleção exista. Para caminho de LEITURA.
+        """Requires the collection to exist. For the READ path.
 
-        Ler não pode CRIAR: com um erro de digitação no nome, `ensure` criava uma
-        coleção vazia, a busca devolvia zero hits e o consumidor concluía "não há
-        precedente registrado sobre este assunto". Ou seja um typo de configuração
-        virava a afirmação mais perigosa que este sistema pode fazer. Melhor falhar
-        alto — e o hook transforma isso em aviso explícito de indisponibilidade.
+        Reading must not CREATE: with a typo in the name, `ensure` created an empty
+        collection, the search returned zero hits and the consumer concluded "there is
+        no recorded precedent on this subject". That is, a configuration typo turned
+        into the most dangerous statement this system can make. Better to fail loudly —
+        and the hook turns that into an explicit unavailability warning.
         """
         if self.q.collection_info(self.collection) is None:
             raise MemoryError_(
-                f"coleção de memória {self.collection!r} não existe. Confira o nome com "
-                f"`collections list`; nada é criado por uma leitura."
+                f"memory collection {self.collection!r} does not exist. Check the name with "
+                f"`collections list`; nothing is created by a read."
             )
 
-    # ---- escrita -----------------------------------------------------------
+    # ---- writing -----------------------------------------------------------
 
     def store(self, information: str, metadata: dict | None = None) -> dict:
         if not information or not information.strip():
-            raise MemoryError_("memória vazia não é gravável")
+            raise MemoryError_("an empty memory is not writable")
         self.ensure()
         mid = str(uuid.uuid4())
         vector = self.embedder.embed_one(information)
@@ -89,11 +90,11 @@ class MemoryStore:
         return {"status": "created", "id": mid}
 
     def store_many(self, items: list[dict]) -> dict:
-        """Lote com UMA ida ao endpoint de embeddings, tudo-ou-nada.
+        """A batch with ONE trip to the embeddings endpoint, all-or-nothing.
 
-        Os vetores são gerados ANTES de qualquer escrita: um timeout no meio do
-        lote não deixa metade gravada, que é o pior estado possível para um acervo
-        onde duplicata parcial é indistinguível de fato novo.
+        The vectors are generated BEFORE any write: a timeout halfway through the batch
+        does not leave half of it stored, which is the worst possible state for an
+        archive where a partial duplicate is indistinguishable from a new fact.
         """
         if not items:
             return {"status": "noop", "ids": [], "count": 0}
@@ -101,7 +102,7 @@ class MemoryStore:
         for i, item in enumerate(items):
             info = (item or {}).get("information")
             if not isinstance(info, str) or not info.strip():
-                raise MemoryError_(f"itens[{i}] precisa de 'information' (string não vazia)")
+                raise MemoryError_(f"items[{i}] needs 'information' (a non-empty string)")
             texts.append(info)
         self.ensure()
         vectors = self.embedder.embed(texts)
@@ -131,10 +132,10 @@ class MemoryStore:
         payload = {"document": new_doc, "metadata": new_meta,
                    "created_at": previous.get("created_at", _now()), "updated_at": _now()}
 
-        # Texto inalterado significa vetor inalterado: recalcular seria pagar uma ida
-        # à rede para obter o mesmo número. Pior, tornava impossível corrigir uma
-        # etiqueta enquanto o endpoint de embedding estivesse fora — uma operação que
-        # não depende dele.
+        # Unchanged text means an unchanged vector: recomputing it would pay a network
+        # round trip to get the same number back. Worse, it made fixing a label
+        # impossible while the embedding endpoint was down — an operation that does not
+        # depend on it.
         if new_doc == previous.get("document"):
             self.q.set_payload(self.collection, mid, payload)
 
@@ -151,11 +152,11 @@ class MemoryStore:
 
         return {"status": "deleted", "id": mid}
 
-    # ---- leitura -----------------------------------------------------------
+    # ---- reading -----------------------------------------------------------
 
     def find(self, query: str, limit: int = 5) -> list[dict]:
-        """Busca densa pura, sem re-rank. Barata; use quando a ordem entre os
-        relevantes não importa (por exemplo para deduplicar antes de gravar)."""
+        """Pure dense search, no re-ranking. Cheap; use it when the order among the
+        relevant results does not matter (for example to dedupe before writing)."""
         self.require_existing()
         vector = self.embedder.embed_one(query)
         output = []
@@ -173,16 +174,16 @@ class MemoryStore:
 
     def recall(self, queries: list[str], policy: retrieval.Policy,
                top_k: int) -> tuple[list[Recalled], retrieval.Outcome]:
-        """Recupera memórias para vários ÂNGULOS da mesma pergunta.
+        """Retrieves memories for several ANGLES on the same question.
 
-        Esta classe cuida do PRIMEIRO estágio — embeddings, busca por vetor e fusão.
-        O segundo estágio e a política de seleção vivem em `retrieval`, compartilhados
-        com a busca de documentos: enquanto eram dois códigos, uma correção entrava
-        num e não no outro.
+        This class handles the FIRST stage — embeddings, vector search and fusion. The
+        second stage and the selection policy live in `retrieval`, shared with document
+        search: while they were two separate pieces of code, a fix landed in one and not
+        the other.
 
-        Os ângulos vão numa única chamada de embeddings, porque o endpoint aceita
-        `input` como array. A fusão é por id pelo MAIOR score: um registro que aparece
-        em dois ângulos não deve ser penalizado pelo pior deles.
+        The angles go out in a single embeddings call, because the endpoint accepts
+        `input` as an array. Fusion is by id keeping the HIGHEST score: a record that
+        shows up in two angles should not be penalized by the worse of the two.
         """
         self.require_existing()
         vectors = self.embedder.embed(queries)
@@ -195,8 +196,8 @@ class MemoryStore:
         candidates = [h for h in fused if h["score"] >= floor]
         outcome = retrieval.two_stage(candidates, queries[0], self.reranker, policy,
                                    text_of=lambda h: h["document"])
-        # `best_dense` do pipeline vê só os candidatos; para dizer "nada passou do
-        # corte, o melhor foi X" o número útil é o melhor de TODOS os hits.
+        # The pipeline's `best_dense` only sees the candidates; to say "nothing cleared
+        # the cut, the best was X" the useful number is the best of ALL the hits.
         if fused:
             outcome.best_dense = fused[0]["score"]
 
@@ -204,10 +205,10 @@ class MemoryStore:
 
     @staticmethod
     def _flatten_hit(hit: dict) -> dict | None:
-        """Achata o hit do banco no formato que o pipeline consome.
+        """Flattens the store's hit into the shape the pipeline consumes.
 
-        Devolve None para registro sem documento utilizável: vetor sem texto não tem
-        como ser julgado pelo cross-encoder nem apresentado a ninguém.
+        Returns None for a record with no usable document: a vector without text can
+        neither be judged by the cross-encoder nor presented to anyone.
         """
         p = hit.get("payload", {}) or {}
         doc = p.get("document")
@@ -261,12 +262,12 @@ class MemoryStore:
 def search_collections(qdrant, embedder, query: str, collections: list[str] | None,
                        vector_size: int, limit: int = 5,
                        max_results: int = 25) -> dict:
-    """Busca SOMENTE LEITURA em coleções arbitrárias.
+    """READ-ONLY search across arbitrary collections.
 
-    Serve para consultar acervos de outros sistemas que compartilham o mesmo
-    modelo de embedding. Coleção de dimensão diferente é PULADA e reportada — ler
-    silenciosamente de um acervo de outro modelo devolve vizinhos aleatórios com
-    score plausível, que é pior que devolver nada.
+    It serves to query archives belonging to other systems that share the same
+    embedding model. A collection with a different dimension is SKIPPED and reported —
+    reading silently from an archive built by another model returns random neighbours
+    with a plausible score, which is worse than returning nothing.
     """
     vector = embedder.embed_one(query)
     targets = collections if collections else qdrant.list_collections()
@@ -274,15 +275,15 @@ def search_collections(qdrant, embedder, query: str, collections: list[str] | No
     for name in targets:
         info = qdrant.collection_info(name)
         if info is None or info.get("size") is None:
-            skipped_cols.append({"collection": name, "motivo": "não encontrada / vetor nomeado"})
+            skipped_cols.append({"collection": name, "reason": "not found / named vector"})
             continue
         if info["size"] != vector_size:
-            skipped_cols.append({"collection": name, "motivo": f"dimensão {info['size']} ≠ {vector_size}"})
+            skipped_cols.append({"collection": name, "reason": f"dimension {info['size']} ≠ {vector_size}"})
             continue
         try:
             hits = qdrant.search(name, vector, limit)
         except Exception as exc:
-            skipped_cols.append({"collection": name, "motivo": f"erro: {type(exc).__name__}"})
+            skipped_cols.append({"collection": name, "reason": f"error: {type(exc).__name__}"})
             continue
         searched.append(name)
         for hit in hits:
