@@ -1,9 +1,9 @@
-"""Memória e índice de documentos, com dublês — sem rede, sem credencial.
+"""Memory and the document index, with fakes — no network, no credentials.
 
-Cobre offline o que antes só existia sob teste de integração. O caso mais
-importante é a FORMA DO PAYLOAD: ela é a propriedade que permite substituir o
-servidor anterior sem migrar dado, e estava verificada apenas contra a coleção viva
-do usuário. Propriedade de segurança que só é testada em produção não é testada.
+It covers offline what previously existed only under an integration test. The most
+important case is the PAYLOAD SHAPE: it is the property that allows replacing the
+previous server without migrating data, and it was verified only against the user's live
+collection. A safety property tested only in production is not tested.
 """
 import os
 import sys
@@ -19,8 +19,8 @@ from core.memory import MemoryError_, MemoryStore
 from tests.fakes import (FakeEmbedder, FailingFakeEmbedder, FakeReranker,
                          FakeVectorStore)
 
-#: As quatro chaves que o servidor MCP anterior gravava. Mudar isto torna o acervo
-#: existente inconsistente, sem nenhum erro aparecer.
+#: The four keys the previous MCP server wrote. Changing this makes the existing archive
+#: inconsistent, with no error appearing anywhere.
 KEYS = {"document", "metadata", "created_at", "updated_at"}
 
 POL = retrieval.Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
@@ -35,11 +35,11 @@ def store(reranker=None, collection="mem"):
 
 
 class TestPayloadShape(unittest.TestCase):
-    """Compatibilidade com o acervo já gravado — a propriedade que sustenta a troca."""
+    """Compatibility with the archive already stored — the property the swap rests on."""
 
     def test_store_writes_exactly_the_four_keys(self):
         s, q, _ = store()
-        r = s.store("um fato", {"type": "reference"})
+        r = s.store("a fact", {"type": "reference"})
         point = q.get_point("mem", r["id"])
         self.assertEqual(set(point["payload"]), KEYS)
 
@@ -54,9 +54,9 @@ class TestPayloadShape(unittest.TestCase):
         mid = s.store("original")["id"]
         before = q.get_point("mem", mid)["payload"]["created_at"]
         time.sleep(0.01)
-        s.update(mid, information="corrigido")
+        s.update(mid, information="corrected")
         after = q.get_point("mem", mid)["payload"]
-        self.assertEqual(after["created_at"], before, "created_at não pode ser reescrito")
+        self.assertEqual(after["created_at"], before, "created_at must not be rewritten")
         self.assertNotEqual(after["updated_at"], before)
         self.assertEqual(set(after), KEYS)
 
@@ -69,13 +69,13 @@ class TestPayloadShape(unittest.TestCase):
 
     def test_update_without_text_keeps_the_document(self):
         s, q, _ = store()
-        mid = s.store("texto original")["id"]
+        mid = s.store("original text")["id"]
         s.update(mid, metadata={"type": "user"})
-        self.assertEqual(q.get_point("mem", mid)["payload"]["document"], "texto original")
+        self.assertEqual(q.get_point("mem", mid)["payload"]["document"], "original text")
 
     def test_update_of_a_missing_id_does_not_create(self):
         s, q, _ = store()
-        self.assertEqual(s.update("nao-existe", information="x")["status"], "not_found")
+        self.assertEqual(s.update("does-not-exist", information="x")["status"], "not_found")
         self.assertEqual(len(q.collections["mem"]["points"]), 0)
 
 
@@ -89,30 +89,31 @@ class TestRefusedWrites(unittest.TestCase):
     def test_batch_validates_before_writing_anything(self):
         s, q, _ = store()
         with self.assertRaises(MemoryError_):
-            s.store_many([{"information": "válido"}, {"information": "  "}])
+            s.store_many([{"information": "valid"}, {"information": "  "}])
         self.assertEqual(len(q.collections["mem"]["points"]), 0,
-                         "validação tem de ser ANTES de escrever, não durante")
+                         "validation has to happen BEFORE writing, not during")
 
     def test_batch_makes_ONE_embedding_call(self):
         s, _, emb = store()
-        s.store_many([{"information": f"fato {i}"} for i in range(5)])
-        self.assertEqual(len(emb.calls), 1, "o ganho do lote é uma ida à rede, não N")
+        s.store_many([{"information": f"fact {i}"} for i in range(5)])
+        self.assertEqual(len(emb.calls), 1, "the point of a batch is one network trip, not N")
 
 
 class TestReadsNeverCreate(unittest.TestCase):
-    """Ler não pode CRIAR coleção: com um typo no nome, a busca devolveria zero e o
-    consumidor concluiria 'não há precedente' — a afirmação mais perigosa possível."""
+    """A read must not CREATE a collection: with a typo in the name, the search would
+    return zero and the consumer would conclude 'there is no precedent' — the most
+    dangerous statement possible."""
 
     def _missing_collection(self):
         q, emb = FakeVectorStore(), FakeEmbedder()
 
-        return MemoryStore(q, emb, None, "nao_existe", emb.dim), q
+        return MemoryStore(q, emb, None, "does_not_exist", emb.dim), q
 
     def test_find_fails_loudly(self):
         s, q = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.find("x")
-        self.assertEqual(q.list_collections(), [], "nada pode ter sido criado")
+        self.assertEqual(q.list_collections(), [], "nothing may have been created")
 
     def test_recall_fails_loudly(self):
         s, _ = self._missing_collection()
@@ -126,26 +127,26 @@ class TestReadsNeverCreate(unittest.TestCase):
 
     def test_store_MAY_create(self):
         s, q = self._missing_collection()
-        s.store("primeiro fato")
-        self.assertIn("nao_existe", q.list_collections(), "escrita cria, leitura não")
+        s.store("first fact")
+        self.assertIn("does_not_exist", q.list_collections(), "a write creates, a read does not")
 
 
 class TestRecall(unittest.TestCase):
     def _populate(self, reranker=None):
         s, q, _ = store(reranker)
-        s.store("paginação do poll trunca em 100 itens", {"type": "reference"})
-        s.store("o cursor regride quando o relógio recua", {"type": "reference"})
-        s.store("receita de bolo de cenoura com cobertura", {"type": "user"})
+        s.store("poll pagination truncates at 100 items", {"type": "reference"})
+        s.store("the cursor regresses when the clock steps back", {"type": "reference"})
+        s.store("carrot cake recipe with frosting", {"type": "user"})
 
         return s, q
 
     def test_retrieves_by_similarity_and_returns_Recalled(self):
         s, _ = self._populate()
-        hits, outcome = s.recall(["paginação do poll trunca"], POL, top_k=10)
+        hits, outcome = s.recall(["poll pagination truncates"], POL, top_k=10)
         self.assertTrue(hits)
         self.assertIsInstance(hits[0], core.Recalled)
-        self.assertIn("paginação", hits[0].document,
-                      "a consulta compartilha três palavras com este registro")
+        self.assertIn("pagination", hits[0].document,
+                      "the query shares three words with this record")
         self.assertEqual(hits[0].origin, "dense")
 
     def test_floor_relaxes_ONLY_when_a_reranker_exists(self):
@@ -154,36 +155,36 @@ class TestRecall(unittest.TestCase):
         _, out_without_ce = without_ce.recall(["poll"], POL, top_k=10)
         _, out_with_ce = with_ce.recall(["poll"], POL, top_k=10)
         self.assertGreaterEqual(out_with_ce.candidates, out_without_ce.candidates,
-                                "com segundo estágio o primeiro pode ser mais generoso")
+                                "with a second stage the first one can be more generous")
 
     def test_fusing_angles_does_not_duplicate(self):
         s, _ = self._populate()
-        hits, _ = s.recall(["paginação do poll", "poll paginação", "trunca 100 itens"],
+        hits, _ = s.recall(["poll pagination", "pagination poll", "truncates 100 items"],
                            POL, top_k=10)
         ids = [h.id for h in hits]
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_best_dense_reports_the_best_of_ALL_hits(self):
-        """Para dizer 'nada passou do corte, o melhor foi X', o número útil é o
-        melhor de todos — não o melhor dos que passaram o piso."""
+        """To say 'nothing cleared the cut, the best was X', the useful number is the best
+        of them all — not the best of those that cleared the floor."""
         s, _ = self._populate()
-        strict_hits = retrieval.Policy(0.99, 0.99, 0.10, 6, veto=True)
-        hits, outcome = s.recall(["assunto totalmente ausente xyz"], strict_hits, top_k=10)
+        strict = retrieval.Policy(0.99, 0.99, 0.10, 6, veto=True)
+        hits, outcome = s.recall(["completely absent subject xyz"], strict, top_k=10)
         self.assertEqual(hits, [])
         self.assertGreater(outcome.best_dense, 0.0)
 
     def test_record_without_a_document_is_discarded(self):
         s, q, _ = store()
-        q.upsert("mem", [{"id": "vazio", "vector": [1.0] * 8,
+        q.upsert("mem", [{"id": "empty", "vector": [1.0] * 8,
                           "payload": {"document": "   ", "metadata": {}}}])
-        hits, _ = s.recall(["qualquer"], retrieval.Policy(0.0, 0.0, 0.10, 6), top_k=10)
+        hits, _ = s.recall(["anything"], retrieval.Policy(0.0, 0.0, 0.10, 6), top_k=10)
         self.assertEqual([h.id for h in hits], [],
-                         "vetor sem texto não pode ser julgado nem apresentado")
+                         "a vector with no text can be neither judged nor presented")
 
     def test_embedding_failure_propagates_as_a_domain_error(self):
         q = FakeVectorStore()
         q.ensure_collection("mem", 8)
-        s = MemoryStore(q, FailingFakeEmbedder(core.EmbeddingError("fora")), None, "mem", 8)
+        s = MemoryStore(q, FailingFakeEmbedder(core.EmbeddingError("down")), None, "mem", 8)
         with self.assertRaises(core.CoreError):
             s.recall(["x"], POL, top_k=5)
 
@@ -194,7 +195,7 @@ class TestDocsOffline(unittest.TestCase):
 
         return DocIndex(q, emb, reranker, "tmp", "lib", emb.dim), q
 
-    def _write_file(self, content="# Titulo\n\ncorpo do documento aqui\n"):
+    def _write_file(self, content="# Title\n\nbody of the document here\n"):
         import tempfile
         d = tempfile.mkdtemp()
         path = os.path.join(d, "doc.md")
@@ -211,7 +212,7 @@ class TestDocsOffline(unittest.TestCase):
         tmp = list(q.collections["tmp"]["points"].values())[0]["payload"]
         lib = list(q.collections["lib"]["points"].values())[0]["payload"]
         self.assertIn("expires_at_ts", tmp)
-        self.assertNotIn("expires_at_ts", lib, "biblioteca não expira, por construção")
+        self.assertNotIn("expires_at_ts", lib, "the library does not expire, by construction")
 
     def test_reindexing_replaces_instead_of_accumulating(self):
         idx, q = self._index()
@@ -224,13 +225,13 @@ class TestDocsOffline(unittest.TestCase):
     def test_sweep_removes_only_what_expired(self):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=-1)
-        idx.index_file(self._write_file("outro conteudo aqui\n"), ttl_seconds=600)
+        idx.index_file(self._write_file("other content here\n"), ttl_seconds=600)
         idx.sweep()
         remaining_docs = [p["payload"]["document"]
                      for p in q.collections["tmp"]["points"].values()]
-        self.assertTrue(remaining_docs, "o de 600s tem de sobreviver")
-        self.assertTrue(all("outro" in d for d in remaining_docs),
-                        "só o vencido é removido")
+        self.assertTrue(remaining_docs, "the 600s one has to survive")
+        self.assertTrue(all("other" in d for d in remaining_docs),
+                        "only the expired one is removed")
 
     def test_purging_temporary_does_not_touch_the_library(self):
         idx, q = self._index()
@@ -244,10 +245,10 @@ class TestDocsOffline(unittest.TestCase):
     def test_binary_is_refused(self):
         idx, _ = self._index()
         with self.assertRaises(core.DocsError):
-            idx.index_file(self._write_file("texto\x00binario"))
+            idx.index_file(self._write_file("text\x00binary"))
 
     def test_line_range_reproduces_the_chunk(self):
-        content = "\n".join(f"linha {i}" for i in range(1, 21)) + "\n"
+        content = "\n".join(f"line {i}" for i in range(1, 21)) + "\n"
         path = self._write_file(content)
         idx, q = self._index()
         idx.keep_file(path)
@@ -256,7 +257,7 @@ class TestDocsOffline(unittest.TestCase):
             md, doc = p["payload"]["metadata"], p["payload"]["document"]
             slice_text = "\n".join(lines[md["start_line"] - 1:md["end_line"]])
             self.assertEqual(slice_text.strip("\n"), doc,
-                             "é o contrato do modo localizador")
+                             "this is the contract of locator mode")
 
 
 if __name__ == "__main__":

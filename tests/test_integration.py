@@ -1,18 +1,21 @@
-"""Testes de INTEGRAÇÃO — exigem Qdrant e endpoints de modelo reais.
+"""INTEGRATION tests — they require a real Qdrant and real model endpoints.
 
-Ficam fora da suíte padrão de propósito: `python3 -m unittest discover -s tests`
-tem de rodar offline e em milissegundos. Para rodar estes:
+They stay out of the default suite on purpose: `python3 -m unittest discover -s tests`
+has to run offline and in milliseconds. To run these:
 
     QCTX_INTEGRATION=1 python3 -m unittest tests.test_integration -v
 
-REGRA DE SEGURANÇA, e não é negociável: o acervo de memória configurado é tratado
-como PRODUÇÃO. Toda escrita vai para uma coleção descartável criada e apagada pelo
-próprio teste; no acervo real só há LEITURA. Um teste que apaga memória de verdade
-é pior que nenhum teste.
+SAFETY RULE, and it is not negotiable: the configured memory archive is treated as
+PRODUCTION. Every write goes to a throwaway collection created and deleted by the test
+itself; against the real archive there is only READING. A test that deletes real memory
+is worse than no test.
 
-O que estes testes provam, e que teste offline não consegue: que o núcleo lê o
-payload escrito pelo servidor MCP antigo sem conversão, e que o payload que ele
-escreve tem exatamente as mesmas chaves — é o que torna a substituição segura.
+What these tests prove, and an offline test cannot: that the core reads the payload
+written by the old MCP server with no conversion, and that the payload it writes has
+exactly the same keys — that is what makes the replacement safe.
+
+The queries against the real archive stay in Portuguese, because the archive is: this is
+where the retrieval actually meets the language it will be used in.
 """
 import os
 import sys
@@ -29,8 +32,8 @@ import core
 ENABLED = os.environ.get("QCTX_INTEGRATION") == "1"
 THROWAWAY_COLLECTION = f"qctx_test_{uuid.uuid4().hex[:8]}"
 
-#: Chaves que o servidor MCP anterior gravava. O núcleo tem de ler e escrever
-#: exatamente isto, senão o acervo existente vira ilegível ou fica inconsistente.
+#: The keys the previous MCP server wrote. The core has to read and write exactly this,
+#: otherwise the existing archive becomes unreadable or inconsistent.
 PAYLOAD_KEYS = {"document", "metadata", "created_at", "updated_at"}
 
 
@@ -39,7 +42,7 @@ def read_config():
 
 
 def write_config():
-    """Config apontando a memória para a coleção descartável."""
+    """Config pointing memory at the throwaway collection."""
     base = core.load()
     fields = {f: getattr(base, f) for f in base.__dataclass_fields__}
     fields["memory_collection"] = THROWAWAY_COLLECTION
@@ -47,28 +50,28 @@ def write_config():
     return core.Config(**fields)
 
 
-@unittest.skipUnless(ENABLED, "defina QCTX_INTEGRATION=1")
+@unittest.skipUnless(ENABLED, "set QCTX_INTEGRATION=1")
 class TestReadingTheRealArchive(unittest.TestCase):
-    """SOMENTE LEITURA. Prova que o núcleo entende o que já está gravado."""
+    """READ ONLY. Proves the core understands what is already stored."""
 
     @classmethod
     def setUpClass(cls):
         cls.cfg = read_config()
         if not cls.cfg.memory_collection:
-            raise unittest.SkipTest("memory_collection não configurada")
+            raise unittest.SkipTest("memory_collection is not configured")
         cls.store = core.build_memory(cls.cfg)
 
     def test_archive_has_points(self):
         total = self.store.count()
         self.assertIsNotNone(total)
-        self.assertGreater(total, 0, "o acervo real deveria ter memórias")
+        self.assertGreater(total, 0, "the real archive should hold memories")
 
     def test_payload_written_by_the_old_mcp_is_readable(self):
         page = self.store.list_page(limit=5)
         self.assertGreater(page["count"], 0)
         for m in page["memories"]:
             self.assertIsInstance(m["document"], str)
-            self.assertTrue(m["document"].strip(), "documento não pode vir vazio")
+            self.assertTrue(m["document"].strip(), "the document must not come back empty")
             self.assertIsInstance(m["metadata"], dict)
 
     def test_get_by_id_returns_the_four_keys(self):
@@ -77,11 +80,11 @@ class TestReadingTheRealArchive(unittest.TestCase):
         m = self.store.get(mid)
         self.assertNotEqual(m.get("status"), "not_found")
         for key in ("document", "metadata", "created_at", "updated_at"):
-            self.assertIn(key, m, f"{key} tem de existir no payload legado")
+            self.assertIn(key, m, f"{key} has to exist in the legacy payload")
 
     def test_find_returns_descending_scores(self):
         hits = self.store.find("memória de longo prazo", limit=5)
-        self.assertTrue(hits, "busca densa no acervo real não devolveu nada")
+        self.assertTrue(hits, "dense search against the real archive returned nothing")
         scores = [h["score"] for h in hits]
         self.assertEqual(scores, sorted(scores, reverse=True))
 
@@ -104,12 +107,12 @@ class TestReadingTheRealArchive(unittest.TestCase):
              "recall automático a cada prompt"],
             core.Policy(0.45, 0.58, 0.10, 6, veto=True), top_k=10)
         ids = [h.id for h in hits]
-        self.assertEqual(len(ids), len(set(ids)), "fusão por id não pode duplicar")
+        self.assertEqual(len(ids), len(set(ids)), "fusion by id must not duplicate")
 
 
-@unittest.skipUnless(ENABLED, "defina QCTX_INTEGRATION=1")
+@unittest.skipUnless(ENABLED, "set QCTX_INTEGRATION=1")
 class TestCrudInAThrowawayCollection(unittest.TestCase):
-    """Escrita SÓ aqui. A coleção é criada e destruída pelo próprio teste."""
+    """Writes ONLY here. The collection is created and destroyed by the test itself."""
 
     @classmethod
     def setUpClass(cls):
@@ -126,41 +129,41 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
             pass
 
     def test_full_cycle(self):
-        created_at = self.store.store("O poll do conector trunca em 100 itens por página.",
+        created_at = self.store.store("The connector poll truncates at 100 items per page.",
                                   {"type": "reference", "date": "2026-08-13"})
         self.assertEqual(created_at["status"], "created")
         mid = created_at["id"]
 
         read_back = self.store.get(mid)
-        self.assertIn("trunca em 100", read_back["document"])
+        self.assertIn("truncates at 100", read_back["document"])
         self.assertEqual(read_back["metadata"]["type"], "reference")
 
-        found_hit = self.store.find("paginação do poll", limit=5)
+        found_hit = self.store.find("poll pagination", limit=5)
         self.assertIn(mid, [h["id"] for h in found_hit])
 
-        updated_at = self.store.update(mid, information="Corrigido: trunca em 50 itens.")
+        updated_at = self.store.update(mid, information="Corrected: it truncates at 50 items.")
         self.assertEqual(updated_at["status"], "updated")
         reread = self.store.get(mid)
-        self.assertIn("50 itens", reread["document"])
+        self.assertIn("50 items", reread["document"])
         self.assertEqual(reread["metadata"]["type"], "reference",
-                         "update sem metadata tem de PRESERVAR a metadata anterior")
+                         "an update without metadata has to PRESERVE the previous metadata")
         self.assertEqual(reread["created_at"], read_back["created_at"],
-                         "created_at não pode ser reescrito por um update")
+                         "created_at must not be rewritten by an update")
         self.assertNotEqual(reread["updated_at"], read_back["updated_at"])
 
         self.store.delete(mid)
         self.assertEqual(self.store.get(mid)["status"], "not_found")
 
     def test_written_payload_has_the_same_keys_as_the_old_mcp(self):
-        created_at = self.store.store("fato para conferir a forma do payload", {"type": "test"})
+        created_at = self.store.store("fact for checking the payload shape", {"type": "test"})
         point = self.q.get_point(THROWAWAY_COLLECTION, created_at["id"])
         self.assertEqual(set(point["payload"].keys()), PAYLOAD_KEYS,
-                         "o payload tem de ser idêntico ao do servidor anterior, "
-                         "senão o acervo existente fica inconsistente")
+                         "the payload has to be identical to the previous server's, "
+                         "otherwise the existing archive becomes inconsistent")
         self.store.delete(created_at["id"])
 
     def test_store_many_is_all_or_nothing(self):
-        items = [{"information": f"fato de lote número {i}", "metadata": {"type": "test"}}
+        items = [{"information": f"batch fact number {i}", "metadata": {"type": "test"}}
                  for i in range(5)]
         res = self.store.store_many(items)
         self.assertEqual(res["count"], 5)
@@ -172,17 +175,17 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
     def test_store_many_refuses_an_invalid_item_before_writing(self):
         before = self.store.count() or 0
         with self.assertRaises(core.memory.MemoryError_):
-            self.store.store_many([{"information": "válido"}, {"information": "  "}])
+            self.store.store_many([{"information": "valid"}, {"information": "  "}])
         time.sleep(0.2)
         self.assertEqual(self.store.count() or 0, before,
-                         "validação tem de acontecer ANTES de qualquer escrita")
+                         "validation has to happen BEFORE any write")
 
     def test_empty_store_is_refused(self):
         with self.assertRaises(core.memory.MemoryError_):
             self.store.store("   ")
 
 
-@unittest.skipUnless(ENABLED, "defina QCTX_INTEGRATION=1")
+@unittest.skipUnless(ENABLED, "set QCTX_INTEGRATION=1")
 class TestDocsIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -195,27 +198,27 @@ class TestDocsIntegration(unittest.TestCase):
         cls.q = core.build_qdrant(cls.cfg)
         cls.tmpdir = tempfile.TemporaryDirectory()
         cls.file_path = Path(cls.tmpdir.name) / "manual.md"
-        # Documento realista: cada seção precisa ser grande o bastante para o
-        # fatiamento ter trabalho, senão o teste "acha a seção certa" é vacuidade
-        # — com um trecho único, acertar é inevitável.
-        filler = ("Detalhe operacional relevante para esta seção, repetido para dar "
-                   "corpo ao documento sem mudar o assunto dela. ")
+        # A realistic document: each section has to be big enough for the slicing to have
+        # work to do, otherwise the "finds the right section" test is vacuous — with a
+        # single chunk, getting it right is inevitable.
+        filler = ("Operational detail relevant to this section, repeated to give the "
+                   "document some body without changing what the section is about. ")
         cls.file_path.write_text("\n".join([
-            "# Autenticação",
+            "# Authentication",
             "",
-            "Para autenticar, envie o header Authorization com um token Bearer.",
-            "O token expira em uma hora e precisa ser renovado pelo endpoint de refresh.",
+            "To authenticate, send the Authorization header with a Bearer token.",
+            "The token expires in one hour and has to be renewed through the refresh endpoint.",
             filler * 12,
             "",
-            "# Paginação",
+            "# Pagination",
             "",
-            "As listagens devolvem no máximo 100 itens por página.",
-            "Use o cursor devolvido em next_page para buscar a página seguinte.",
+            "Listings return at most 100 items per page.",
+            "Use the cursor returned in next_page to fetch the following page.",
             filler * 12,
             "",
-            "# Limites de uso",
+            "# Rate limits",
             "",
-            "O limite é de 5000 requisições por hora, com janela deslizante de 180 segundos.",
+            "The limit is 5000 requests per hour, with a 180-second sliding window.",
             filler * 12,
         ]) + "\n")
 
@@ -230,12 +233,12 @@ class TestDocsIntegration(unittest.TestCase):
 
     def test_index_then_search_locates_the_right_section(self):
         res = self.idx.index_file(str(self.file_path), ttl_seconds=600)
-        self.assertGreater(res["chunks"], 1, "documento com 3 seções longas tem de virar vários trechos")
+        self.assertGreater(res["chunks"], 1, "a document with 3 long sections has to become several chunks")
         self.assertEqual(res["mode"], "locator")
 
-        hits, info = self.idx.search("qual o limite de requisições por hora?",
+        hits, info = self.idx.search("what is the request limit per hour?",
                                      scope="tmp", limit=3)
-        self.assertTrue(hits, "deveria achar a seção de limites")
+        self.assertTrue(hits, "it should find the rate-limit section")
         top_text = hits[0].text.lower()
         self.assertIn("5000", top_text)
         self.assertGreater(hits[0].start_line, 0)
@@ -243,12 +246,12 @@ class TestDocsIntegration(unittest.TestCase):
 
     def test_line_range_points_at_the_real_content(self):
         self.idx.index_file(str(self.file_path), ttl_seconds=600)
-        hits, _ = self.idx.search("como paginar?", scope="tmp", limit=1)
+        hits, _ = self.idx.search("how do I paginate?", scope="tmp", limit=1)
         lines = self.file_path.read_text().splitlines()
         slice_text = "\n".join(lines[hits[0].start_line - 1:hits[0].end_line])
         self.assertEqual(slice_text.strip("\n"), hits[0].text,
-                         "o contrato do modo localizador é que essas linhas "
-                         "reproduzam exatamente o trecho indexado")
+                         "the contract of locator mode is that these lines reproduce "
+                         "exactly the chunk that was indexed")
 
     def test_library_never_expires_and_temporary_does(self):
         self.idx.keep_file(str(self.file_path))
@@ -260,9 +263,9 @@ class TestDocsIntegration(unittest.TestCase):
         self.assertIsNotNone(docs["tmp"]["expires_at_ts"])
 
     def test_expired_ttl_disappears_from_search(self):
-        self.idx.index_file(str(self.file_path), ttl_seconds=-1)  # já nasce vencido
-        hits, _ = self.idx.search("autenticação", scope="tmp", limit=3)
-        self.assertEqual(hits, [], "trecho vencido não pode aparecer")
+        self.idx.index_file(str(self.file_path), ttl_seconds=-1)  # expired at birth
+        hits, _ = self.idx.search("authentication", scope="tmp", limit=3)
+        self.assertEqual(hits, [], "an expired chunk must not show up")
 
     def test_purging_temporary_preserves_the_library(self):
         self.idx.keep_file(str(self.file_path))
@@ -270,7 +273,7 @@ class TestDocsIntegration(unittest.TestCase):
         self.idx.drop_all_tmp()
         docs = self.idx.list_docs("all")
         scopes = {d["scope"] for d in docs}
-        self.assertIn("library", scopes, "a biblioteca TEM de sobreviver ao purge")
+        self.assertIn("library", scopes, "the library MUST survive the purge")
         self.assertNotIn("tmp", scopes)
 
     def test_reindexing_replaces_instead_of_duplicating(self):
@@ -280,7 +283,7 @@ class TestDocsIntegration(unittest.TestCase):
         docs = [d for d in self.idx.list_docs("library") if d["doc_id"] == second["doc_id"]]
         self.assertEqual(len(docs), 1)
         self.assertEqual(docs[0]["chunks"], second["chunks"],
-                         "não pode sobrar trecho da indexação anterior")
+                         "no chunk from the previous indexing may be left behind")
 
 
 if __name__ == "__main__":
