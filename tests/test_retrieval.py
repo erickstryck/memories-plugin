@@ -1,9 +1,9 @@
-"""Testes do pipeline de recuperação, com DUBLÊS em vez de rede.
+"""Tests for the retrieval pipeline, with FAKES instead of the network.
 
-É o ganho concreto de ter contrato declarado: esta lógica — a mais delicada do
-pacote — antes só dava para exercitar em teste de integração, que ninguém roda
-enquanto edita. Agora roda em milissegundos, offline, e cobre os caminhos que
-importam justamente por serem os que degradam em SILÊNCIO.
+This is the concrete gain of having declared contracts: this logic — the most delicate
+in the package — could previously only be exercised in an integration test, which nobody
+runs while editing. Now it runs in milliseconds, offline, and covers the paths that
+matter precisely because they are the ones that degrade in SILENCE.
 """
 import os
 import sys
@@ -15,7 +15,7 @@ from core import retrieval
 from core.retrieval import CE, CE_WEAK, DENSE, Policy, fuse_by_id, needs_rerank, two_stage
 
 
-def hit(id_: str, score: float, text: str = "texto"):
+def hit(id_: str, score: float, text: str = "text"):
     return {"id": id_, "score": score, "document": text}
 
 
@@ -24,11 +24,11 @@ ID = lambda h: h["id"]           # noqa: E731
 
 
 class FakeReranker:
-    """Dublê que devolve os scores combinados. Não precisa herdar de nada — o
-    contrato é estrutural (Protocol)."""
+    """A fake returning the scores it was given. It does not have to inherit from
+    anything — the contract is structural (a Protocol)."""
 
     def __init__(self, scores=None, ok=True, error=None, was_logit=False):
-        self.scores = scores          # lista de score por índice de entrada
+        self.scores = scores          # one score per input index
         self.ok = ok
         self.error = error
         self.was_logit = was_logit
@@ -46,10 +46,10 @@ class FakeReranker:
 
 MEMORY_POLICY = Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
                           max_results=6, veto=True)
-# Espelha `core/docs.py`: os DOIS pisos iguais, de propósito. Em documentos não há
-# veto e o objetivo é nunca devolver silêncio, então "voltar ao corte estrito" tem
-# de ser um no-op — se fosse 0.58, o colapso cross-lingual (denso ~0.46) devolveria
-# vazio, que é exatamente o que essa política existe para evitar.
+# Mirrors `core/docs.py`: BOTH floors equal, on purpose. In documents there is no veto
+# and the goal is never to return silence, so "go back to the strict cut" has to be a
+# no-op — were it 0.58, a cross-lingual collapse (dense ~0.46) would return nothing,
+# which is exactly what that policy exists to prevent.
 DOCS_POLICY = Policy(dense_floor=0.30, strict_floor=0.30, min_score=0.10,
                        max_results=5, veto=False, order_matters=True)
 
@@ -60,7 +60,7 @@ class TestFusion(unittest.TestCase):
                               [hit("a", 0.8), hit("c", 0.3)]], ID)
         by_id = {h["id"]: h["score"] for h in fused}
         self.assertEqual(by_id, {"a": 0.8, "b": 0.9, "c": 0.3},
-                         "id repetido em dois ângulos fica com o MAIOR score")
+                         "an id repeated across two angles keeps the HIGHEST score")
 
     def test_comes_out_sorted_by_score(self):
         fused = fuse_by_id([[hit("a", 0.1), hit("b", 0.9), hit("c", 0.5)]], ID)
@@ -79,12 +79,12 @@ class TestWhenToCallTheSecondStage(unittest.TestCase):
     def test_calls_when_a_candidate_sits_in_the_permissive_band(self):
         candidates = [hit("a", 0.90), hit("b", 0.50)]  # 0.50 < strict 0.58
         self.assertTrue(needs_rerank(candidates, MEMORY_POLICY),
-                        "0.50 só entrou porque alguém ia julgá-lo")
+                        "0.50 only got in because somebody was going to judge it")
 
     def test_does_NOT_call_when_everything_fits_and_clears_the_strict_floor(self):
         candidates = [hit("a", 0.90), hit("b", 0.70)]
         self.assertFalse(needs_rerank(candidates, MEMORY_POLICY),
-                         "reordenar não mudaria o que sai — a chamada seria inútil")
+                         "reordering would not change what comes out — the call would be wasted")
 
     def test_empty_list_does_not_call(self):
         self.assertFalse(needs_rerank([], MEMORY_POLICY))
@@ -92,19 +92,19 @@ class TestWhenToCallTheSecondStage(unittest.TestCase):
 
     def test_a_single_candidate_needs_no_ordering(self):
         self.assertFalse(needs_rerank([hit("a", 0.9)], DOCS_POLICY),
-                         "não há o que ordenar com um resultado")
+                         "there is nothing to order with a single result")
 
     def test_when_order_is_the_product_it_calls_even_if_everything_fits(self):
         candidates = [hit("a", 0.90), hit("b", 0.70)]
         self.assertFalse(needs_rerank(candidates, MEMORY_POLICY),
-                         "memória injeta o conjunto: a ordem é cosmética")
+                         "memory injects the whole set: the order is cosmetic")
         self.assertTrue(needs_rerank(candidates, DOCS_POLICY),
-                        "documento é lido de cima para baixo: a ordem é o produto")
+                        "a document is read top to bottom: the order is the product")
 
 
 class TestWithoutTheSecondStage(unittest.TestCase):
-    """O caso mais importante: sem julgamento, o piso permissivo precisa voltar
-    ao estrito, senão o modo COM re-rank fica pior que o modo sem."""
+    """The most important case: with no judgement, the permissive floor has to go back
+    to the strict one, otherwise the mode WITH re-ranking ends up worse than without."""
 
     def test_absent_reranker_applies_the_strict_cut(self):
         candidates = [hit("a", 0.90), hit("b", 0.60), hit("c", 0.50), hit("d", 0.47)]
@@ -118,35 +118,35 @@ class TestWithoutTheSecondStage(unittest.TestCase):
         rr = FakeReranker(ok=False, error="timeout")
         outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["a"],
-                         "0.53 e 0.49 só eram aceitáveis com o cross-encoder para limpar")
+                         "0.53 and 0.49 were only acceptable with the cross-encoder to clean up")
         self.assertEqual(outcome.rerank_error, "timeout")
         self.assertFalse(outcome.reranked)
 
     def test_response_without_usable_hits_also_falls_back_to_strict(self):
-        rr = FakeReranker(ok=False, error="resposta sem hits utilizáveis")
+        rr = FakeReranker(ok=False, error="response with no usable hits")
         outcome = two_stage([hit("a", 0.50)], "q", rr, MEMORY_POLICY, TEXT)
         self.assertEqual(outcome.scored, [])
 
 
 class TestWithVeto(unittest.TestCase):
-    """Política de memória: falso positivo polui o contexto do agente."""
+    """Memory policy: a false positive pollutes the agent's context."""
 
     def test_eliminates_what_sits_below_the_cutoff(self):
-        # um candidato na faixa permissiva é o que obriga a chamada — com tudo
-        # acima do estrito e cabendo nas vagas, a política de memória nem chamaria
+        # a candidate in the permissive band is what forces the call — with everything
+        # above the strict floor and fitting the slots, the memory policy would not call
         candidates = [hit("a", 0.9), hit("b", 0.50), hit("c", 0.9)]
         rr = FakeReranker(scores=[0.95, 0.02, 0.40])
         outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["a", "c"],
-                         "0.02 é eliminado, não rebaixado")
+                         "0.02 is eliminated, not demoted")
         self.assertTrue(all(s.origin == CE for s in outcome.scored))
 
     def test_the_cross_encoder_overturns_the_dense_verdict(self):
-        """Medido no acervo real: o CE matou um denso 0.59 e salvou um denso 0.47."""
-        candidates = [hit("alto_denso", 0.59), hit("baixo_denso", 0.47)]
+        """Measured against the real archive: the CE killed a dense 0.59 and saved a dense 0.47."""
+        candidates = [hit("high_dense", 0.59), hit("low_dense", 0.47)]
         rr = FakeReranker(scores=[0.004, 0.11])
         outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
-        self.assertEqual([s.item["id"] for s in outcome.scored], ["baixo_denso"])
+        self.assertEqual([s.item["id"] for s in outcome.scored], ["low_dense"])
 
     def test_respects_the_result_ceiling(self):
         candidates = [hit(str(i), 0.9) for i in range(20)]
@@ -156,8 +156,8 @@ class TestWithVeto(unittest.TestCase):
 
 
 class TestWithoutVeto(unittest.TestCase):
-    """Política de documentos: quem pergunta já escolheu o documento, então
-    silêncio é pior que ordem imperfeita."""
+    """Document policy: whoever asks has already chosen the document, so silence is
+    worse than imperfect order."""
 
     def test_delivers_the_weak_ones_last_and_marked(self):
         candidates = [hit("a", 0.9), hit("b", 0.9)]
@@ -171,49 +171,50 @@ class TestWithoutVeto(unittest.TestCase):
         candidates = [hit("a", 0.9), hit("b", 0.9)]
         rr = FakeReranker(scores=[0.05, 0.03])
         outcome = two_stage(candidates, "q", rr, DOCS_POLICY, TEXT)
-        self.assertEqual(len(outcome.scored), 2, "com veto isto viraria silêncio")
+        self.assertEqual(len(outcome.scored), 2, "with a veto this would become silence")
         self.assertTrue(all(s.is_weak for s in outcome.scored))
 
 
 class TestCrossLingualCollapse(unittest.TestCase):
-    """Quando o cross-encoder colapsa, a ORDEM dele também é ruído."""
+    """When the cross-encoder collapses, its ORDER is noise too."""
 
     def test_detects_collapse_and_falls_back_to_dense_order(self):
-        candidates = [hit("melhor_denso", 0.60), hit("pior_denso", 0.46)]
-        # invertido de propósito: o CE colapsado "prefere" o pior denso
+        candidates = [hit("best_dense", 0.60), hit("worst_dense", 0.46)]
+        # inverted on purpose: the collapsed CE "prefers" the worse dense score
         rr = FakeReranker(scores=[0.0004, 0.0009])
         outcome = two_stage(candidates, "q", rr, DOCS_POLICY, TEXT)
         self.assertTrue(outcome.collapsed)
-        self.assertEqual([s.item["id"] for s in outcome.scored], ["melhor_denso", "pior_denso"],
-                         "ordem densa, não a do CE colapsado")
+        self.assertEqual([s.item["id"] for s in outcome.scored], ["best_dense", "worst_dense"],
+                         "dense order, not the collapsed CE's")
         self.assertTrue(all(s.origin == DENSE for s in outcome.scored))
 
     def test_collapse_in_memory_RESTORES_the_strict_cut(self):
-        """Regressão: o colapso descarta o julgamento, então o piso permissivo volta
-        a não ter quem o limpe. Sem isto, o modo COM re-rank devolvia candidato que o
-        modo SEM re-rank nunca devolveria — o defeito que o pipeline existe para não
-        ter. Só aparece na política de MEMÓRIA, onde os dois pisos diferem."""
-        candidates = [hit("passa", 0.90), hit("permissivo", 0.50), hit("permissivo2", 0.46)]
+        """Regression: a collapse discards the judgement, so the permissive floor is once
+        again left with nobody to clean up after it. Without this, the mode WITH re-ranking
+        returned candidates the mode WITHOUT re-ranking would never return — the defect the
+        pipeline exists to prevent. It only shows up under the MEMORY policy, where the two
+        floors differ."""
+        candidates = [hit("clears", 0.90), hit("permissive", 0.50), hit("permissive2", 0.46)]
         rr = FakeReranker(scores=[0.0004, 0.0009, 0.0002])
         outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
         self.assertTrue(outcome.collapsed)
-        self.assertEqual([s.item["id"] for s in outcome.scored], ["passa"],
-                         "0.50 e 0.46 só eram aceitáveis com o cross-encoder para julgar")
+        self.assertEqual([s.item["id"] for s in outcome.scored], ["clears"],
+                         "0.50 and 0.46 were only acceptable with the cross-encoder to judge")
 
     def test_collapse_in_docs_does_NOT_return_silence(self):
-        """A outra metade do par: com os pisos iguais, restaurar o estrito não corta
-        nada, e a pergunta em outra língua continua sendo respondida."""
-        candidates = [hit("a", 0.46), hit("b", 0.44)]  # faixa típica cross-lingual
+        """The other half of the pair: with the floors equal, restoring the strict cut
+        removes nothing, and a question in another language still gets answered."""
+        candidates = [hit("a", 0.46), hit("b", 0.44)]  # typical cross-lingual band
         rr = FakeReranker(scores=[0.0004, 0.0002])
         outcome = two_stage(candidates, "q", rr, DOCS_POLICY, TEXT)
         self.assertTrue(outcome.collapsed)
-        self.assertEqual(len(outcome.scored), 2, "silêncio aqui seria pior que ordem imperfeita")
+        self.assertEqual(len(outcome.scored), 2, "silence here would be worse than imperfect order")
 
     def test_low_score_above_the_threshold_is_not_collapse(self):
         candidates = [hit("a", 0.9), hit("b", 0.9)]
         rr = FakeReranker(scores=[0.05, 0.02])  # 0.05 > COLLAPSE_MAX
         outcome = two_stage(candidates, "q", rr, DOCS_POLICY, TEXT)
-        self.assertFalse(outcome.collapsed, "0.05 é relevância baixa, não colapso")
+        self.assertFalse(outcome.collapsed, "0.05 is low relevance, not a collapse")
 
     def test_collapse_detection_can_be_turned_off_by_policy(self):
         policy = Policy(0.45, 0.58, 0.10, 5, veto=False, detect_collapse=False)
@@ -236,18 +237,18 @@ class TestTrace(unittest.TestCase):
 
     def test_by_rerank_distinguishes_the_origin(self):
         rr = FakeReranker(scores=[0.9])
-        com_ce = two_stage([hit("a", 0.5)], "q", rr, MEMORY_POLICY, TEXT)
-        without_ce_scores = two_stage([hit("a", 0.9)], "q", None, MEMORY_POLICY, TEXT)
-        self.assertTrue(com_ce.by_rerank)
-        self.assertFalse(without_ce_scores.by_rerank)
+        with_ce = two_stage([hit("a", 0.5)], "q", rr, MEMORY_POLICY, TEXT)
+        without_ce = two_stage([hit("a", 0.9)], "q", None, MEMORY_POLICY, TEXT)
+        self.assertTrue(with_ce.by_rerank)
+        self.assertFalse(without_ce.by_rerank)
 
     def test_the_query_reaches_the_reranker_and_so_do_the_texts(self):
         rr = FakeReranker(scores=[0.9, 0.8])
-        two_stage([hit("a", 0.5, "texto A"), hit("b", 0.5, "texto B")],
-                  "minha pergunta", rr, MEMORY_POLICY, TEXT)
+        two_stage([hit("a", 0.5, "text A"), hit("b", 0.5, "text B")],
+                  "my question", rr, MEMORY_POLICY, TEXT)
         query, docs = rr.calls[0]
-        self.assertEqual(query, "minha pergunta")
-        self.assertEqual(docs, ["texto A", "texto B"])
+        self.assertEqual(query, "my question")
+        self.assertEqual(docs, ["text A", "text B"])
 
 
 class TestFloor(unittest.TestCase):

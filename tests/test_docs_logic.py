@@ -1,10 +1,10 @@
-"""Testes da lógica pura de `core.docs` — TTL, id de documento e detecção de
-obsolescência. Nada de rede.
+"""Tests for the pure logic in `core.docs` — TTL, document id and staleness detection.
+No network.
 
-O teste de tolerância de mtime é REGRESSÃO de um bug real: a comparação era por
-igualdade exata de float e o round-trip por JSON perdia os últimos bits, então o
-aviso de "arquivo mudou" disparava em toda busca de todo documento e o `refresh`
-reindexava o acervo inteiro a cada execução.
+The mtime tolerance test is a REGRESSION test for a real bug: the comparison was exact
+float equality and the JSON round trip lost the last bits, so the "file changed" warning
+fired on every search of every document and `refresh` reindexed the whole archive on
+each run.
 """
 import os
 import sys
@@ -46,7 +46,7 @@ class TestDocId(unittest.TestCase):
         try:
             os.chdir("/tmp")
             self.assertEqual(doc_id_for("a.md"), doc_id_for("/tmp/a.md"),
-                             "o id vem do caminho ABSOLUTO, para reindexar substituir")
+                             "the id comes from the ABSOLUTE path, so reindexing replaces")
         finally:
             os.chdir(cwd)
 
@@ -58,7 +58,7 @@ class TestStaleness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.file_path = Path(self.tmp.name) / "doc.md"
-        self.file_path.write_text("conteudo original\n")
+        self.file_path.write_text("original content\n")
         st = os.stat(self.file_path)
         self.mtime = st.st_mtime
         self.size = st.st_size
@@ -70,16 +70,16 @@ class TestStaleness(unittest.TestCase):
         self.assertIsNone(source_changed(str(self.file_path), self.mtime, self.size))
 
     def test_float_round_trip_does_not_produce_a_false_positive(self):
-        """O bug original: JSON devolvia ...9956775 para ...9956777 gravado."""
+        """The original bug: JSON returned ...9956775 for a stored ...9956777."""
         nearly = self.mtime + 2.4e-07
         self.assertIsNone(source_changed(str(self.file_path), nearly, self.size),
-                          "diferença de 1e-7 é ruído de serialização, não edição")
+                          "a 1e-7 difference is serialization noise, not an edit")
 
     def test_mtime_rounded_to_the_millisecond_produces_no_false_positive(self):
         self.assertIsNone(source_changed(str(self.file_path), round(self.mtime, 3), self.size))
 
     def test_size_change_is_detected(self):
-        self.file_path.write_text("conteudo original com mais texto\n")
+        self.file_path.write_text("original content with more text\n")
         reason = source_changed(str(self.file_path), self.mtime, self.size)
         self.assertIsNotNone(reason)
         self.assertIn("size", reason)
@@ -88,7 +88,7 @@ class TestStaleness(unittest.TestCase):
         future = self.mtime + 60
         os.utime(self.file_path, (future, future))
         reason = source_changed(str(self.file_path), self.mtime, self.size)
-        self.assertIsNotNone(reason, "edição que preserva o tamanho ainda muda o mtime")
+        self.assertIsNotNone(reason, "an edit that preserves the size still moves the mtime")
 
     def test_removed_file_is_reported(self):
         path = str(self.file_path)

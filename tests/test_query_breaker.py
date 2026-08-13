@@ -1,4 +1,9 @@
-"""Testes da preparação de consulta e do disjuntor. Lógica pura, sem rede."""
+"""Tests for query preparation and the circuit breaker. Pure logic, no network.
+
+The test INPUTS stay in Portuguese, and that is not an oversight: they are what
+exercises TRIVIAL_WORDS and STOPWORDS, which match against what the user actually
+types. Translated inputs would pass while testing nothing.
+"""
 import os
 import sys
 import tempfile
@@ -22,14 +27,14 @@ class TestSkipping(unittest.TestCase):
             self.assertIsNotNone(skip_reason(p))
 
     def test_MULTI_word_confirmation_is_skipped(self):
-        """Estas passam do tamanho mínimo — é o caso que a checagem existe para pegar,
-        e que ficava inalcançável quando ela comparava o texto inteiro."""
+        """These clear the minimum length — the case the check exists to catch, and the
+        one that was unreachable while it compared the whole text against the set."""
         for p in ("ok, pode continuar", "beleza, segue", "sim, perfeito",
                   "ok obrigado", "isso, pode fazer"):
             self.assertEqual(skip_reason(p), "trivial prompt", p)
 
     def test_confirmation_with_ONE_content_word_is_not_skipped(self):
-        """"pode continuar o poll" tem assunto: `poll`. Não pode ser descartado."""
+        """"pode continuar o poll" has a subject: `poll`. It must not be discarded."""
         self.assertIsNone(skip_reason("ok, pode continuar o poll"))
         self.assertIsNone(skip_reason("sim, e a paginação?"))
 
@@ -74,7 +79,7 @@ class TestAngles(unittest.TestCase):
     def test_no_duplicates_across_angles(self):
         for p in ("paginação poll cursor", "ABC DEF GHI", "termo"):
             a = angles(p)
-            self.assertEqual(len(a), len(set(a)), "embedar o mesmo texto duas vezes é gasto puro")
+            self.assertEqual(len(a), len(set(a)), "embedding the same text twice is pure waste")
 
     def test_at_most_three_angles(self):
         p = ("primeira frase com algum conteudo tecnico. segunda frase bem mais longa "
@@ -119,12 +124,12 @@ class TestBreaker(unittest.TestCase):
     def test_zero_cooldown_disables_the_breaker(self):
         b = Breaker(self.path, 0)
         b.arm()
-        self.assertIsNone(b.is_open(), "cooldown 0 significa nunca bloquear")
+        self.assertIsNone(b.is_open(), "a cooldown of 0 means never block")
 
     def test_corrupted_content_allows_an_attempt(self):
-        self.path.write_text("isto não é um timestamp")
+        self.path.write_text("this is not a timestamp")
         self.assertIsNone(Breaker(self.path, 300).is_open(),
-                          "disjuntor com defeito não pode ser o motivo de a busca parar")
+                          "a broken breaker must not be the reason the search stops")
 
     def test_missing_directory_is_created_on_arm(self):
         deep_path = Path(self.tmp.name) / "a" / "b" / "breaker"
@@ -132,7 +137,7 @@ class TestBreaker(unittest.TestCase):
         self.assertTrue(deep_path.exists())
 
     def test_arming_on_an_impossible_path_does_not_raise(self):
-        Breaker("/proc/impossivel/breaker", 300).arm()  # não pode explodir
+        Breaker("/proc/impossible/breaker", 300).arm()  # must not blow up
 
 
 if __name__ == "__main__":

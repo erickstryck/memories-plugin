@@ -1,26 +1,26 @@
-"""Dublês em memória dos contratos de `core.ports`.
+"""In-memory fakes for the `core.ports` contracts.
 
-Existem porque a propriedade mais importante do pacote — o payload gravado ser
-byte-compatível com o do servidor que ele substitui — estava verificada SÓ contra
-infraestrutura viva. Teste que exige Qdrant e GPU não roda enquanto se edita, e o
-que não roda não protege.
+They exist because the most important property of the package — the stored payload
+being byte-compatible with that of the server it replaces — was verified ONLY against
+live infrastructure. A test that requires Qdrant and a GPU does not run while you edit,
+and what does not run does not protect.
 
-Nenhum dublê herda de nada: os contratos são `Protocol`, então basta ter os métodos.
-`FakeVectorStore` guarda os pontos como estão, sem normalizar nada, justamente para
-que um teste possa afirmar sobre as CHAVES do payload.
+No fake inherits from anything: the contracts are `Protocol`s, so having the methods is
+enough. `FakeVectorStore` keeps the points as they are, normalizing nothing, precisely
+so a test can assert on the payload KEYS.
 """
 import math
 import zlib
 
 
 class FakeVectorStore:
-    """Banco vetorial em dicionário. Similaridade real (cosseno), não simulada."""
+    """A vector store in a dict. Real similarity (cosine), not simulated."""
 
     def __init__(self):
-        self.collections: dict[str, dict] = {}   # nome -> {"size", "pontos": {id: ponto}}
+        self.collections: dict[str, dict] = {}   # name -> {"size", "points": {id: point}}
         self.calls: list[tuple] = []
 
-    # ---- coleções ----
+    # ---- collections ----
     def list_collections(self) -> list[str]:
         return list(self.collections)
 
@@ -29,15 +29,15 @@ class FakeVectorStore:
         if c is None:
             return None
 
-        return {"size": c["size"], "distance": "Cosine", "points": len(c["pontos"])}
+        return {"size": c["size"], "distance": "Cosine", "points": len(c["points"])}
 
     def ensure_collection(self, name: str, size: int, distance: str = "Cosine") -> bool:
         if name in self.collections:
             if self.collections[name]["size"] != size:
-                raise ValueError(f"dimensão {self.collections[name]['size']} != {size}")
+                raise ValueError(f"dimension {self.collections[name]['size']} != {size}")
 
             return False
-        self.collections[name] = {"size": size, "pontos": {}}
+        self.collections[name] = {"size": size, "points": {}}
         self.calls.append(("ensure_collection", name))
 
         return True
@@ -48,29 +48,29 @@ class FakeVectorStore:
     def delete_collection(self, name: str) -> None:
         self.collections.pop(name, None)
 
-    # ---- pontos ----
+    # ---- points ----
     def upsert(self, name: str, points: list[dict], batch: int = 256) -> int:
         self.ensure_collection(name, self.collections.get(name, {}).get("size", 4))
         for p in points:
-            self.collections[name]["pontos"][p["id"]] = p
+            self.collections[name]["points"][p["id"]] = p
 
         return len(points)
 
     def get_point(self, name: str, point_id):
-        return self.collections.get(name, {}).get("pontos", {}).get(point_id)
+        return self.collections.get(name, {}).get("points", {}).get(point_id)
 
     def set_payload(self, name: str, point_id, payload: dict) -> None:
-        point = self.collections.get(name, {}).get("pontos", {}).get(point_id)
+        point = self.collections.get(name, {}).get("points", {}).get(point_id)
         if point is not None:
             point["payload"] = payload
         self.calls.append(("set_payload", name, point_id))
 
     def delete_points(self, name: str, ids: list) -> None:
         for i in ids:
-            self.collections.get(name, {}).get("pontos", {}).pop(i, None)
+            self.collections.get(name, {}).get("points", {}).pop(i, None)
 
     def delete_by_filter(self, name: str, filter_: dict) -> None:
-        points = self.collections.get(name, {}).get("pontos", {})
+        points = self.collections.get(name, {}).get("points", {})
         for pid in [p for p, v in points.items() if _matches_filter(v.get("payload", {}), filter_)]:
             points.pop(pid)
 
@@ -78,7 +78,7 @@ class FakeVectorStore:
                filter_: dict | None = None, with_payload: bool = True) -> list[dict]:
         self.calls.append(("search", name, limit))
         output = []
-        for pid, p in self.collections.get(name, {}).get("pontos", {}).items():
+        for pid, p in self.collections.get(name, {}).get("points", {}).items():
             if filter_ and not _matches_filter(p.get("payload", {}), filter_):
                 continue
             output.append({"id": pid, "score": _cosine(vector, p["vector"]),
@@ -90,7 +90,7 @@ class FakeVectorStore:
     def scroll(self, name: str, limit: int = 256, offset=None,
                with_vector: bool = False, filter_: dict | None = None):
         items = [{"id": pid, "payload": p.get("payload", {})}
-                 for pid, p in self.collections.get(name, {}).get("pontos", {}).items()
+                 for pid, p in self.collections.get(name, {}).get("points", {}).items()
                  if not filter_ or _matches_filter(p.get("payload", {}), filter_)]
 
         return items[:limit], None
@@ -108,7 +108,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _matches_filter(payload: dict, filter_: dict) -> bool:
-    """Suporta as duas formas que o pacote usa: `match.value` e `range`."""
+    """Supports the two shapes the package uses: `match.value` and `range`."""
     for cond in filter_.get("must", []):
         key = cond.get("key")
         value = payload.get(key)
@@ -128,11 +128,11 @@ def _matches_filter(payload: dict, filter_: dict) -> bool:
 
 
 class FakeEmbedder:
-    """Vetores determinísticos derivados do texto.
+    """Deterministic vectors derived from the text.
 
-    Determinístico e não aleatório para que a similaridade seja PREVISÍVEL: textos
-    que compartilham palavras ficam próximos, o que permite testar recuperação de
-    verdade em vez de testar o dublê.
+    Deterministic rather than random so the similarity is PREDICTABLE: texts that share
+    words end up close together, which makes it possible to test real retrieval instead
+    of testing the fake.
     """
 
     def __init__(self, dim: int = 8):
@@ -151,10 +151,10 @@ class FakeEmbedder:
         return self.dim
 
     def _vector_for(self, text: str) -> list[float]:
-        # `crc32` e NÃO `hash()`: o hash de string em Python é salgado por processo,
-        # então o mesmo texto cai em posições diferentes a cada execução. Um dublê com
-        # similaridade que muda entre execuções produz teste que passa hoje e falha
-        # amanhã sem nada ter mudado — pior que não ter dublê.
+        # `crc32` and NOT `hash()`: Python's string hash is salted per process, so the
+        # same text lands in different positions on each run. A fake whose similarity
+        # changes between runs produces a test that passes today and fails tomorrow with
+        # nothing having changed — worse than having no fake at all.
         vec = [0.0] * self.dim
         for word in text.lower().split():
             vec[zlib.crc32(word.encode()) % self.dim] += 1.0
@@ -165,7 +165,7 @@ class FakeEmbedder:
 
 
 class FailingFakeEmbedder:
-    """Levanta o erro do domínio. Para exercitar o caminho de degradação."""
+    """Raises the domain error. For exercising the degradation path."""
 
     def __init__(self, error):
         self.error = error
@@ -178,7 +178,7 @@ class FailingFakeEmbedder:
 
 
 class FakeReranker:
-    """Devolve os scores combinados, na ordem dos documentos recebidos."""
+    """Returns the scores it was given, against the order of the documents received."""
 
     def __init__(self, scores=None, ok=True, error=None, was_logit=False):
         self.scores = scores

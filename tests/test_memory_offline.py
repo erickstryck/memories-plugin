@@ -76,7 +76,7 @@ class TestPayloadShape(unittest.TestCase):
     def test_update_of_a_missing_id_does_not_create(self):
         s, q, _ = store()
         self.assertEqual(s.update("nao-existe", information="x")["status"], "not_found")
-        self.assertEqual(len(q.collections["mem"]["pontos"]), 0)
+        self.assertEqual(len(q.collections["mem"]["points"]), 0)
 
 
 class TestRefusedWrites(unittest.TestCase):
@@ -90,7 +90,7 @@ class TestRefusedWrites(unittest.TestCase):
         s, q, _ = store()
         with self.assertRaises(MemoryError_):
             s.store_many([{"information": "válido"}, {"information": "  "}])
-        self.assertEqual(len(q.collections["mem"]["pontos"]), 0,
+        self.assertEqual(len(q.collections["mem"]["points"]), 0,
                          "validação tem de ser ANTES de escrever, não durante")
 
     def test_batch_makes_ONE_embedding_call(self):
@@ -208,8 +208,8 @@ class TestDocsOffline(unittest.TestCase):
         path = self._write_file()
         idx.index_file(path, ttl_seconds=60)
         idx.keep_file(path)
-        tmp = list(q.collections["tmp"]["pontos"].values())[0]["payload"]
-        lib = list(q.collections["lib"]["pontos"].values())[0]["payload"]
+        tmp = list(q.collections["tmp"]["points"].values())[0]["payload"]
+        lib = list(q.collections["lib"]["points"].values())[0]["payload"]
         self.assertIn("expires_at_ts", tmp)
         self.assertNotIn("expires_at_ts", lib, "biblioteca não expira, por construção")
 
@@ -217,9 +217,9 @@ class TestDocsOffline(unittest.TestCase):
         idx, q = self._index()
         path = self._write_file()
         idx.keep_file(path)
-        before = len(q.collections["lib"]["pontos"])
+        before = len(q.collections["lib"]["points"])
         idx.keep_file(path)
-        self.assertEqual(len(q.collections["lib"]["pontos"]), before)
+        self.assertEqual(len(q.collections["lib"]["points"]), before)
 
     def test_sweep_removes_only_what_expired(self):
         idx, q = self._index()
@@ -227,7 +227,7 @@ class TestDocsOffline(unittest.TestCase):
         idx.index_file(self._write_file("outro conteudo aqui\n"), ttl_seconds=600)
         idx.sweep()
         remaining_docs = [p["payload"]["document"]
-                     for p in q.collections["tmp"]["pontos"].values()]
+                     for p in q.collections["tmp"]["points"].values()]
         self.assertTrue(remaining_docs, "o de 600s tem de sobreviver")
         self.assertTrue(all("outro" in d for d in remaining_docs),
                         "só o vencido é removido")
@@ -252,7 +252,7 @@ class TestDocsOffline(unittest.TestCase):
         idx, q = self._index()
         idx.keep_file(path)
         lines = content.splitlines()
-        for p in q.collections["lib"]["pontos"].values():
+        for p in q.collections["lib"]["points"].values():
             md, doc = p["payload"]["metadata"], p["payload"]["document"]
             slice_text = "\n".join(lines[md["start_line"] - 1:md["end_line"]])
             self.assertEqual(slice_text.strip("\n"), doc,

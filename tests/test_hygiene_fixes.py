@@ -126,7 +126,7 @@ class TestTtlPreservedAcrossRefresh(unittest.TestCase):
     def test_lifetime_is_stored_at_index_time(self):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=3600)
-        md = list(q.collections["tmp"]["pontos"].values())[0]["payload"]["metadata"]
+        md = list(q.collections["tmp"]["points"].values())[0]["payload"]["metadata"]
         self.assertEqual(md["ttl_seconds"], 3600)
 
     def test_refresh_reuses_the_lifetime_instead_of_the_default(self):
@@ -135,7 +135,7 @@ class TestTtlPreservedAcrossRefresh(unittest.TestCase):
         idx.index_file(path, ttl_seconds=3600)          # o usuário pediu 1 hora
         Path(path).write_text("conteudo alterado maior\n")  # força reindexação
         idx.refresh(scope="tmp")
-        p = list(q.collections["tmp"]["pontos"].values())[0]["payload"]
+        p = list(q.collections["tmp"]["points"].values())[0]["payload"]
         remaining = p["expires_at_ts"] - time.time()
         self.assertLess(remaining, 3700, "não pode virar o default de 24h")
         self.assertGreater(remaining, 3500)
@@ -147,7 +147,7 @@ class TestTtlPreservedAcrossRefresh(unittest.TestCase):
         idx.keep_file(path)
         Path(path).write_text("outro conteudo bem diferente\n")
         idx.refresh(scope="library")
-        for p in q.collections["lib"]["pontos"].values():
+        for p in q.collections["lib"]["points"].values():
             self.assertNotIn("expires_at_ts", p["payload"])
 
 
