@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""qctx — interface de linha de comando do núcleo.
+
+É por aqui que um agente sem suporte a MCP (ou um host qualquer) usa a memória de
+longo prazo e o índice efêmero de documentos: uma chamada de processo, JSON ou
+texto na saída. Toda a lógica vive em `core/`; este arquivo só traduz argumentos.
+
+    qctx collections list
+    qctx config show | set <chave> <valor>
+    qctx memory store <texto> [--type T] [--project P] [--json META]
+    qctx memory find <pergunta> [--limit N]
+    qctx memory recall <pergunta> [--limit N]
+    qctx memory get|delete <id>
+    qctx memory list [--limit N]
+    qctx memory update <id> [--text T] [--json META]
+    qctx docs index <caminho> [--ttl 24h]        temporário, expira
+    qctx docs keep <caminho>                     biblioteca, permanente
+    qctx docs search <pergunta> [--scope all|tmp|library] [--doc-id ID]
+    qctx docs list [--scope ...]
+    qctx docs refresh [--scope library|tmp]      reindexa o que mudou no disco
+    qctx docs drop <doc-id> [--scope ...] | --purge-tmp | --expired
+
+Três acervos, três ciclos de vida: MEMÓRIA guarda fato curado e não expira;
+BIBLIOTECA guarda documento para consulta e não expira; TEMPORÁRIO guarda
+documento de uma tarefa e expira. Coleções distintas, por configuração.
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import core  # noqa: E402
+import core.docs  # noqa: E402
+from core.config import ConfigError  # noqa: E402
+
+
+def saida(obj, como_json: bool) -> None:
+    if como_json:
+        print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
+
+
+# ---- collections / config --------------------------------------------------
+
+def cmd_collections(args, cfg):
+    q = core.build_qdrant(cfg)
+    nomes = q.list_collections()
+    linhas = []
+    for nome in sorted(nomes):
+        info = q.collection_info(nome) or {}
+        size = info.get("size")
+        linhas.append({
+            "collection": nome,
+            "points": info.get("points"),
+            "dim": size,
+            "compativel": size == cfg.vector_size,
+            "uso": ("memória" if nome == cfg.memory_collection
+                    else "temporário" if nome == cfg.docs_collection
+                    else "biblioteca" if nome == cfg.library_collection else ""),
+        })
+    if args.json:
+        saida({"vector_size": cfg.vector_size, "collections": linhas}, True)
+
+        return
+    print(f"modelo configurado usa dimensão {cfg.vector_size}\n")
+    print(f"{'coleção':34} {'pontos':>8} {'dim':>6}  {'':10} uso")
+    for l in linhas:
+        marca = "ok" if l["compativel"] else "INCOMPAT."
+        print(f"{l['collection']:34} {str(l['points']):>8} {str(l['dim']):>6}  {marca:10} {l['uso']}")
+    print("\nescolher: qctx config set memory-collection|docs-collection|"
+          "library-collection <nome>")
+
+
+def cmd_config_show(args, cfg):
+    dados = core.redacted(cfg)
+    if args.json:
+        saida(dados, True)
+
+        return
+    for k, v in dados.items():
+        print(f"  {k:20} {v}")
+
+
+def cmd_config_set(args, cfg):
+    chave = args.key.replace("-", "_")
+    valor = int(args.value) if chave == "vector_size" else args.value
+    caminho = core.save({chave: valor})
+    print(f"{chave} = {valor}  (gravado em {caminho})")
+    # Aviso, não erro: a coleção pode ser criada depois. Mas dimensão incompatível
+    # é armadilha silenciosa, então vale gritar na hora da escolha.
+    if chave in ("memory_collection", "docs_collection", "library_collection"):
+        try:
+            q = core.build_qdrant(core.load())
+            info = q.collection_info(valor)
+            if info is None:
+                print(f"  (a coleção {valor!r} ainda não existe — será criada no primeiro uso)")
+            elif info.get("size") not in (None, cfg.vector_size):
+                print(f"  ATENÇÃO: {valor!r} tem dimensão {info['size']}, "
+                      f"incompatível com o modelo ({cfg.vector_size})")
+        except Exception:
+            pass
+
+
+# ---- memory ----------------------------------------------------------------
+
+def _meta_de_args(args) -> dict:
+    meta = {}
+    if getattr(args, "json_meta", None):
+        meta.update(json.loads(args.json_meta))
+    for campo in ("type", "project", "area"):
+        valor = getattr(args, campo, None)
+        if valor:
+            meta[campo] = valor
+
+    return meta
+
+
+def cmd_memory_store(args, cfg):
+    saida_ = core.build_memory(cfg).store(args.text, _meta_de_args(args))
+    print(json.dumps(saida_, ensure_ascii=False) if args.json else f"gravado id={saida_['id']}")
+
+
+def cmd_memory_find(args, cfg):
+    hits = core.build_memory(cfg).find(args.query, args.limit)
+    if args.json:
+        saida(hits, True)
+
+        return
+    if not hits:
+        print("nenhuma memória encontrada")
+
+        return
+    for i, h in enumerate(hits, 1):
+        print(f"{i}. {h['score']:.3f}  {h['id']}  {json.dumps(h['metadata'], ensure_ascii=False)}")
+        print(f"   {h['document'][:400]}\n")
+
+
+def cmd_memory_recall(args, cfg):
+    store = core.build_memory(cfg)
+    hits, info = store.recall([args.query], dense_floor=args.dense_floor,
+                              strict_floor=args.strict_floor, top_k=args.top_k,
+                              min_score=args.min_score, max_results=args.limit)
+    if args.json:
+        saida({"info": info, "hits": [h.__dict__ for h in hits]}, True)
+
+        return
+    ce = info.get("rerank")
+    if ce and ce.get("era_logit"):
+        print("(escala logit detectada e normalizada para sigmoid)")
+    if not hits:
+        print(f"nada acima do corte (melhor denso {info['melhor_denso']:.3f})")
+
+        return
+    for i, h in enumerate(hits[:args.limit], 1):
+        print(f"{i}. {h.origem} {h.score:.3f} (denso {h.dense_score:.3f})  {h.id}")
+        print(f"   {json.dumps(h.metadata, ensure_ascii=False)}")
+        print(f"   {h.document[:600]}\n")
+
+
+def cmd_memory_get(args, cfg):
+    saida(core.build_memory(cfg).get(args.id), True)
+
+
+def cmd_memory_delete(args, cfg):
+    saida(core.build_memory(cfg).delete(args.id), True)
+
+
+def cmd_memory_update(args, cfg):
+    meta = _meta_de_args(args) or None
+    res = core.build_memory(cfg).update(args.id, args.text, meta)
+    print(json.dumps(res, ensure_ascii=False) if args.json else f"{res['status']} id={res['id']}")
+
+
+def cmd_memory_list(args, cfg):
+    saida(core.build_memory(cfg).list_page(args.limit), True)
+
+
+# ---- docs ------------------------------------------------------------------
+
+def _relata_escrita(res: dict, como_json: bool) -> None:
+    if como_json:
+        saida(res, True)
+
+        return
+    rotulo = "guardado na biblioteca" if res["scope"] == "library" else "indexado (temporário)"
+    print(f"{rotulo}: {os.path.basename(res['path'])} -> doc_id={res['doc_id']}")
+    print(f"  {res['lines']} linhas, {res['chars']} chars -> {res['chunks']} trechos "
+          f"(modo {res['mode']}, coleção {res['collection']})")
+    if res["expires_at"]:
+        print(f"  expira em {res['expires_at']}")
+    else:
+        print("  sem expiração — remova com `qctx docs drop <doc-id> --scope library`")
+    print(f"  buscar: qctx docs search \"<pergunta>\" --doc-id {res['doc_id']}")
+
+
+def cmd_docs_index(args, cfg):
+    res = core.build_docs(cfg).index_file(args.path, core.parse_ttl(args.ttl), args.doc_id)
+    _relata_escrita(res, args.json)
+
+
+def cmd_docs_keep(args, cfg):
+    res = core.build_docs(cfg).keep_file(args.path, args.doc_id)
+    _relata_escrita(res, args.json)
+
+
+def cmd_docs_refresh(args, cfg):
+    relatorio = core.build_docs(cfg).refresh(args.scope)
+    if args.json:
+        saida(relatorio, True)
+
+        return
+    if not relatorio:
+        print("nada para verificar")
+
+        return
+    for r in relatorio:
+        marca = {"ok": "  ", "reindexado": "->", "ausente": "!!"}.get(r["acao"], "  ")
+        print(f"{marca} {r['acao']:11} {r['doc_id']}  {r['path']}")
+
+
+def cmd_docs_search(args, cfg):
+    hits, info = core.build_docs(cfg).search(args.query, args.scope, args.doc_id, args.limit)
+    if args.json:
+        saida({"info": info, "hits": [h.__dict__ for h in hits]}, True)
+
+        return
+    if not hits:
+        print("nenhum trecho relevante (ou o índice expirou — veja `qctx docs list`)")
+
+        return
+    rr = info.get("rerank") or {}
+    if rr.get("colapsou"):
+        print(f"(re-rank colapsou — melhor CE {rr.get('melhor_ce', 0):.4f}, típico de pergunta "
+              f"e documento em línguas diferentes; usando ordem DENSA, que é indiferente "
+              f"à língua)\n")
+    elif not rr.get("ok"):
+        print(f"(aviso: re-rank não rodou — {rr.get('erro')}; ordem DENSA, não é veredito)\n")
+    for i, h in enumerate(hits, 1):
+        aviso = f"  ⚠ {h.stale}" if h.stale else ""
+        etiqueta = "biblioteca" if h.scope == "library" else "temporário"
+        if h.mode == "locator":
+            print(f"{i}. [{etiqueta}] {h.path}:{h.start_line}-{h.end_line}  "
+                  f"({h.origem} {h.score:.3f}){aviso}")
+            print(f"   {' '.join(h.text.split())[:300]}…")
+            print(f"   -> ler linhas {h.start_line}-{h.end_line} do arquivo para o conteúdo atual")
+        else:
+            print(f"{i}. [{etiqueta}] {os.path.basename(h.path)}  "
+                  f"({h.origem} {h.score:.3f}){aviso}")
+            print(f"   [FOTO de {h.indexed_at} — origem não relegível por região]")
+            print("   " + h.text.replace("\n", "\n   "))
+        print()
+
+
+def cmd_docs_list(args, cfg):
+    docs = core.build_docs(cfg).list_docs(args.scope)
+    if args.json:
+        saida(docs, True)
+
+        return
+    if not docs:
+        print("nada indexado")
+
+        return
+    import time
+    print(f"{len(docs)} documento(s):")
+    for d in docs:
+        if d["expires_at_ts"]:
+            validade = f"expira em {(d['expires_at_ts'] - time.time()) / 3600:5.1f}h"
+        else:
+            validade = "permanente     "
+        print(f"  [{d['scope']:7}] {d['doc_id']}  {d['chunks']:>4} trechos  {validade}  "
+              f"{d['mode']:9} {d['path']}")
+
+
+def cmd_docs_drop(args, cfg):
+    idx = core.build_docs(cfg)
+    if args.purge_tmp:
+        nome = idx.drop_all_tmp()
+        print(f"coleção temporária {nome} removida (recriada no próximo uso); "
+              f"biblioteca intacta")
+
+        return
+    if args.expired:
+        idx.sweep()
+        print("expirados removidos do temporário")
+
+        return
+    if not args.doc_id:
+        print("informe um doc-id, --purge-tmp ou --expired", file=sys.stderr)
+        raise SystemExit(2)
+    idx.drop(args.doc_id, args.scope)
+    print(f"doc_id {args.doc_id} removido de {args.scope}")
+
+
+# ---- parser ----------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="qctx", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true", help="saída em JSON")
+    sub = ap.add_subparsers(dest="grupo", required=True)
+
+    col = sub.add_parser("collections", help="inspecionar coleções do Qdrant")
+    colsub = col.add_subparsers(dest="acao", required=True)
+    colsub.add_parser("list").set_defaults(fn=cmd_collections)
+
+    cfgp = sub.add_parser("config", help="ver ou alterar configuração")
+    cfgsub = cfgp.add_subparsers(dest="acao", required=True)
+    cfgsub.add_parser("show").set_defaults(fn=cmd_config_show)
+    p = cfgsub.add_parser("set")
+    p.add_argument("key")
+    p.add_argument("value")
+    p.set_defaults(fn=cmd_config_set)
+
+    mem = sub.add_parser("memory", help="memória semântica de longo prazo")
+    memsub = mem.add_subparsers(dest="acao", required=True)
+
+    p = memsub.add_parser("store")
+    p.add_argument("text")
+    p.add_argument("--type")
+    p.add_argument("--project")
+    p.add_argument("--area")
+    p.add_argument("--json-meta", dest="json_meta")
+    p.set_defaults(fn=cmd_memory_store)
+
+    p = memsub.add_parser("find", help="busca densa (barata, sem re-rank)")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=5)
+    p.set_defaults(fn=cmd_memory_find)
+
+    p = memsub.add_parser("recall", help="busca com re-rank (dois portões)")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=6)
+    p.add_argument("--dense-floor", type=float, default=0.45)
+    p.add_argument("--strict-floor", type=float, default=0.58)
+    p.add_argument("--min-score", type=float, default=0.10)
+    p.add_argument("--top-k", type=int, default=20)
+    p.set_defaults(fn=cmd_memory_recall)
+
+    p = memsub.add_parser("get")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_memory_get)
+
+    p = memsub.add_parser("delete")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_memory_delete)
+
+    p = memsub.add_parser("update")
+    p.add_argument("id")
+    p.add_argument("--text")
+    p.add_argument("--type")
+    p.add_argument("--project")
+    p.add_argument("--area")
+    p.add_argument("--json-meta", dest="json_meta")
+    p.set_defaults(fn=cmd_memory_update)
+
+    p = memsub.add_parser("list")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(fn=cmd_memory_list)
+
+    docs = sub.add_parser("docs", help="índice efêmero de documentos longos")
+    docsub = docs.add_subparsers(dest="acao", required=True)
+
+    p = docsub.add_parser("index", help="indexa como TEMPORÁRIO (com TTL)")
+    p.add_argument("path")
+    p.add_argument("--ttl", default="24h", help="30m, 24h, 7d (default 24h)")
+    p.add_argument("--doc-id", dest="doc_id", default=None)
+    p.set_defaults(fn=cmd_docs_index)
+
+    p = docsub.add_parser("keep", help="guarda na BIBLIOTECA, sem expiração")
+    p.add_argument("path")
+    p.add_argument("--doc-id", dest="doc_id", default=None)
+    p.set_defaults(fn=cmd_docs_keep)
+
+    p = docsub.add_parser("search")
+    p.add_argument("query")
+    p.add_argument("--scope", choices=core.docs.SCOPES, default="all")
+    p.add_argument("--doc-id", dest="doc_id", default=None)
+    p.add_argument("--limit", type=int, default=5)
+    p.set_defaults(fn=cmd_docs_search)
+
+    p = docsub.add_parser("list")
+    p.add_argument("--scope", choices=core.docs.SCOPES, default="all")
+    p.set_defaults(fn=cmd_docs_list)
+
+    p = docsub.add_parser("refresh", help="reindexa o que mudou no disco")
+    p.add_argument("--scope", choices=("library", "tmp"), default="library")
+    p.set_defaults(fn=cmd_docs_refresh)
+
+    p = docsub.add_parser("drop")
+    p.add_argument("doc_id", nargs="?", default=None)
+    p.add_argument("--scope", choices=core.docs.SCOPES, default="all")
+    p.add_argument("--purge-tmp", dest="purge_tmp", action="store_true",
+                   help="apaga a coleção temporária inteira (biblioteca intacta)")
+    p.add_argument("--expired", action="store_true")
+    p.set_defaults(fn=cmd_docs_drop)
+
+    return ap
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    try:
+        args.fn(args, core.load())
+    except (ConfigError, core.DocsError, core.QdrantError, core.ModelError) as exc:
+        print(f"erro: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

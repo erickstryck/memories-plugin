@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# config local com endereços e escolha de coleções
+config.json
+.env
+# nada de segredo entra no repo
+*.secret
+*.key
