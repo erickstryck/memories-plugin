@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Hook de CHECKPOINT: a cada N interações, injeta o procedimento de gravação.
+"""CHECKPOINT hook: every N interactions, injects the writing procedure.
 
-Contraparte de escrita do `recall.py`. Este hook não grava nada — ele entrega ao
-modelo o procedimento completo, no momento em que há conversa acumulada para
-destilar.
+The write-side counterpart of `recall.py`. This hook stores nothing — it hands the
+model the complete procedure at the moment there is accumulated conversation to
+distil.
 
-O texto é deliberadamente AUTOSSUFICIENTE. Um lembrete de uma linha ("salve o que
-for durável") produz memória vaga, duplicada e sem metadata, e o custo aparece
-meses depois, quando a busca devolve três versões contraditórias do mesmo fato e
-ninguém sabe qual vale. Quem lê o bloco tem de conseguir agir sem abrir mais nada.
+The text is deliberately SELF-SUFFICIENT. A one-line reminder ("save whatever is
+durable") produces vague, duplicated, metadata-less memory, and the cost shows up
+months later, when a search returns three contradictory versions of the same fact and
+nobody knows which one holds. Whoever reads the block has to be able to act without
+opening anything else.
 
-Configuração:
-    QCTX_CHECKPOINT_INTERVAL   interações entre checkpoints (default 5)
-    QCTX_CHECKPOINT_DISABLED   "1" desliga
-    QCTX_STATE_DIR             onde guardar o contador
+Configuration:
+    QCTX_CHECKPOINT_INTERVAL   interactions between checkpoints (default 5)
+    QCTX_CHECKPOINT_DISABLED   "1" turns it off
+    QCTX_STATE_DIR             where to keep the counter
 """
 import json
 import os
@@ -24,48 +25,47 @@ INTERVAL = int(os.environ.get("QCTX_CHECKPOINT_INTERVAL")
                 or os.environ.get("REMEMBER_INTERVAL") or "5")
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
-PROCEDURE = """[checkpoint de memória — escrita no acervo de longo prazo]
-Interação {count} desta conversa (a cada {intervalo}). Faça o checkpoint AGORA, em uma
-passada curta, sem desviar da tarefa em andamento. Se nada durável surgiu desde o
-último checkpoint, não salve nada e diga isso em uma linha — memória vazia é melhor
-que memória de enchimento.
+PROCEDURE = """[memory checkpoint — writing to the long-term archive]
+Interaction {count} of this conversation (every {interval}). Do the checkpoint NOW, in one
+short pass, without straying from the task in progress. If nothing durable came up since
+the last checkpoint, save nothing and say so in one line — an empty memory is better
+than filler memory.
 
-1. VARRA a conversa desde o último checkpoint e liste os candidatos. O que qualifica,
-   por tipo:
-   - `user` — quem o usuário é: papel, expertise, preferências estáveis.
-   - `feedback` — como ele quer que você trabalhe (correções E abordagens
-     confirmadas). SEMPRE inclua o porquê; sem o motivo, a orientação é reaplicada
-     fora de contexto na próxima sessão.
-   - `project` — objetivos, restrições e decisões em curso que NÃO se deduzem do
-     código nem do histórico do git. Converta data relativa em absoluta.
-   - `reference` — ponteiros externos (URL, dashboard, ticket) e comportamento
-     MEDIDO de plataforma, SDK ou biblioteca.
-   VALE MAIS QUE TUDO: comportamento que você teve de MEDIR — uma probe, um grep, um
-   branch que você rodou. É o conhecimento caro, e é o que impede a próxima sessão de
-   re-medir. Registre COMO foi medido, para dar para refazer.
-   DESCARTE: conversa passageira, detalhe de uma vez só, estado volátil ("estamos na
-   linha 42"), e o que já está no repositório, no git ou nas instruções do projeto.
+1. SWEEP the conversation since the last checkpoint and list the candidates. What
+   qualifies, by type:
+   - `user` — who the user is: role, expertise, stable preferences.
+   - `feedback` — how they want you to work (corrections AND confirmed approaches).
+     ALWAYS include the why; without the reason, the guidance gets reapplied out of
+     context in the next session.
+   - `project` — goals, constraints and in-flight decisions that do NOT follow from the
+     code or the git history. Convert relative dates to absolute ones.
+   - `reference` — external pointers (URL, dashboard, ticket) and MEASURED behaviour of a
+     platform, SDK or library.
+   WORTH MORE THAN ANYTHING ELSE: behaviour you had to MEASURE — a probe, a grep, a
+   branch you ran. That is the expensive knowledge, and it is what keeps the next session
+   from re-measuring. Record HOW it was measured, so it can be redone.
+   DISCARD: passing conversation, one-off detail, volatile state ("we are on line 42"),
+   and anything already in the repository, in git or in the project instructions.
 
-2. DEDUPLIQUE antes de escrever. Para cada candidato, uma busca curta. Match próximo
-   (score alto, mesmo fato) é ATUALIZAÇÃO naquele id, NÃO registro novo.
+2. DEDUPE before writing. One short search per candidate. A close match (high score,
+   same fact) is an UPDATE on that id, NOT a new record.
 
-3. CORRIJA o que está errado, na mesma passada. Se uma memória se revelou errada ou
-   obsoleta — inclusive uma que VOCÊ escreveu hoje, se uma medição ou review a
-   desmentiu — atualize dizendo o que a versão antiga afirmava, o que foi medido e
-   quando. Nunca deixe a errada de pé com uma nova ao lado: duas memórias
-   contraditórias são piores que uma corrigida, porque quem lê depois não tem como
-   saber qual ganha.
+3. FIX what is wrong, in the same pass. If a memory turned out to be wrong or obsolete —
+   including one YOU wrote today, if a measurement or a review disproved it — update it
+   saying what the old version claimed, what was measured and when. Never leave the wrong
+   one standing with a new one beside it: two contradictory memories are worse than one
+   corrected memory, because whoever reads them later has no way to know which wins.
 
-4. ESCREVA um FATO ATÔMICO por registro. Parágrafo inteiro como uma memória só
-   arruína a busca semântica, porque o vetor fica a média de vários assuntos.
-   Metadata obrigatória: {{"type": "user|feedback|project|reference",
-   "date": "YYYY-MM-DD", "source": "conversation"}}. Acrescente `project`, `area`,
-   `corrected` ou `supersedes` quando ajudarem a filtrar depois.
+4. WRITE one ATOMIC FACT per record. A whole paragraph as a single memory ruins semantic
+   search, because the vector becomes the average of several subjects.
+   Mandatory metadata: {{"type": "user|feedback|project|reference",
+   "date": "YYYY-MM-DD", "source": "conversation"}}. Add `project`, `area`, `corrected`
+   or `supersedes` when they help filter later.
 
-5. CONFIRME em uma lista curta: o que foi salvo ou atualizado, cada item com seu id,
-   no idioma do usuário.
+5. CONFIRM in a short list: what was saved or updated, each item with its id, in the
+   user's language.
 
-Os comandos estão na skill de memória; o essencial do procedimento está aqui."""
+The commands are in the memory skill; the essence of the procedure is here."""
 
 
 def main() -> None:
@@ -90,7 +90,7 @@ def main() -> None:
     counter.write_text(str(n))
 
     if INTERVAL <= 0 or n % INTERVAL != 0:
-        return  # silencioso nas interações intermediárias
+        return  # silent on the intermediate interactions
 
     print(json.dumps({
         "hookSpecificOutput": {

@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
-"""Hook de RECALL AUTOMÁTICO: busca na memória antes de o prompt chegar ao modelo.
+"""AUTOMATIC RECALL hook: searches memory before the prompt reaches the model.
 
-Adaptador de host. Toda a recuperação vive em `core`; aqui ficam só as três coisas
-que são do host: ler o payload do hook, decidir o que injetar dentro de um
-orçamento de contexto, e formatar o bloco.
+A host adapter. All the retrieval lives in `core`; what stays here are the three
+things that belong to the host: reading the hook payload, deciding what to inject
+within a context budget, and formatting the block.
 
-O ponto do hook é que a memória chegue SEM depender de o modelo decidir buscar.
-Sem ele, a leitura fica na disciplina do agente — e a leitura é justamente a
-direção que se esquece, porque nada falha visivelmente quando ela não acontece.
+The point of the hook is that memory arrives WITHOUT depending on the model deciding
+to search. Without it, reading is left to the agent's discipline — and reading is
+precisely the direction that gets forgotten, because nothing fails visibly when it
+does not happen.
 
-FALHA EM SILÊNCIO PARA O USUÁRIO, NUNCA PARA O MODELO. Se a busca não roda, o
-prompt segue normalmente (o usuário não é penalizado), mas o modelo recebe um
-aviso EXPLÍCITO de indisponibilidade. Sem esse aviso, ausência de resultado é
-indistinguível de "não há precedente", e aí o modelo afirma que algo é inédito
-quando ninguém consultou o acervo — o exato modo de falha que este hook existe
-para impedir.
+IT FAILS SILENTLY FOR THE USER, NEVER FOR THE MODEL. If the search does not run, the
+prompt goes through as usual (the user is not penalized), but the model receives an
+EXPLICIT unavailability warning. Without that warning, an absence of results is
+indistinguishable from "there is no precedent", and then the model asserts something
+is unprecedented when nobody consulted the archive — the exact failure mode this hook
+exists to prevent.
 
-Configuração (todas opcionais; nomes QCTX_* canônicos, RECALL_* aceitos por
-compatibilidade com a versão anterior):
-    QCTX_RECALL_DISABLED       "1" desliga
-    QCTX_RECALL_STRICT_FLOOR   corte denso quando sozinho        (0.58)
-    QCTX_RECALL_DENSE_FLOOR    piso denso quando há cross-encoder (0.45)
-    QCTX_RECALL_MIN_SCORE      corte do cross-encoder             (0.10)
-    QCTX_RECALL_TOP_K          hits por ângulo                    (8 / 20 com CE)
-    QCTX_RECALL_MAX_MEMORIES   memórias injetadas por vez         (6)
-    QCTX_RECALL_MAX_CHARS      orçamento total                    (14000)
-    QCTX_RECALL_MAX_PER_MEM    teto por memória                   (4500)
-    QCTX_RECALL_BREAKER        espera do disjuntor em segundos    (300)
-    QCTX_STATE_DIR             onde guardar estado e log
+Configuration (all optional; QCTX_* are the canonical names, RECALL_* accepted for
+compatibility with the previous version):
+    QCTX_RECALL_DISABLED       "1" turns it off
+    QCTX_RECALL_STRICT_FLOOR   dense cut when alone                (0.58)
+    QCTX_RECALL_DENSE_FLOOR    dense floor with a cross-encoder    (0.45)
+    QCTX_RECALL_MIN_SCORE      cross-encoder cutoff                (0.10)
+    QCTX_RECALL_TOP_K          hits per angle                      (8 / 20 with CE)
+    QCTX_RECALL_MAX_MEMORIES   memories injected at a time         (6)
+    QCTX_RECALL_MAX_CHARS      total budget                        (14000)
+    QCTX_RECALL_MAX_PER_MEM    ceiling per memory                  (4500)
+    QCTX_RECALL_BREAKER        breaker cooldown in seconds         (300)
+    QCTX_STATE_DIR             where to keep state and the log
 """
 import json
 import os
@@ -48,24 +49,24 @@ def env(name: str, legacy: str, default: str) -> str:
 
 
 def env_num(name: str, legacy: str, default: str, kind=float):
-    """Lê número do ambiente SEM derrubar o processo se estiver mal escrito.
+    """Reads a number from the environment WITHOUT killing the process if it is malformed.
 
-    Isto é lido no carregamento do módulo, ou seja ANTES do catch-all do `main` — um
-    `QCTX_RECALL_MAX_CHARS=14k` explodia antes de qualquer código nosso rodar, e o
-    usuário perdia o recall recebendo um traceback em vez do aviso de
-    indisponibilidade. Valor inválido cai no default e fica registrado no log.
+    This is read at module load, i.e. BEFORE `main`'s catch-all — a
+    `QCTX_RECALL_MAX_CHARS=14k` blew up before any of our code ran, and the user lost
+    recall while getting a traceback instead of the unavailability warning. An invalid
+    value falls back to the default and is recorded in the log.
     """
     raw = env(name, legacy, default)
     try:
         return kind(raw)
     except (TypeError, ValueError):
-        _pending_notes.append(f"{name}={raw!r} não é número — usando {default}")
+        _pending_notes.append(f"{name}={raw!r} is not a number — using {default}")
 
         return kind(default)
 
 
-#: Avisos coletados antes de o log existir (o log depende de STATE_DIR, que depende
-#: de env). Despejados na primeira escrita de log.
+#: Warnings collected before the log exists (the log depends on STATE_DIR, which
+#: depends on env). Flushed on the first log write.
 _pending_notes: list[str] = []
 
 
@@ -81,18 +82,18 @@ MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
 MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
 BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 
-#: Rounds antes de reinjetar uma memória por inteiro em vez do ponteiro de uma
-#: linha. O contexto pode ter sido compactado nesse meio-tempo.
+#: Rounds before reinjecting a memory in full instead of the one-line pointer. The
+#: context may have been compacted in the meantime.
 REINJECT_AFTER = 8
 
-INSTRUCTIONS = """Como usar, sem exceção:
-- Precedente ou veto do usuário PREVALECE. Não re-derive, não re-proponha o que foi \
-vetado; se achar que deve mudar, diga explicitamente que é uma reversão.
-- Memória que cita arquivo, linha, flag ou versão: VERIFIQUE na árvore atual antes \
-de agir. Ela reflete o que era verdade quando foi escrita.
-- Memória que contradiz o que você acabou de medir: a medição ganha — e então \
-CORRIJA a memória, não deixe as duas conviverem.
-- Faceta do assunto não coberta abaixo: faça uma busca explícita com outro ângulo."""
+INSTRUCTIONS = """How to use this, without exception:
+- A precedent or a veto from the user PREVAILS. Do not re-derive, do not re-propose \
+what was vetoed; if you think it should change, say explicitly that it is a reversal.
+- A memory that cites a file, a line, a flag or a version: VERIFY it against the \
+current tree before acting. It reflects what was true when it was written.
+- A memory that contradicts what you just measured: the measurement wins — and then \
+FIX the memory, do not let the two coexist.
+- A facet of the subject not covered below: run an explicit search from another angle."""
 
 
 def log(msg: str) -> None:
@@ -113,7 +114,7 @@ def _write_log(msg: str) -> None:
 
 
 def extract_prompt(data: dict) -> str:
-    """O nome do campo varia por versão de host; aceita os candidatos conhecidos."""
+    """The field name varies by host version; accepts the known candidates."""
     for key in ("prompt", "user_prompt", "userPrompt", "message", "current_prompt", "text"):
         v = data.get(key)
         if isinstance(v, str) and v.strip():
@@ -133,60 +134,60 @@ def emit(context: str) -> None:
 
 def unavailable_block(stage: str, error: str) -> str:
     return (
-        "[recall automático — INDISPONÍVEL neste prompt]\n"
-        f"A busca na memória de longo prazo NÃO foi executada: {stage} falhou ({error}). "
-        "Isto NÃO significa que não há precedente — significa que o acervo não foi "
-        "consultado. Não afirme que algo é inédito ou sem histórico apoiado neste turno. "
-        "Se o assunto puder ter precedente, tente uma busca explícita; se ela também "
-        "falhar, diga ao usuário que está sem memória em vez de responder como se o "
-        "acervo estivesse vazio."
+        "[automatic recall — UNAVAILABLE for this prompt]\n"
+        f"The long-term memory search was NOT executed: {stage} failed ({error}). "
+        "This does NOT mean there is no precedent — it means the archive was not "
+        "consulted. Do not claim anything is unprecedented or without history on the "
+        "strength of this turn. If the subject might have precedent, try an explicit "
+        "search; if that fails too, tell the user you are without memory instead of "
+        "answering as though the archive were empty."
     )
 
 
 def _degradation_note(outcome) -> str:
-    """Uma linha dizendo que o julgamento foi PARCIAL, quando foi.
+    """One line saying the judgement was PARTIAL, when it was.
 
-    Sem isto o bloco afirmava "não há precedente registrado sobre este assunto" mesmo
-    quando o segundo estágio havia falhado — ou seja apresentava resultado de um
-    pipeline degradado com a confiança de um pipeline completo.
+    Without this the block asserted "there is no recorded precedent on this subject"
+    even when the second stage had failed — that is, it presented the result of a
+    degraded pipeline with the confidence of a complete one.
     """
     parts = []
     if outcome.rerank_error:
-        parts.append(f"o re-rank NÃO rodou ({outcome.rerank_error[:80]}), então a ordem é "
-                      "densa e o corte estrito foi reaplicado")
+        parts.append(f"the re-rank did NOT run ({outcome.rerank_error[:80]}), so the order is "
+                      "dense and the strict cut was reapplied")
     elif outcome.collapsed:
-        parts.append(f"o re-rank colapsou (melhor {outcome.best_rerank:.4f}), típico de "
-                      "pergunta e memória em línguas diferentes; ordem densa")
-    # `dropped` só é notícia quando as vagas NÃO foram preenchidas: os descartados
-    # são a cauda de menor score denso, cortada por desenho, e avisar sobre eles em
-    # todo prompt é gritar lobo — o aviso perde o valor justamente quando importa.
+        parts.append(f"the re-rank collapsed (best {outcome.best_rerank:.4f}), typical of a "
+                      "question and a memory in different languages; dense order")
+    # `dropped` is only news when the slots were NOT filled: what got dropped is the
+    # tail with the lowest dense score, cut by design, and warning about it on every
+    # prompt is crying wolf — the warning loses its value exactly when it matters.
     if outcome.dropped and len(outcome.scored) < MAX_MEMORIES:
-        parts.append(f"{outcome.dropped} candidato(s) não foram julgados por teto de pares, "
-                      f"e as vagas não foram preenchidas — pode haver memória relevante fora")
+        parts.append(f"{outcome.dropped} candidate(s) went unjudged because of the pair ceiling, "
+                      f"and the slots were not filled — there may be relevant memory outside")
     if not parts:
         return ""
 
-    return "ATENÇÃO, julgamento parcial: " + "; ".join(parts) + ".\n"
+    return "CAUTION, partial judgement: " + "; ".join(parts) + ".\n"
 
 
 def empty_block(outcome, n_angles: int) -> str:
     if outcome.rerank_error or outcome.collapsed:
-        # Com o julgamento degradado, "não há precedente" seria uma afirmação que
-        # os dados não sustentam.
-        conclusion = ("O acervo foi consultado mas o julgamento foi PARCIAL, então isto "
-                     "não é evidência de ausência de precedente — se o assunto puder ter "
-                     "histórico, faça uma busca dirigida.")
+        # With the judgement degraded, "there is no precedent" would be a claim the data
+        # does not support.
+        conclusion = ("The archive was consulted but the judgement was PARTIAL, so this is "
+                     "not evidence that no precedent exists — if the subject might have "
+                     "history, run a targeted search.")
     else:
-        conclusion = ("Não há precedente registrado sobre este assunto — não repita esta "
-                     "busca genérica. Se o trabalho abrir um sub-assunto específico, aí "
-                     "sim vale uma busca dirigida.")
+        conclusion = ("There is no recorded precedent on this subject — do not repeat this "
+                     "generic search. If the work opens a specific sub-subject, then a "
+                     "targeted search is worth it.")
 
     return (
-        "[recall automático — memória de longo prazo]\n"
-        f"Busca executada a partir do seu prompt ({n_angles} ângulos semânticos): nenhuma "
-        f"memória acima do corte de relevância (melhor score {outcome.best_dense:.3f}).\n"
+        "[automatic recall — long-term memory]\n"
+        f"Search executed from your prompt ({n_angles} semantic angles): no memory above "
+        f"the relevance cutoff (best score {outcome.best_dense:.3f}).\n"
         + _degradation_note(outcome) + conclusion +
-        " E considere se a resposta que você vai produzir merece ser salva no fim."
+        " And consider whether the answer you are about to produce deserves to be saved at the end."
     )
 
 
@@ -198,10 +199,10 @@ def meta_line(meta: dict) -> str:
 
 def build_block(full_hits: list, pointers: list, n_angles: int, outcome) -> str:
     parts = [
-        "[recall automático — memória de longo prazo]",
-        f"Esta busca foi EXECUTADA pelo harness a partir do seu prompt ({n_angles} ângulos "
-        "semânticos, fundidos pelo maior score). O que segue é conhecimento de sessões "
-        "anteriores — leia ANTES de responder, investigar ou propor design.",
+        "[automatic recall — long-term memory]",
+        f"This search was EXECUTED by the harness from your prompt ({n_angles} semantic "
+        "angles, fused by highest score). What follows is knowledge from earlier sessions "
+        "— read it BEFORE answering, investigating or proposing a design.",
     ]
     note = _degradation_note(outcome)
     if note:
@@ -212,8 +213,8 @@ def build_block(full_hits: list, pointers: list, n_angles: int, outcome) -> str:
         truncated = ""
         if len(doc) > MAX_PER_MEM:
             doc = doc[:MAX_PER_MEM]
-            truncated = (f"\n[… truncado em {MAX_PER_MEM} chars — recupere o restante pelo "
-                     f"id {h.id} se o assunto for central]")
+            truncated = (f"\n[… truncated at {MAX_PER_MEM} chars — retrieve the rest by "
+                     f"id {h.id} if the subject is central]")
         header = f"── {i}. {h.origin} {h.score:.3f}"
         meta = meta_line(h.metadata)
         if meta:
@@ -222,9 +223,9 @@ def build_block(full_hits: list, pointers: list, n_angles: int, outcome) -> str:
         parts += [header, doc + truncated, ""]
 
     if pointers:
-        parts.append("Também relevantes, não incluídas por inteiro (já injetadas nesta "
-                      "sessão, ou fora do orçamento de contexto deste turno — recupere "
-                      "pelo id se precisar do texto):")
+        parts.append("Also relevant, not included in full (already injected in this "
+                      "session, or outside this turn's context budget — retrieve them by "
+                      "id if you need the text):")
         for p in pointers:
             summary = re.sub(r"\s+", " ", p.document)[:110]
             parts.append(f"- {p.id} (score {p.score:.3f}) — {summary}…")
@@ -241,11 +242,11 @@ def load_state(path: Path) -> dict:
 
 
 def prune_state(state: dict) -> int:
-    """Descarta de `seen` o que já não muda decisão nenhuma.
+    """Drops from `seen` whatever can no longer change any decision.
 
-    Uma entrada só importa enquanto `round - visto < REINJECT_AFTER`: passado isso a
-    memória volta INTEIRA de qualquer forma, então guardá-la é só ocupar espaço. Sem
-    poda, uma sessão longa acumula uma entrada por memória por rodada para sempre.
+    An entry only matters while `round - seen < REINJECT_AFTER`: past that the memory
+    comes back IN FULL anyway, so keeping it is just occupying space. Without pruning, a
+    long session accumulates one entry per memory per round forever.
     """
     round_no = int(state.get("round", 0))
     seen_map = state.get("seen", {})
@@ -258,11 +259,11 @@ def prune_state(state: dict) -> int:
 
 
 def purge_dead_sessions(days: float = 7.0) -> int:
-    """Apaga estado de sessões que não são tocadas há dias.
+    """Deletes state for sessions untouched for days.
 
-    Cada sessão cria um arquivo e nada os removia: o diretório crescia para sempre.
-    Sessão parada há uma semana não vai voltar, e se voltar o custo é começar com
-    `seen` vazio — o pior efeito é uma memória reinjetada uma vez.
+    Each session creates a file and nothing removed them: the directory grew forever. A
+    session idle for a week is not coming back, and if it does the cost is starting with
+    an empty `seen` — the worst effect is one memory reinjected once.
     """
     cutoff = time.time() - days * 86400
     deleted = 0
@@ -285,25 +286,25 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def main() -> None:
-    """Ponto de entrada blindado.
+    """The armoured entry point.
 
-    O aviso de indisponibilidade ao modelo é propriedade do frame MAIS EXTERNO, não
-    de uma lista de tipos a capturar. Lista de tipos é frágil por construção: precisa
-    ser atualizada em todo consumidor quando um erro novo aparece, e o esquecimento
-    não dá erro de compilação — dá traceback para o usuário e silêncio para o modelo,
-    que é o inverso exato do contrato. Isto já aconteceu: `HttpError` não estava na
-    lista, e é a falha mais comum.
+    The unavailability warning to the model is a property of the OUTERMOST frame, not of
+    a list of types to catch. A list of types is fragile by construction: it has to be
+    updated in every consumer when a new error appears, and forgetting does not produce
+    a compile error — it produces a traceback for the user and silence for the model,
+    which is the exact inverse of the contract. This already happened: `HttpError` was
+    not on the list, and it is the most common failure.
     """
     try:
         _run()
     except SystemExit:
         raise
-    except BaseException as exc:  # noqa: BLE001 — ver docstring
+    except BaseException as exc:  # noqa: BLE001 — see docstring
         try:
-            log(f"falha inesperada ({type(exc).__name__}: {exc})")
-            emit(unavailable_block("o hook", type(exc).__name__))
+            log(f"unexpected failure ({type(exc).__name__}: {exc})")
+            emit(unavailable_block("the hook", type(exc).__name__))
         except Exception:
-            pass  # se nem isso funcionar, silêncio é o único caminho restante
+            pass  # if even that fails, silence is the only path left
 
 
 def _run() -> None:
@@ -317,7 +318,7 @@ def _run() -> None:
 
     prompt = extract_prompt(data)
     if not prompt:
-        log(f"sem prompt no payload; chaves={sorted(data.keys())}")
+        log(f"no prompt in the payload; keys={sorted(data.keys())}")
         return
 
     reason = query.skip_reason(prompt)
@@ -327,27 +328,29 @@ def _run() -> None:
 
     try:
         cfg = core.load()
-        # Orçamento CABE dentro do timeout do hook (20s no hooks.json): 8+5+6 = 19s
-        # no pior caso, deixando margem para emitir o aviso. Sem isto, o host matava
-        # o processo antes de o aviso sair.
+        # The budget FITS inside the hook timeout (20s in hooks.json): 8+5+6 = 19s in the
+        # worst case, leaving room to emit the warning. Without this, the host killed the
+        # process before the warning got out.
         store = core.build_memory(cfg, timeouts={"embed": 8.0, "qdrant": 5.0,
                                                  "rerank": 6.0})
     except core.ConfigError as exc:
-        log(f"config incompleta ({exc}) — hook inerte")
+        log(f"incomplete config ({exc}) — hook inert")
         return
 
-    # O disjuntor decide se o cross-encoder entra nesta invocação. Desligá-lo aqui,
-    # em vez de dentro do núcleo, é o que faz o `recall` aplicar sozinho o corte
-    # estrito: sem o segundo portão, o piso permissivo não tem quem o limpe.
+    # The breaker decides whether the cross-encoder takes part in this invocation.
+    # Turning it off here, rather than inside the core, is what makes `recall` apply the
+    # strict cut on its own: without the second gate, the permissive floor has nobody to
+    # clean up after it.
     breaker = Breaker(STATE_DIR / "rerank-breaker", BREAKER_SECONDS)
     idle = breaker.is_open()
     if idle is not None:
         store.reranker = None
-        log(f"re-rank em disjuntor: falhou há {idle:.0f}s — corte denso estrito")
+        log(f"re-rank in breaker: failed {idle:.0f}s ago — strict dense cut")
 
     top_k = int(env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20" if store.reranker else "8"))
-    # Política da MEMÓRIA: o cross-encoder VETA (falso positivo polui o contexto do
-    # agente) e a ordem entre os aprovados é cosmética, porque todos são injetados.
+    # MEMORY policy: the cross-encoder VETOES (a false positive pollutes the agent's
+    # context) and the order among the approved ones is cosmetic, because all of them are
+    # injected.
     policy = core.Policy(dense_floor=DENSE_FLOOR, strict_floor=STRICT_FLOOR,
                            min_score=MIN_SCORE, max_results=MAX_MEMORIES,
                            veto=True, order_matters=False)
@@ -356,18 +359,18 @@ def _run() -> None:
     try:
         hits, outcome = store.recall(angles, policy, top_k)
     except core.EmbeddingError as exc:
-        log(f"embeddings falhou ({exc}) — sem recall neste prompt")
+        log(f"embeddings failed ({exc}) — no recall on this prompt")
         emit(unavailable_block("embeddings", type(exc).__name__))
         return
     except core.QdrantError as exc:
-        log(f"Qdrant falhou ({exc}) — sem recall neste prompt")
+        log(f"Qdrant failed ({exc}) — no recall on this prompt")
         emit(unavailable_block("Qdrant", type(exc).__name__))
         return
     elapsed = time.monotonic() - t0
 
     if outcome.rerank_error:
         breaker.arm()
-        log(f"re-rank falhou ({outcome.rerank_error}) — disjuntor armado por {BREAKER_SECONDS:.0f}s")
+        log(f"re-rank failed ({outcome.rerank_error}) — breaker armed for {BREAKER_SECONDS:.0f}s")
     elif outcome.by_rerank:
         breaker.clear()
 
@@ -382,15 +385,15 @@ def _run() -> None:
 
     if not hits:
         prune_state(state)
-        log(f"round {round_no}: 0 acima do corte (melhor {outcome.best_dense:.3f}) "
-            f"em {elapsed:.1f}s | {len(angles)} ângulos | {prompt[:60]!r}")
+        log(f"round {round_no}: 0 above the cut (best {outcome.best_dense:.3f}) "
+            f"in {elapsed:.1f}s | {len(angles)} angles | {prompt[:60]!r}")
         save_state(state_path, state)
         emit(empty_block(outcome, len(angles)))
         return
 
-    # Orça contexto. Memória já injetada há pouco volta como ponteiro de uma linha:
-    # repetir o documento inteiro a cada prompt do mesmo assunto infla o contexto
-    # sem acrescentar nada, e a vaga liberada revela MAIS do acervo.
+    # Budget the context. A memory injected recently comes back as a one-line pointer:
+    # repeating the whole document on every prompt about the same subject inflates the
+    # context without adding anything, and the freed slot reveals MORE of the archive.
     full_hits, pointers = [], []
     budget = MAX_CHARS
     for h in hits:
@@ -407,15 +410,15 @@ def _run() -> None:
     pruned = prune_state(state)
     save_state(state_path, state)
     if round_no % 20 == 0:
-        # Varredura barata e ocasional: uma vez a cada 20 rodadas basta para o
-        # diretório não crescer, e não paga `glob` em todo prompt.
+        # A cheap, occasional sweep: once every 20 rounds is enough to keep the directory
+        # from growing, and it does not pay for a `glob` on every prompt.
         dead = purge_dead_sessions()
         if dead:
-            log(f"limpeza: {dead} estado(s) de sessão morta removido(s)")
-    scale = " (escala convertida)" if outcome.scale_converted else ""
-    log(f"round {round_no}: {len(full_hits)} injetadas + {len(pointers)} ponteiros "
-        f"(de {len(hits)} relevantes / {outcome.candidates} candidatos) em {elapsed:.1f}s | "
-        f"{len(angles)} ângulos | CE={outcome.by_rerank}{scale} | {prompt[:60]!r}")
+            log(f"cleanup: {dead} dead session state(s) removed")
+    scale = " (scale converted)" if outcome.scale_converted else ""
+    log(f"round {round_no}: {len(full_hits)} injected + {len(pointers)} pointers "
+        f"(out of {len(hits)} relevant / {outcome.candidates} candidates) in {elapsed:.1f}s | "
+        f"{len(angles)} angles | CE={outcome.by_rerank}{scale} | {prompt[:60]!r}")
 
     emit(build_block(full_hits, pointers, len(angles), outcome))
 
