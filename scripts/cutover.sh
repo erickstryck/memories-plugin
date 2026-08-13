@@ -75,7 +75,7 @@ diga "=== o que muda ==="
 diga "  settings.json:"
 diga "    - remove os hooks manuais de UserPromptSubmit (recall e checkpoint)"
 diga "    + registra o marketplace local $RAIZ"
-diga "    + habilita o plugin qdrant-context (que traz os mesmos dois hooks)"
+diga "    + habilita o plugin memories-plugin (que traz os mesmos dois hooks)"
 diga "  .mcp.json:"
 diga "    - remove o servidor qdrant-memory (a memória passa a ser o CLI)"
 diga ""
@@ -105,8 +105,8 @@ jq --arg raiz "$RAIZ" '
   # não deixa a chave `hooks` vazia para trás: estrofe vazia confunde quem lê o
   # arquivo depois procurando o que está registrado
   | (if (.hooks | length) == 0 then del(.hooks) else . end)
-  | .extraKnownMarketplaces["qdrant-context"] = {source: {source: "directory", path: $raiz}}
-  | .enabledPlugins["qdrant-context@qdrant-context"] = true
+  | .extraKnownMarketplaces["memories-plugin"] = {source: {source: "directory", path: $raiz}}
+  | .enabledPlugins["memories-plugin@memories-plugin"] = true
 ' "$SETTINGS" > "$tmp"
 jq -e . "$tmp" >/dev/null && mv "$tmp" "$SETTINGS" && ok "settings.json atualizado"
 
@@ -120,5 +120,5 @@ diga ""
 diga "=== agora ==="
 diga "  1. Abra um terminal NOVO (ou 'exec bash -l') e inicie o claude de lá."
 diga "  2. Confira no log que há UM round por prompt, não dois:"
-diga "       tail -f \"\${QCTX_STATE_DIR:-\$HOME/.qdrant-context/state}/recall.log\""
+diga "       tail -f \"\${QCTX_STATE_DIR:-\$HOME/.memories-plugin/state}/recall.log\""
 diga "  3. Se algo der errado, os backups .bak-$STAMP restauram o estado anterior."

@@ -1,4 +1,4 @@
-# qdrant-context
+# memories-plugin
 
 Memória semântica de longo prazo e índice de documentos sobre [Qdrant](https://qdrant.tech),
 para agentes. Núcleo em Python puro (só stdlib), com adaptadores finos por host.
@@ -63,8 +63,8 @@ idioma, não só semântica. Consequências no desenho:
 ## Instalação
 
 ```bash
-git clone git@github.com:erickstryck/qdrant-context.git
-cd qdrant-context
+git clone git@github.com:erickstryck/memories-plugin.git
+cd memories-plugin
 python3 -m unittest discover -s tests    # 101 testes, sem rede, sem dependência
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # para `qctx` funcionar de qualquer lugar
 ```
@@ -78,8 +78,8 @@ faltando transformaria falha de ambiente em perda silenciosa de funcionalidade.
 O repositório é ao mesmo tempo um plugin e um marketplace de um só plugin:
 
 ```bash
-claude plugin marketplace add ~/dev/qdrant-context
-claude plugin install qdrant-context@qdrant-context
+claude plugin marketplace add ~/dev/memories-plugin
+claude plugin install memories-plugin@memories-plugin
 ```
 
 Habilitar o plugin registra **dois hooks** de `UserPromptSubmit` (recall a cada
@@ -111,7 +111,7 @@ esperando resposta que nunca vem penduraria a chamada.
 para consumo por programa.
 
 Precedência: **variável de ambiente > arquivo > default**. O arquivo vive em
-`~/.config/qdrant-context/config.json`.
+`~/.config/memories-plugin/config.json`.
 
 ```bash
 python3 cli/qctx.py collections list           # o que existe no Qdrant, com dimensão

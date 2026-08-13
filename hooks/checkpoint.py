@@ -22,7 +22,7 @@ from pathlib import Path
 
 INTERVALO = int(os.environ.get("QCTX_CHECKPOINT_INTERVAL")
                 or os.environ.get("REMEMBER_INTERVAL") or "5")
-STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".qdrant-context" / "state"))
+STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
 PROCEDIMENTO = """[checkpoint de memória — escrita no acervo de longo prazo]
 Interação {count} desta conversa (a cada {intervalo}). Faça o checkpoint AGORA, em uma

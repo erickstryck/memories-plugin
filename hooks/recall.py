@@ -47,7 +47,7 @@ def env(nome: str, legado: str, default: str) -> str:
     return os.environ.get(nome) or os.environ.get(legado) or default
 
 
-STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".qdrant-context" / "state"))
+STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 LOG = STATE_DIR / "recall.log"
 LOG_MAX_BYTES = 256 * 1024
 

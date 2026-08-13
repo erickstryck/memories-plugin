@@ -19,7 +19,7 @@ from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path(
     os.environ.get("QCTX_CONFIG")
-    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "qdrant-context" / "config.json"
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memories-plugin" / "config.json"
 )
 
 # Cada campo lista os nomes de ambiente que o alimentam, em ordem de precedência.
@@ -49,8 +49,8 @@ DEFAULTS = {
     "embed_model": "bge-m3",
     "rerank_model": "bge-reranker-v2-m3",
     "memory_collection": "",
-    "docs_collection": "qctx_docs_tmp",
-    "library_collection": "qctx_docs_library",
+    "docs_collection": "memories_docs_tmp",
+    "library_collection": "memories_docs_library",
     "vector_size": 1024,
 }
 

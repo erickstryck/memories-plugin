@@ -1,11 +1,11 @@
 {
-  "name": "qdrant-context",
+  "name": "memories-plugin",
   "owner": {
     "name": "Erick Batista"
   },
   "plugins": [
     {
-      "name": "qdrant-context",
+      "name": "memories-plugin",
       "source": "./",
       "description": "Memória semântica de longo prazo com recall automático a cada prompt, mais índice de documentos longos (biblioteca permanente e temporário com TTL), sobre Qdrant",
       "version": "0.2.0",
@@ -14,5 +14,5 @@
       }
     }
   ],
-  "description": "Marketplace pessoal do qdrant-context"
+  "description": "Marketplace pessoal do memories-plugin"
 }
