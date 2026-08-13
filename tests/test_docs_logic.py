@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.docs import DocsError, doc_id_for, parse_ttl, source_changed
+from core.docs import GONE, DocsError, doc_id_for, parse_ttl, source_changed
 
 
 class TestTTL(unittest.TestCase):
@@ -82,7 +82,7 @@ class TestStaleness(unittest.TestCase):
         self.file_path.write_text("conteudo original com mais texto\n")
         reason = source_changed(str(self.file_path), self.mtime, self.size)
         self.assertIsNotNone(reason)
-        self.assertIn("tamanho", reason)
+        self.assertIn("size", reason)
 
     def test_mtime_change_at_the_same_size_is_detected(self):
         future = self.mtime + 60
@@ -94,7 +94,7 @@ class TestStaleness(unittest.TestCase):
         path = str(self.file_path)
         os.unlink(path)
         self.assertEqual(source_changed(path, self.mtime, self.size),
-                         "arquivo não existe mais")
+                         GONE)
 
     def test_missing_metadata_does_not_break(self):
         self.assertIsNone(source_changed(str(self.file_path), None, None))

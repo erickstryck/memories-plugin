@@ -1,25 +1,25 @@
-"""Índice de documentos, em dois acervos com ciclos de vida diferentes.
+"""Document index, in two archives with different lifecycles.
 
-Problema: responder uma pergunta sobre 40 linhas de um arquivo de 8.000 não deve
-custar o arquivo inteiro em contexto. O arquivo é lido do disco por este processo,
-fatiado, embedado e gravado; a busca devolve só os trechos que respondem — e,
-quando o arquivo é relegível, devolve a LOCALIZAÇÃO para quem consome ler o
-conteúdo atual em vez de uma foto.
+The problem: answering a question about 40 lines of an 8,000-line file should not cost
+the whole file in context. The file is read from disk by this process, sliced,
+embedded and stored; the search returns only the chunks that answer — and, when the
+file is re-readable, it returns the LOCATION so the consumer reads the current content
+instead of a snapshot.
 
-DOIS ACERVOS, e a separação é estrutural, não convenção:
+TWO ARCHIVES, and the separation is structural, not a convention:
 
-  - TEMPORÁRIO (`tmp`): documento aberto para uma tarefa. Cada trecho carrega
-    `expires_at_ts` e toda operação varre o que venceu. O Qdrant não tem expiração
-    nativa, então o TTL é isto: um delete por filtro em cada chamada, sem daemon.
-    Este acervo é DESTRUTÍVEL por construção — existe comando que apaga a coleção.
+  - TEMPORARY (`tmp`): a document opened for one task. Each chunk carries
+    `expires_at_ts` and every operation sweeps what expired. Qdrant has no native
+    expiry, so the TTL is exactly this: a delete-by-filter on each call, no daemon.
+    This archive is DESTROYABLE by construction — there is a command that deletes the
+    collection.
 
-  - BIBLIOTECA (`library`): documento que vale guardar para consulta. Sem TTL,
-    nunca varrido, e fora do alcance de qualquer comando de limpeza. Vive em
-    coleção própria justamente para que a destrutibilidade do temporário não possa
-    alcançá-lo.
+  - LIBRARY (`library`): a document worth keeping for reference. No TTL, never swept,
+    and out of reach of any cleanup command. It lives in its own collection precisely
+    so the temporary archive's destroyability cannot reach it.
 
-Nenhum dos dois é a coleção de MEMÓRIA: trecho de arquivo competindo com fato
-curado numa busca de recall vence por volume e afunda o acervo que mais importa.
+Neither of them is the MEMORY collection: a file chunk competing with a curated fact in
+a recall search wins on volume and drowns the archive that matters most.
 """
 import hashlib
 import os
@@ -35,12 +35,12 @@ from .chunk import chunk_text, is_probably_binary, mode_for_suffix
 DEFAULT_TTL_SECONDS = 24 * 3600
 DENSE_TOP_K = 20
 RERANK_MIN_SCORE = 0.10
-#: Piso do primeiro estágio na busca de documentos. Mais generoso que na memória
-#: porque aqui o segundo estágio não veta — o objetivo é não perder candidato.
+#: First-stage floor in document search. More generous than in memory because here the
+#: second stage does not veto — the goal is not to lose a candidate.
 DENSE_FLOOR = 0.30
 
-# O limiar de detecção de colapso cross-lingual mora em `retrieval`, junto com
-# a lógica que o usa — aqui só se escolhe a política.
+# The cross-lingual collapse threshold lives in `retrieval`, next to the logic that
+# uses it — here we only pick the policy.
 
 SCOPES = ("all", "tmp", "library")
 
@@ -52,7 +52,7 @@ class DocsError(CoreError):
 @dataclass
 class Hit:
     score: float
-    origin: str          # "CE" quando o cross-encoder julgou, "denso" quando não
+    origin: str          # "CE" when the cross-encoder judged it, "dense" when it did not
     scope: str           # tmp | library
     path: str
     start_line: int
@@ -60,14 +60,14 @@ class Hit:
     mode: str            # locator | snapshot
     text: str
     indexed_at: str
-    stale: str | None    # motivo, quando o arquivo mudou desde a indexação
+    stale: str | None    # the reason, when the file changed since indexing
 
 
 def parse_ttl(spec: str) -> float:
-    """Aceita `30m`, `24h`, `7d` ou segundos puros."""
+    """Accepts `30m`, `24h`, `7d` or bare seconds."""
     m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([smhd]?)", str(spec).strip().lower())
     if not m:
-        raise DocsError(f"TTL inválido: {spec!r} (use 30m, 24h, 7d ou segundos)")
+        raise DocsError(f"invalid TTL: {spec!r} (use 30m, 24h, 7d or seconds)")
     mult = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
     return float(m.group(1)) * mult
@@ -78,38 +78,43 @@ def _iso(ts: float) -> str:
 
 
 def doc_id_for(path: str) -> str:
-    """Id derivado do caminho absoluto, para que reindexar o mesmo arquivo
-    SUBSTITUA o índice anterior em vez de acumular duas versões competindo."""
+    """An id derived from the absolute path, so reindexing the same file REPLACES the
+    previous index instead of accumulating two competing versions."""
     return hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:12]
 
 
 def _point_id(doc_id: str, ix: int) -> int:
-    """Id numérico estável e determinístico (o Qdrant aceita inteiro ou UUID)."""
+    """A stable, deterministic numeric id (Qdrant accepts an integer or a UUID)."""
     return int(hashlib.sha1(f"{doc_id}:{ix}".encode()).hexdigest()[:15], 16)
 
 
 MTIME_TOLERANCE = 0.001
 
+#: Reason returned when the source file is gone. It is a constant because `refresh`
+#: BRANCHES on it — comparing against a literal spelled out in two places breaks
+#: silently the day one of them is reworded.
+GONE = "file no longer exists"
+
 
 def source_changed(path: str, src_mtime, src_size) -> str | None:
-    """Motivo da obsolescência, ou None se o arquivo está igual ao indexado.
+    """The staleness reason, or None if the file matches what was indexed.
 
-    COMPARA COM TOLERÂNCIA, e isso não é frouxidão: `st_mtime` é float e o
-    round-trip por JSON perde os últimos bits (medido: 1786646270.9956777 gravado
-    contra 1786646270.9956775 no disco, 2.4e-7 de diferença). Igualdade exata dava
-    falso positivo em TODA busca de TODO documento — o aviso viraria ruído
-    ignorável e o `refresh` reindexaria o acervo inteiro a cada execução, pagando
-    embedding por nada. Um milissegundo de tolerância mata o falso positivo e
-    detecta qualquer edição real, que muda o mtime em segundos.
+    IT COMPARES WITH A TOLERANCE, and that is not sloppiness: `st_mtime` is a float and
+    the JSON round trip loses the last bits (measured: 1786646270.9956777 written
+    against 1786646270.9956775 on disk, a 2.4e-7 difference). Exact equality produced a
+    false positive on EVERY search of EVERY document — the warning would have become
+    ignorable noise and `refresh` would have reindexed the whole archive on each run,
+    paying for embeddings for nothing. One millisecond of tolerance kills the false
+    positive and still detects any real edit, which moves the mtime by seconds.
     """
     try:
         st = os.stat(path)
     except FileNotFoundError:
-        return "arquivo não existe mais"
+        return GONE
     if src_size is not None and st.st_size != src_size:
-        return "tamanho do arquivo mudou desde a indexação"
+        return "file size changed since indexing"
     if src_mtime is not None and abs(st.st_mtime - float(src_mtime)) > MTIME_TOLERANCE:
-        return "arquivo mudou desde a indexação"
+        return "file changed since indexing"
 
     return None
 
@@ -117,12 +122,12 @@ def source_changed(path: str, src_mtime, src_size) -> str | None:
 def _read_source(path: str) -> tuple[str, os.stat_result, str]:
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(path):
-        raise DocsError(f"não é um arquivo: {path}")
+        raise DocsError(f"not a file: {path}")
     st = os.stat(path)
     with open(path, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
     if is_probably_binary(content[:8192]):
-        raise DocsError("arquivo parece binário — converta para texto antes de indexar")
+        raise DocsError("the file looks binary — convert it to text before indexing")
 
     return path, st, content
 
@@ -136,11 +141,11 @@ class DocIndex:
         self.collections = {"tmp": tmp_collection, "library": library_collection}
         self.vector_size = vector_size
 
-    # ---- manutenção --------------------------------------------------------
+    # ---- maintenance -------------------------------------------------------
 
     def _collection(self, scope: str) -> str:
         if scope not in self.collections:
-            raise DocsError(f"escopo inválido: {scope!r} (use tmp ou library)")
+            raise DocsError(f"invalid scope: {scope!r} (use tmp or library)")
 
         return self.collections[scope]
 
@@ -152,22 +157,23 @@ class DocIndex:
                 self.q.ensure_payload_index(name, "expires_at_ts", "float")
 
     def sweep(self) -> None:
-        """Apaga o que venceu — só no temporário. A biblioteca nunca é varrida."""
+        """Deletes what expired — in the temporary archive only. The library is never
+        swept."""
         self.ensure("tmp")
         self.q.delete_by_filter(
             self._collection("tmp"),
             {"must": [{"key": "expires_at_ts", "range": {"lt": time.time()}}]},
         )
 
-    # ---- indexação ---------------------------------------------------------
+    # ---- indexing ----------------------------------------------------------
 
     def index_file(self, path: str, ttl_seconds: float = DEFAULT_TTL_SECONDS,
                    doc_id: str | None = None) -> dict:
-        """Indexa como TEMPORÁRIO, com TTL."""
+        """Indexes as TEMPORARY, with a TTL."""
         return self._write(path, "tmp", ttl_seconds, doc_id)
 
     def keep_file(self, path: str, doc_id: str | None = None) -> dict:
-        """Guarda na BIBLIOTECA, sem expiração."""
+        """Keeps it in the LIBRARY, with no expiry."""
         return self._write(path, "library", None, doc_id)
 
     def _write(self, path: str, scope: str, ttl_seconds: float | None,
@@ -175,7 +181,7 @@ class DocIndex:
         path, st, content = _read_source(path)
         chunks = chunk_text(content)
         if not chunks:
-            raise DocsError("nada indexável (arquivo vazio ou só espaço em branco)")
+            raise DocsError("nothing indexable (empty file, or whitespace only)")
 
         doc_id = doc_id or doc_id_for(path)
         mode = mode_for_suffix(os.path.splitext(path)[1])
@@ -185,8 +191,8 @@ class DocIndex:
         self.ensure(scope)
         if scope == "tmp":
             self.sweep()
-        # Reindexar substitui: sem isto, a versão antiga e a nova coexistem e a
-        # busca mistura trechos de dois estados do mesmo arquivo.
+        # Reindexing replaces: without this, the old version and the new one coexist and
+        # the search mixes chunks from two states of the same file.
         self.drop(doc_id, scope)
 
         vectors = self.embedder.embed([t.text for t in chunks])
@@ -212,9 +218,9 @@ class DocIndex:
                 expires_at = now_ts + ttl_seconds
                 payload["expires_at_ts"] = expires_at
                 payload["metadata"]["expires_at"] = _iso(expires_at)
-                # Guarda a DURAÇÃO, não só o instante: sem ela o `refresh` não tem
-                # como saber que você pediu 1 hora e reindexava com o padrão de 24h,
-                # esticando em silêncio o prazo que você mesmo escolheu.
+                # Store the DURATION, not just the instant: without it `refresh` has no
+                # way to know you asked for 1 hour, and reindexed with the 24h default,
+                # silently stretching the deadline you chose yourself.
                 payload["metadata"]["ttl_seconds"] = ttl_seconds
             points.append({"id": _point_id(doc_id, ix), "vector": vector, "payload": payload})
         self.q.upsert(name, points)
@@ -227,67 +233,67 @@ class DocIndex:
         }
 
     def refresh(self, scope: str = "library") -> list[dict]:
-        """Reindexa os documentos cujo arquivo mudou desde a indexação.
+        """Reindexes the documents whose file changed since it was indexed.
 
-        Existe por causa do acervo permanente: um documento guardado em agosto cujo
-        arquivo mudou em outubro devolve trecho que não existe mais. O aviso em
-        cada hit alerta; isto conserta.
+        It exists because of the permanent archive: a document stored in August whose
+        file changed in October returns a chunk that no longer exists. The warning on
+        each hit alerts you; this fixes it.
         """
         report = []
         for doc in self.list_docs(scope):
             path = doc["path"]
             reason = source_changed(path, doc.get("src_mtime"), doc.get("src_size"))
-            if reason == "arquivo não existe mais":
-                report.append({"doc_id": doc["doc_id"], "path": path, "acao": "ausente"})
+            if reason == GONE:
+                report.append({"doc_id": doc["doc_id"], "path": path, "action": "missing"})
                 continue
             if reason is None:
-                report.append({"doc_id": doc["doc_id"], "path": path, "acao": "ok"})
+                report.append({"doc_id": doc["doc_id"], "path": path, "action": "ok"})
                 continue
             if scope == "library":
                 res = self.keep_file(path, doc["doc_id"])
             else:
-                # Reusa a duração original. Cair no default aqui ignoraria o prazo
-                # que o usuário pediu na indexação.
+                # Reuse the original duration. Falling back to the default here would
+                # ignore the deadline the user asked for at index time.
                 res = self.index_file(path, doc.get("ttl_seconds") or DEFAULT_TTL_SECONDS,
                                       doc["doc_id"])
             report.append({"doc_id": doc["doc_id"], "path": path,
-                              "acao": "reindexado", "chunks": res["chunks"]})
+                              "action": "reindexed", "chunks": res["chunks"]})
 
         return report
 
-    # ---- busca -------------------------------------------------------------
+    # ---- search ------------------------------------------------------------
 
     def search(self, query: str, scope: str = "all", doc_id: str | None = None,
                limit: int = 5, min_score: float = RERANK_MIN_SCORE
                ) -> tuple[list[Hit], retrieval.Outcome]:
-        """Busca nos acervos pedidos e reranqueia a UNIÃO.
+        """Searches the requested archives and reranks the UNION.
 
-        Reranquear a união, e não cada acervo em separado, é o que torna os scores
-        comparáveis: o cross-encoder julga todos os candidatos contra a mesma
-        pergunta, então um trecho da biblioteca e um do temporário disputam a mesma
-        vaga em pé de igualdade.
+        Reranking the union, rather than each archive separately, is what makes the
+        scores comparable: the cross-encoder judges every candidate against the same
+        query, so a library chunk and a temporary one compete for the same slot on equal
+        footing.
 
-        A política aqui difere da memória em dois pontos, e os dois são deliberados:
-        SEM VETO, porque quem pergunta já escolheu o documento e silêncio é pior que
-        ordem imperfeita; e A ORDEM É O PRODUTO, porque o resultado é uma lista lida
-        de cima para baixo — então vale reranquear mesmo quando tudo cabe.
+        The policy here differs from memory in two ways, both deliberate: NO VETO,
+        because whoever asks has already chosen the document and silence is worse than
+        imperfect order; and THE ORDER IS THE PRODUCT, because the result is a list read
+        top to bottom — so reranking is worth it even when everything fits.
         """
         if scope not in SCOPES:
-            raise DocsError(f"escopo inválido: {scope!r} (use {', '.join(SCOPES)})")
+            raise DocsError(f"invalid scope: {scope!r} (use {', '.join(SCOPES)})")
         scopes = ("tmp", "library") if scope == "all" else (scope,)
 
-        # Os dois pisos IGUAIS, de propósito: sem veto, "voltar ao corte estrito"
-        # quando o julgamento não acontece tem de ser um no-op. Se fossem diferentes,
-        # o colapso cross-lingual (denso na faixa de 0.46) devolveria silêncio —
-        # exatamente o que esta política existe para evitar.
+        # The two floors are EQUAL, on purpose: with no veto, "go back to the strict cut"
+        # when the judgement does not happen has to be a no-op. If they differed, a
+        # cross-lingual collapse (dense in the 0.46 band) would return silence —
+        # exactly what this policy exists to prevent.
         policy = retrieval.Policy(
             dense_floor=DENSE_FLOOR, strict_floor=DENSE_FLOOR, min_score=min_score,
             max_results=limit, veto=False, detect_collapse=True, order_matters=True,
         )
         vector = self.embedder.embed_one(query)
         candidates: list[dict] = []
-        for esc in scopes:
-            for raw in self._search_scope(esc, vector, doc_id):
+        for sc in scopes:
+            for raw in self._search_scope(sc, vector, doc_id):
                 candidates.append(raw)
         candidates.sort(key=lambda b: -(b.get("score") or 0.0))
 
@@ -298,7 +304,7 @@ class DocIndex:
 
     def _search_scope(self, scope: str, vector: list[float],
                       doc_id: str | None) -> list[dict]:
-        """Primeiro estágio num acervo. Só o temporário filtra por validade."""
+        """The first stage within one archive. Only the temporary one filters on expiry."""
         self.ensure(scope)
         must = []
         if scope == "tmp":
@@ -314,7 +320,7 @@ class DocIndex:
         return raw_points
 
     def _to_hit(self, raw: dict, score: float, origin: str) -> Hit:
-        """Traduz o hit cru + o veredito do pipeline no formato de apresentação."""
+        """Translates the raw hit + the pipeline's verdict into the presentation shape."""
         p = raw.get("payload", {})
         md = p.get("metadata", {})
         path = md.get("path", "?")
@@ -328,23 +334,23 @@ class DocIndex:
             indexed_at=md.get("indexed_at", "?"), stale=stale,
         )
 
-    # ---- inventário e remoção ---------------------------------------------
+    # ---- inventory and removal ---------------------------------------------
 
     def list_docs(self, scope: str = "all") -> list[dict]:
         if scope not in SCOPES:
-            raise DocsError(f"escopo inválido: {scope!r}")
+            raise DocsError(f"invalid scope: {scope!r}")
         scopes = ("tmp", "library") if scope == "all" else (scope,)
         by_scope_doc: dict[tuple[str, str], dict] = {}
-        for esc in scopes:
-            self.ensure(esc)
-            if esc == "tmp":
+        for sc in scopes:
+            self.ensure(sc)
+            if sc == "tmp":
                 self.sweep()
-            for point in self.q.scroll_all(self._collection(esc)):
+            for point in self.q.scroll_all(self._collection(sc)):
                 p = point.get("payload", {})
                 md = p.get("metadata", {})
-                key = (esc, p.get("doc_id", "?"))
+                key = (sc, p.get("doc_id", "?"))
                 d = by_scope_doc.setdefault(key, {
-                    "doc_id": p.get("doc_id", "?"), "scope": esc, "chunks": 0,
+                    "doc_id": p.get("doc_id", "?"), "scope": sc, "chunks": 0,
                     "path": md.get("path", "?"), "mode": md.get("mode", "?"),
                     "indexed_at": md.get("indexed_at", "?"),
                     "expires_at_ts": p.get("expires_at_ts"),
@@ -357,16 +363,16 @@ class DocIndex:
 
     def drop(self, doc_id: str, scope: str = "all") -> None:
         scopes = ("tmp", "library") if scope == "all" else (scope,)
-        for esc in scopes:
-            self.ensure(esc)
-            self.q.delete_by_filter(self._collection(esc),
+        for sc in scopes:
+            self.ensure(sc)
+            self.q.delete_by_filter(self._collection(sc),
                                     {"must": [{"key": "doc_id", "match": {"value": doc_id}}]})
 
     def drop_all_tmp(self) -> str:
-        """Apaga a coleção TEMPORÁRIA inteira.
+        """Deletes the entire TEMPORARY collection.
 
-        Só existe para o temporário. A biblioteca não tem equivalente de propósito:
-        acervo permanente se remove documento por documento, com o id na mão.
+        It exists for the temporary archive only. The library has no equivalent on
+        purpose: a permanent archive is pruned document by document, with the id in hand.
         """
         name = self._collection("tmp")
         self.q.delete_collection(name)
