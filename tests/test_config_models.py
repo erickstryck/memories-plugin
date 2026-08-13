@@ -61,6 +61,19 @@ class TestPrecedencia(unittest.TestCase):
         with self.assertRaises(cfgmod.ConfigError):
             cfgmod.save({"chave_inventada": 1}, self.arquivo)
 
+    def test_save_recusa_segredo_e_aponta_o_ambiente(self):
+        """Segredo em arquivo de texto entra em backup e em sync de dotfiles."""
+        for campo in ("qdrant_api_key", "api_key"):
+            with self.assertRaises(cfgmod.ConfigError) as ctx:
+                cfgmod.save({campo: "valor-secreto"}, self.arquivo)
+            self.assertIn("QCTX_", str(ctx.exception), "a mensagem tem de dizer ONDE colocar")
+            self.assertNotIn("valor-secreto", str(ctx.exception), "nem no erro o valor aparece")
+        self.assertFalse(self.arquivo.exists(), "nada foi gravado")
+
+    def test_save_de_campo_normal_continua_funcionando(self):
+        cfgmod.save({"memory_collection": "x"}, self.arquivo)
+        self.assertEqual(cfgmod.read_file(self.arquivo)["memory_collection"], "x")
+
 
 class TestUrlDerivada(unittest.TestCase):
     def _cfg(self, **kw):

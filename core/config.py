@@ -175,6 +175,12 @@ def load(path: Path | None = None, env: dict | None = None) -> Config:
     return Config(**valores)
 
 
+#: Campos que NUNCA vão para o arquivo de config. Segredo em arquivo de texto é
+#: segredo vazado: entra em backup, em sincronização de dotfiles e em `cat` casual.
+#: O ambiente já resolve, e é onde as chaves deste stack sempre viveram.
+SECRET_FIELDS = frozenset({"qdrant_api_key", "api_key"})
+
+
 def save(patch: dict, path: Path | None = None) -> Path:
     """Grava só o que mudou, preservando o resto do arquivo."""
     p = path or DEFAULT_CONFIG_PATH
@@ -182,6 +188,14 @@ def save(patch: dict, path: Path | None = None) -> Path:
     desconhecidos = set(patch) - validos
     if desconhecidos:
         raise ConfigError(f"chave(s) desconhecida(s): {', '.join(sorted(desconhecidos))}")
+    segredos = set(patch) & SECRET_FIELDS
+    if segredos:
+        nomes = ", ".join(sorted(segredos))
+        canonicos = ", ".join(ENV_ALIASES[s][0] for s in sorted(segredos))
+        raise ConfigError(
+            f"{nomes} não vai para o arquivo de config — segredo em texto puro entra "
+            f"em backup e em sincronização de dotfiles. Exporte no ambiente: {canonicos}"
+        )
     atual = read_file(p)
     atual.update(patch)
     p.parent.mkdir(parents=True, exist_ok=True)

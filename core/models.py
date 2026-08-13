@@ -69,6 +69,16 @@ class Embedder:
     def embed_one(self, texto: str) -> list[float]:
         return self.embed([texto])[0]
 
+    def detect_dimension(self) -> int:
+        """Pergunta ao endpoint quantas dimensões o modelo devolve.
+
+        Existe para `vector_size` não ser um número digitado à mão: trocar o modelo
+        e esquecer de ajustar a dimensão faz a guarda de compatibilidade recusar
+        coleções que estavam perfeitamente boas, com mensagem que aponta para o
+        lugar errado. Uma sonda de um texto curto responde isso sem ambiguidade.
+        """
+        return len(self.embed_one("dimension probe"))
+
 
 def sigmoid(x: float) -> float:
     if x >= 0:

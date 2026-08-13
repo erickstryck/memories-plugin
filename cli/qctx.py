@@ -43,11 +43,24 @@ def saida(obj, como_json: bool) -> None:
 
 # ---- collections / config --------------------------------------------------
 
+# Prefixos de coleção gerada por outro sistema. Com 84 coleções no Qdrant, uma
+# listagem crua afoga o que interessa — e escolher acervo é justamente a operação
+# em que a pessoa precisa VER as opções. Escondidas por padrão, `--all` mostra.
+RUIDO = ("ws-",)
+
+
 def cmd_collections(args, cfg):
     q = core.build_qdrant(cfg)
     nomes = q.list_collections()
+    configuradas = {cfg.memory_collection, cfg.docs_collection, cfg.library_collection}
+    if not args.all:
+        visiveis = [n for n in nomes
+                    if n in configuradas or not n.startswith(RUIDO)]
+    else:
+        visiveis = list(nomes)
+    escondidas = len(nomes) - len(visiveis)
     linhas = []
-    for nome in sorted(nomes):
+    for nome in visiveis:
         info = q.collection_info(nome) or {}
         size = info.get("size")
         linhas.append({
@@ -59,15 +72,19 @@ def cmd_collections(args, cfg):
                     else "temporário" if nome == cfg.docs_collection
                     else "biblioteca" if nome == cfg.library_collection else ""),
         })
+    linhas.sort(key=lambda l: (not l["uso"], -(l["points"] or 0)))
     if args.json:
-        saida({"vector_size": cfg.vector_size, "collections": linhas}, True)
+        saida({"vector_size": cfg.vector_size, "hidden": escondidas,
+               "collections": linhas}, True)
 
         return
-    print(f"modelo configurado usa dimensão {cfg.vector_size}\n")
+    print(f"modelo {cfg.embed_model} usa dimensão {cfg.vector_size}\n")
     print(f"{'coleção':34} {'pontos':>8} {'dim':>6}  {'':10} uso")
     for l in linhas:
         marca = "ok" if l["compativel"] else "INCOMPAT."
         print(f"{l['collection']:34} {str(l['points']):>8} {str(l['dim']):>6}  {marca:10} {l['uso']}")
+    if escondidas:
+        print(f"\n({escondidas} coleção(ões) de outro sistema escondidas — `--all` mostra)")
     print("\nescolher: qctx config set memory-collection|docs-collection|"
           "library-collection <nome>")
 
@@ -100,6 +117,19 @@ def cmd_config_set(args, cfg):
                       f"incompatível com o modelo ({cfg.vector_size})")
         except Exception:
             pass
+
+
+def cmd_config_detect(args, cfg):
+    """Descobre a dimensão real do modelo em vez de confiar no número digitado."""
+    dim = core.build_embedder(cfg).detect_dimension()
+    if dim == cfg.vector_size:
+        print(f"{cfg.embed_model} devolve {dim} dimensões — config já está correta")
+
+        return
+    caminho = core.save({"vector_size": dim})
+    print(f"{cfg.embed_model} devolve {dim} dimensões (config dizia {cfg.vector_size})")
+    print(f"  vector_size atualizado em {caminho}")
+    print("  confira com `qctx collections list` quais coleções seguem compatíveis")
 
 
 # ---- memory ----------------------------------------------------------------
@@ -302,11 +332,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     col = sub.add_parser("collections", help="inspecionar coleções do Qdrant")
     colsub = col.add_subparsers(dest="acao", required=True)
-    colsub.add_parser("list").set_defaults(fn=cmd_collections)
+    p = colsub.add_parser("list")
+    p.add_argument("--all", action="store_true",
+                   help="inclui coleções de outros sistemas (ws-*)")
+    p.set_defaults(fn=cmd_collections)
 
     cfgp = sub.add_parser("config", help="ver ou alterar configuração")
     cfgsub = cfgp.add_subparsers(dest="acao", required=True)
     cfgsub.add_parser("show").set_defaults(fn=cmd_config_show)
+    cfgsub.add_parser("detect", help="detecta a dimensão do modelo e grava").set_defaults(
+        fn=cmd_config_detect)
     p = cfgsub.add_parser("set")
     p.add_argument("key")
     p.add_argument("value")
