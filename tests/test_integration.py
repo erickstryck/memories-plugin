@@ -34,11 +34,11 @@ COLECAO_DESCARTAVEL = f"qctx_test_{uuid.uuid4().hex[:8]}"
 CHAVES_PAYLOAD = {"document", "metadata", "created_at", "updated_at"}
 
 
-def cfg_leitura():
+def read_config():
     return core.load()
 
 
-def cfg_escrita():
+def write_config():
     """Config apontando a memória para a coleção descartável."""
     base = core.load()
     fields = {f: getattr(base, f) for f in base.__dataclass_fields__}
@@ -48,22 +48,22 @@ def cfg_escrita():
 
 
 @unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
-class TestLeituraDoAcervoReal(unittest.TestCase):
+class TestReadingTheRealArchive(unittest.TestCase):
     """SOMENTE LEITURA. Prova que o núcleo entende o que já está gravado."""
 
     @classmethod
     def setUpClass(cls):
-        cls.cfg = cfg_leitura()
+        cls.cfg = read_config()
         if not cls.cfg.memory_collection:
             raise unittest.SkipTest("memory_collection não configurada")
         cls.store = core.build_memory(cls.cfg)
 
-    def test_acervo_tem_pontos(self):
+    def test_archive_has_points(self):
         total = self.store.count()
         self.assertIsNotNone(total)
         self.assertGreater(total, 0, "o acervo real deveria ter memórias")
 
-    def test_payload_escrito_pelo_mcp_antigo_e_legivel(self):
+    def test_payload_written_by_the_old_mcp_is_readable(self):
         pagina = self.store.list_page(limit=5)
         self.assertGreater(pagina["count"], 0)
         for m in pagina["memories"]:
@@ -71,7 +71,7 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
             self.assertTrue(m["document"].strip(), "documento não pode vir vazio")
             self.assertIsInstance(m["metadata"], dict)
 
-    def test_get_por_id_devolve_as_quatro_chaves(self):
+    def test_get_by_id_returns_the_four_keys(self):
         pagina = self.store.list_page(limit=1)
         mid = pagina["memories"][0]["id"]
         m = self.store.get(mid)
@@ -79,13 +79,13 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
         for key in ("document", "metadata", "created_at", "updated_at"):
             self.assertIn(key, m, f"{key} tem de existir no payload legado")
 
-    def test_find_devolve_score_decrescente(self):
+    def test_find_returns_descending_scores(self):
         hits = self.store.find("memória de longo prazo", limit=5)
         self.assertTrue(hits, "busca densa no acervo real não devolveu nada")
         scores = [h["score"] for h in hits]
         self.assertEqual(scores, sorted(scores, reverse=True))
 
-    def test_recall_de_dois_portoes_no_acervo_real(self):
+    def test_two_gate_recall_against_the_real_archive(self):
         policy = core.Policy(0.45, 0.58, 0.10, 6, veto=True)
         hits, outcome = self.store.recall(["memória de longo prazo e recall automático"],
                                        policy, top_k=20)
@@ -97,7 +97,7 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
         if outcome.by_rerank:
             self.assertTrue(all(h.origin == "CE" for h in hits))
 
-    def test_recall_com_multiplos_angulos_funde_por_id(self):
+    def test_recall_with_several_angles_fuses_by_id(self):
         hits, _ = self.store.recall(
             ["como funciona o hook de recall",
              "hook recall funciona como",
@@ -108,12 +108,12 @@ class TestLeituraDoAcervoReal(unittest.TestCase):
 
 
 @unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
-class TestCrudEmColecaoDescartavel(unittest.TestCase):
+class TestCrudInAThrowawayCollection(unittest.TestCase):
     """Escrita SÓ aqui. A coleção é criada e destruída pelo próprio teste."""
 
     @classmethod
     def setUpClass(cls):
-        cls.cfg = cfg_escrita()
+        cls.cfg = write_config()
         cls.store = core.build_memory(cls.cfg)
         cls.q = core.build_qdrant(cls.cfg)
         assert cls.cfg.memory_collection == COLECAO_DESCARTAVEL
@@ -125,7 +125,7 @@ class TestCrudEmColecaoDescartavel(unittest.TestCase):
         except Exception:
             pass
 
-    def test_ciclo_completo(self):
+    def test_full_cycle(self):
         criado = self.store.store("O poll do conector trunca em 100 itens por página.",
                                   {"type": "reference", "date": "2026-08-13"})
         self.assertEqual(criado["status"], "created")
@@ -151,7 +151,7 @@ class TestCrudEmColecaoDescartavel(unittest.TestCase):
         self.store.delete(mid)
         self.assertEqual(self.store.get(mid)["status"], "not_found")
 
-    def test_payload_gravado_tem_as_mesmas_chaves_do_mcp_antigo(self):
+    def test_written_payload_has_the_same_keys_as_the_old_mcp(self):
         criado = self.store.store("fato para conferir a forma do payload", {"type": "test"})
         point = self.q.get_point(COLECAO_DESCARTAVEL, criado["id"])
         self.assertEqual(set(point["payload"].keys()), CHAVES_PAYLOAD,
@@ -159,7 +159,7 @@ class TestCrudEmColecaoDescartavel(unittest.TestCase):
                          "senão o acervo existente fica inconsistente")
         self.store.delete(criado["id"])
 
-    def test_store_many_e_tudo_ou_nada(self):
+    def test_store_many_is_all_or_nothing(self):
         items = [{"information": f"fato de lote número {i}", "metadata": {"type": "test"}}
                  for i in range(5)]
         res = self.store.store_many(items)
@@ -169,7 +169,7 @@ class TestCrudEmColecaoDescartavel(unittest.TestCase):
         for mid in res["ids"]:
             self.store.delete(mid)
 
-    def test_store_many_recusa_item_invalido_antes_de_gravar(self):
+    def test_store_many_refuses_an_invalid_item_before_writing(self):
         antes = self.store.count() or 0
         with self.assertRaises(core.memory.MemoryError_):
             self.store.store_many([{"information": "válido"}, {"information": "  "}])
@@ -177,13 +177,13 @@ class TestCrudEmColecaoDescartavel(unittest.TestCase):
         self.assertEqual(self.store.count() or 0, antes,
                          "validação tem de acontecer ANTES de qualquer escrita")
 
-    def test_store_vazio_e_recusado(self):
+    def test_empty_store_is_refused(self):
         with self.assertRaises(core.memory.MemoryError_):
             self.store.store("   ")
 
 
 @unittest.skipUnless(LIGADO, "defina QCTX_INTEGRATION=1")
-class TestDocsIntegracao(unittest.TestCase):
+class TestDocsIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         base = core.load()
@@ -228,7 +228,7 @@ class TestDocsIntegracao(unittest.TestCase):
                 pass
         cls.tmpdir.cleanup()
 
-    def test_index_busca_e_localiza_a_secao_certa(self):
+    def test_index_then_search_locates_the_right_section(self):
         res = self.idx.index_file(str(self.file_path), ttl_seconds=600)
         self.assertGreater(res["chunks"], 1, "documento com 3 seções longas tem de virar vários trechos")
         self.assertEqual(res["mode"], "locator")
@@ -241,7 +241,7 @@ class TestDocsIntegracao(unittest.TestCase):
         self.assertGreater(hits[0].start_line, 0)
         self.assertGreaterEqual(hits[0].end_line, hits[0].start_line)
 
-    def test_intervalo_de_linhas_aponta_para_o_conteudo_real(self):
+    def test_line_range_points_at_the_real_content(self):
         self.idx.index_file(str(self.file_path), ttl_seconds=600)
         hits, _ = self.idx.search("como paginar?", scope="tmp", limit=1)
         lines = self.file_path.read_text().splitlines()
@@ -250,7 +250,7 @@ class TestDocsIntegracao(unittest.TestCase):
                          "o contrato do modo localizador é que essas linhas "
                          "reproduzam exatamente o trecho indexado")
 
-    def test_biblioteca_nao_expira_e_temporario_expira(self):
+    def test_library_never_expires_and_temporary_does(self):
         self.idx.keep_file(str(self.file_path))
         self.idx.index_file(str(self.file_path), ttl_seconds=600)
         docs = {d["scope"]: d for d in self.idx.list_docs("all")}
@@ -259,12 +259,12 @@ class TestDocsIntegracao(unittest.TestCase):
         self.assertIsNone(docs["library"]["expires_at_ts"])
         self.assertIsNotNone(docs["tmp"]["expires_at_ts"])
 
-    def test_ttl_vencido_desaparece_da_busca(self):
+    def test_expired_ttl_disappears_from_search(self):
         self.idx.index_file(str(self.file_path), ttl_seconds=-1)  # já nasce vencido
         hits, _ = self.idx.search("autenticação", scope="tmp", limit=3)
         self.assertEqual(hits, [], "trecho vencido não pode aparecer")
 
-    def test_purge_do_temporario_preserva_a_biblioteca(self):
+    def test_purging_temporary_preserves_the_library(self):
         self.idx.keep_file(str(self.file_path))
         self.idx.index_file(str(self.file_path), ttl_seconds=600)
         self.idx.drop_all_tmp()
@@ -273,7 +273,7 @@ class TestDocsIntegracao(unittest.TestCase):
         self.assertIn("library", scopes, "a biblioteca TEM de sobreviver ao purge")
         self.assertNotIn("tmp", scopes)
 
-    def test_reindexar_substitui_em_vez_de_duplicar(self):
+    def test_reindexing_replaces_instead_of_duplicating(self):
         first = self.idx.keep_file(str(self.file_path))
         second = self.idx.keep_file(str(self.file_path))
         self.assertEqual(first["doc_id"], second["doc_id"])

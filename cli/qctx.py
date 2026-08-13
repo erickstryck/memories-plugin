@@ -200,7 +200,7 @@ def cmd_setup(args, cfg):
 
 # ---- memory ----------------------------------------------------------------
 
-def _meta_de_args(args) -> dict:
+def _metadata_from_args(args) -> dict:
     meta = {}
     if getattr(args, "json_meta", None):
         meta.update(json.loads(args.json_meta))
@@ -213,7 +213,7 @@ def _meta_de_args(args) -> dict:
 
 
 def cmd_memory_store(args, cfg):
-    result = core.build_memory(cfg).store(args.text, _meta_de_args(args))
+    result = core.build_memory(cfg).store(args.text, _metadata_from_args(args))
     print(json.dumps(result, ensure_ascii=False) if args.json else f"gravado id={result['id']}")
 
 
@@ -263,7 +263,7 @@ def cmd_memory_delete(args, cfg):
 
 
 def cmd_memory_update(args, cfg):
-    meta = _meta_de_args(args) or None
+    meta = _metadata_from_args(args) or None
     res = core.build_memory(cfg).update(args.id, args.text, meta)
     print(json.dumps(res, ensure_ascii=False) if args.json else f"{res['status']} id={res['id']}")
 

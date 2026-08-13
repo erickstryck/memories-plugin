@@ -34,22 +34,22 @@ def store(reranker=None, colecao="mem"):
     return MemoryStore(q, emb, reranker, colecao, emb.dim), q, emb
 
 
-class TestFormaDoPayload(unittest.TestCase):
+class TestPayloadShape(unittest.TestCase):
     """Compatibilidade com o acervo já gravado — a propriedade que sustenta a troca."""
 
-    def test_store_grava_exatamente_as_quatro_chaves(self):
+    def test_store_writes_exactly_the_four_keys(self):
         s, q, _ = store()
         r = s.store("um fato", {"type": "reference"})
         point = q.get_point("mem", r["id"])
         self.assertEqual(set(point["payload"]), CHAVES)
 
-    def test_store_many_grava_as_mesmas_chaves(self):
+    def test_store_many_writes_the_same_keys(self):
         s, q, _ = store()
         r = s.store_many([{"information": "a"}, {"information": "b", "metadata": {"x": 1}}])
         for mid in r["ids"]:
             self.assertEqual(set(q.get_point("mem", mid)["payload"]), CHAVES)
 
-    def test_update_preserva_created_at(self):
+    def test_update_preserves_created_at(self):
         s, q, _ = store()
         mid = s.store("original")["id"]
         antes = q.get_point("mem", mid)["payload"]["created_at"]
@@ -60,46 +60,46 @@ class TestFormaDoPayload(unittest.TestCase):
         self.assertNotEqual(depois["updated_at"], antes)
         self.assertEqual(set(depois), CHAVES)
 
-    def test_update_sem_metadata_preserva_a_anterior(self):
+    def test_update_without_metadata_keeps_the_previous_one(self):
         s, q, _ = store()
         mid = s.store("x", {"type": "reference", "project": "p"})["id"]
         s.update(mid, information="y")
         self.assertEqual(q.get_point("mem", mid)["payload"]["metadata"],
                          {"type": "reference", "project": "p"})
 
-    def test_update_sem_texto_preserva_o_documento(self):
+    def test_update_without_text_keeps_the_document(self):
         s, q, _ = store()
         mid = s.store("texto original")["id"]
         s.update(mid, metadata={"type": "user"})
         self.assertEqual(q.get_point("mem", mid)["payload"]["document"], "texto original")
 
-    def test_update_de_id_inexistente_nao_cria(self):
+    def test_update_of_a_missing_id_does_not_create(self):
         s, q, _ = store()
         self.assertEqual(s.update("nao-existe", information="x")["status"], "not_found")
         self.assertEqual(len(q.collections["mem"]["pontos"]), 0)
 
 
-class TestEscritaRecusada(unittest.TestCase):
-    def test_memoria_vazia(self):
+class TestRefusedWrites(unittest.TestCase):
+    def test_empty_memory(self):
         s, _, _ = store()
         for bad in ("", "   ", "\n"):
             with self.assertRaises(MemoryError_):
                 s.store(bad)
 
-    def test_lote_valida_antes_de_gravar_qualquer_coisa(self):
+    def test_batch_validates_before_writing_anything(self):
         s, q, _ = store()
         with self.assertRaises(MemoryError_):
             s.store_many([{"information": "válido"}, {"information": "  "}])
         self.assertEqual(len(q.collections["mem"]["pontos"]), 0,
                          "validação tem de ser ANTES de escrever, não durante")
 
-    def test_lote_faz_UMA_chamada_de_embedding(self):
+    def test_batch_makes_ONE_embedding_call(self):
         s, _, emb = store()
         s.store_many([{"information": f"fato {i}"} for i in range(5)])
         self.assertEqual(len(emb.calls), 1, "o ganho do lote é uma ida à rede, não N")
 
 
-class TestLeituraNaoCria(unittest.TestCase):
+class TestReadsNeverCreate(unittest.TestCase):
     """Ler não pode CRIAR coleção: com um typo no nome, a busca devolveria zero e o
     consumidor concluiria 'não há precedente' — a afirmação mais perigosa possível."""
 
@@ -108,23 +108,23 @@ class TestLeituraNaoCria(unittest.TestCase):
 
         return MemoryStore(q, emb, None, "nao_existe", emb.dim), q
 
-    def test_find_falha_alto(self):
+    def test_find_fails_loudly(self):
         s, q = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.find("x")
         self.assertEqual(q.list_collections(), [], "nada pode ter sido criado")
 
-    def test_recall_falha_alto(self):
+    def test_recall_fails_loudly(self):
         s, _ = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.recall(["x"], POL, top_k=5)
 
-    def test_list_page_falha_alto(self):
+    def test_list_page_fails_loudly(self):
         s, _ = self._missing_collection()
         with self.assertRaises(MemoryError_):
             s.list_page()
 
-    def test_store_PODE_criar(self):
+    def test_store_MAY_create(self):
         s, q = self._missing_collection()
         s.store("primeiro fato")
         self.assertIn("nao_existe", q.list_collections(), "escrita cria, leitura não")
@@ -139,7 +139,7 @@ class TestRecall(unittest.TestCase):
 
         return s, q
 
-    def test_recupera_por_similaridade_e_devolve_Recalled(self):
+    def test_retrieves_by_similarity_and_returns_Recalled(self):
         s, _ = self._populate()
         hits, outcome = s.recall(["paginação do poll trunca"], POL, top_k=10)
         self.assertTrue(hits)
@@ -148,7 +148,7 @@ class TestRecall(unittest.TestCase):
                       "a consulta compartilha três palavras com este registro")
         self.assertEqual(hits[0].origin, "denso")
 
-    def test_piso_relaxa_SO_quando_ha_reranker(self):
+    def test_floor_relaxes_ONLY_when_a_reranker_exists(self):
         sem, _ = self._populate(None)
         com, _ = self._populate(FakeReranker(scores=[0.9, 0.8, 0.7]))
         _, f_sem = sem.recall(["poll"], POL, top_k=10)
@@ -156,14 +156,14 @@ class TestRecall(unittest.TestCase):
         self.assertGreaterEqual(f_com.candidates, f_sem.candidates,
                                 "com segundo estágio o primeiro pode ser mais generoso")
 
-    def test_fusao_de_angulos_nao_duplica(self):
+    def test_fusing_angles_does_not_duplicate(self):
         s, _ = self._populate()
         hits, _ = s.recall(["paginação do poll", "poll paginação", "trunca 100 itens"],
                            POL, top_k=10)
         ids = [h.id for h in hits]
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_best_dense_reporta_o_melhor_de_TODOS_os_hits(self):
+    def test_best_dense_reports_the_best_of_ALL_hits(self):
         """Para dizer 'nada passou do corte, o melhor foi X', o número útil é o
         melhor de todos — não o melhor dos que passaram o piso."""
         s, _ = self._populate()
@@ -172,7 +172,7 @@ class TestRecall(unittest.TestCase):
         self.assertEqual(hits, [])
         self.assertGreater(outcome.best_dense, 0.0)
 
-    def test_registro_sem_documento_e_descartado(self):
+    def test_record_without_a_document_is_discarded(self):
         s, q, _ = store()
         q.upsert("mem", [{"id": "vazio", "vector": [1.0] * 8,
                           "payload": {"document": "   ", "metadata": {}}}])
@@ -180,7 +180,7 @@ class TestRecall(unittest.TestCase):
         self.assertEqual([h.id for h in hits], [],
                          "vetor sem texto não pode ser julgado nem apresentado")
 
-    def test_erro_de_embedding_propaga_como_erro_do_dominio(self):
+    def test_embedding_failure_propagates_as_a_domain_error(self):
         q = FakeVectorStore()
         q.ensure_collection("mem", 8)
         s = MemoryStore(q, FailingFakeEmbedder(core.EmbeddingError("fora")), None, "mem", 8)
@@ -203,7 +203,7 @@ class TestDocsOffline(unittest.TestCase):
 
         return path
 
-    def test_temporario_carrega_validade_e_biblioteca_nao(self):
+    def test_temporary_carries_an_expiry_and_library_does_not(self):
         idx, q = self._index()
         path = self._write_file()
         idx.index_file(path, ttl_seconds=60)
@@ -213,7 +213,7 @@ class TestDocsOffline(unittest.TestCase):
         self.assertIn("expires_at_ts", tmp)
         self.assertNotIn("expires_at_ts", lib, "biblioteca não expira, por construção")
 
-    def test_reindexar_substitui_em_vez_de_acumular(self):
+    def test_reindexing_replaces_instead_of_accumulating(self):
         idx, q = self._index()
         path = self._write_file()
         idx.keep_file(path)
@@ -221,7 +221,7 @@ class TestDocsOffline(unittest.TestCase):
         idx.keep_file(path)
         self.assertEqual(len(q.collections["lib"]["pontos"]), antes)
 
-    def test_sweep_remove_so_o_vencido(self):
+    def test_sweep_removes_only_what_expired(self):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=-1)
         idx.index_file(self._write_file("outro conteudo aqui\n"), ttl_seconds=600)
@@ -232,7 +232,7 @@ class TestDocsOffline(unittest.TestCase):
         self.assertTrue(all("outro" in d for d in remaining_docs),
                         "só o vencido é removido")
 
-    def test_purge_do_temporario_nao_toca_a_biblioteca(self):
+    def test_purging_temporary_does_not_touch_the_library(self):
         idx, q = self._index()
         path = self._write_file()
         idx.index_file(path, ttl_seconds=600)
@@ -241,12 +241,12 @@ class TestDocsOffline(unittest.TestCase):
         self.assertNotIn("tmp", q.list_collections())
         self.assertIn("lib", q.list_collections())
 
-    def test_binario_e_recusado(self):
+    def test_binary_is_refused(self):
         idx, _ = self._index()
         with self.assertRaises(core.DocsError):
             idx.index_file(self._write_file("texto\x00binario"))
 
-    def test_intervalo_de_linhas_reproduz_o_trecho(self):
+    def test_line_range_reproduces_the_chunk(self):
         content = "\n".join(f"linha {i}" for i in range(1, 21)) + "\n"
         path = self._write_file(content)
         idx, q = self._index()

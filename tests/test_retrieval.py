@@ -23,7 +23,7 @@ TEXTO = lambda h: h["document"]  # noqa: E731
 ID = lambda h: h["id"]           # noqa: E731
 
 
-class RerankerFake:
+class FakeReranker:
     """Dublê que devolve os scores combinados. Não precisa herdar de nada — o
     contrato é estrutural (Protocol)."""
 
@@ -54,47 +54,47 @@ POLITICA_DOCS = Policy(dense_floor=0.30, strict_floor=0.30, min_score=0.10,
                        max_results=5, veto=False, order_matters=True)
 
 
-class TestFusao(unittest.TestCase):
-    def test_mantem_o_maior_score_de_cada_id(self):
+class TestFusion(unittest.TestCase):
+    def test_keeps_the_highest_score_for_each_id(self):
         fused = fuse_by_id([[hit("a", 0.5), hit("b", 0.9)],
                               [hit("a", 0.8), hit("c", 0.3)]], ID)
         por_id = {h["id"]: h["score"] for h in fused}
         self.assertEqual(por_id, {"a": 0.8, "b": 0.9, "c": 0.3},
                          "id repetido em dois ângulos fica com o MAIOR score")
 
-    def test_sai_ordenado_por_score(self):
+    def test_comes_out_sorted_by_score(self):
         fused = fuse_by_id([[hit("a", 0.1), hit("b", 0.9), hit("c", 0.5)]], ID)
         self.assertEqual([h["id"] for h in fused], ["b", "c", "a"])
 
-    def test_lotes_vazios(self):
+    def test_empty_batches(self):
         self.assertEqual(fuse_by_id([], ID), [])
         self.assertEqual(fuse_by_id([[], []], ID), [])
 
 
-class TestQuandoChamarOSegundoEstagio(unittest.TestCase):
-    def test_chama_quando_ha_mais_candidatos_que_vagas(self):
+class TestWhenToCallTheSecondStage(unittest.TestCase):
+    def test_calls_when_there_are_more_candidates_than_slots(self):
         candidates = [hit(str(i), 0.9) for i in range(10)]
         self.assertTrue(needs_rerank(candidates, POLITICA_MEMORIA))
 
-    def test_chama_quando_ha_candidato_na_faixa_permissiva(self):
+    def test_calls_when_a_candidate_sits_in_the_permissive_band(self):
         candidates = [hit("a", 0.90), hit("b", 0.50)]  # 0.50 < strict 0.58
         self.assertTrue(needs_rerank(candidates, POLITICA_MEMORIA),
                         "0.50 só entrou porque alguém ia julgá-lo")
 
-    def test_NAO_chama_quando_tudo_cabe_e_esta_acima_do_estrito(self):
+    def test_does_NOT_call_when_everything_fits_and_clears_the_strict_floor(self):
         candidates = [hit("a", 0.90), hit("b", 0.70)]
         self.assertFalse(needs_rerank(candidates, POLITICA_MEMORIA),
                          "reordenar não mudaria o que sai — a chamada seria inútil")
 
-    def test_lista_vazia_nao_chama(self):
+    def test_empty_list_does_not_call(self):
         self.assertFalse(needs_rerank([], POLITICA_MEMORIA))
         self.assertFalse(needs_rerank([], POLITICA_DOCS))
 
-    def test_um_candidato_so_nao_precisa_de_ordem(self):
+    def test_a_single_candidate_needs_no_ordering(self):
         self.assertFalse(needs_rerank([hit("a", 0.9)], POLITICA_DOCS),
                          "não há o que ordenar com um resultado")
 
-    def test_quando_a_ordem_e_o_produto_chama_mesmo_cabendo_tudo(self):
+    def test_when_order_is_the_product_it_calls_even_if_everything_fits(self):
         candidates = [hit("a", 0.90), hit("b", 0.70)]
         self.assertFalse(needs_rerank(candidates, POLITICA_MEMORIA),
                          "memória injeta o conjunto: a ordem é cosmética")
@@ -102,147 +102,147 @@ class TestQuandoChamarOSegundoEstagio(unittest.TestCase):
                         "documento é lido de cima para baixo: a ordem é o produto")
 
 
-class TestSemSegundoEstagio(unittest.TestCase):
+class TestWithoutTheSecondStage(unittest.TestCase):
     """O caso mais importante: sem julgamento, o piso permissivo precisa voltar
     ao estrito, senão o modo COM re-rank fica pior que o modo sem."""
 
-    def test_reranker_ausente_aplica_corte_estrito(self):
+    def test_absent_reranker_applies_the_strict_cut(self):
         candidates = [hit("a", 0.90), hit("b", 0.60), hit("c", 0.50), hit("d", 0.47)]
         outcome = two_stage(candidates, "q", None, POLITICA_MEMORIA, TEXTO)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["a", "b"])
         self.assertTrue(all(s.origin == DENSO for s in outcome.scored))
         self.assertFalse(outcome.reranked)
 
-    def test_reranker_que_falha_aplica_corte_estrito(self):
+    def test_failing_reranker_applies_the_strict_cut(self):
         candidates = [hit("a", 0.90), hit("b", 0.53), hit("c", 0.49)]
-        rr = RerankerFake(ok=False, error="timeout")
+        rr = FakeReranker(ok=False, error="timeout")
         outcome = two_stage(candidates, "q", rr, POLITICA_MEMORIA, TEXTO)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["a"],
                          "0.53 e 0.49 só eram aceitáveis com o cross-encoder para limpar")
         self.assertEqual(outcome.rerank_error, "timeout")
         self.assertFalse(outcome.reranked)
 
-    def test_resposta_sem_hits_utilizaveis_tambem_cai_no_estrito(self):
-        rr = RerankerFake(ok=False, error="resposta sem hits utilizáveis")
+    def test_response_without_usable_hits_also_falls_back_to_strict(self):
+        rr = FakeReranker(ok=False, error="resposta sem hits utilizáveis")
         outcome = two_stage([hit("a", 0.50)], "q", rr, POLITICA_MEMORIA, TEXTO)
         self.assertEqual(outcome.scored, [])
 
 
-class TestComVeto(unittest.TestCase):
+class TestWithVeto(unittest.TestCase):
     """Política de memória: falso positivo polui o contexto do agente."""
 
-    def test_elimina_o_que_esta_abaixo_do_corte(self):
+    def test_eliminates_what_sits_below_the_cutoff(self):
         # um candidato na faixa permissiva é o que obriga a chamada — com tudo
         # acima do estrito e cabendo nas vagas, a política de memória nem chamaria
         candidates = [hit("a", 0.9), hit("b", 0.50), hit("c", 0.9)]
-        rr = RerankerFake(scores=[0.95, 0.02, 0.40])
+        rr = FakeReranker(scores=[0.95, 0.02, 0.40])
         outcome = two_stage(candidates, "q", rr, POLITICA_MEMORIA, TEXTO)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["a", "c"],
                          "0.02 é eliminado, não rebaixado")
         self.assertTrue(all(s.origin == CE for s in outcome.scored))
 
-    def test_o_cross_encoder_inverte_o_julgamento_denso(self):
+    def test_the_cross_encoder_overturns_the_dense_verdict(self):
         """Medido no acervo real: o CE matou um denso 0.59 e salvou um denso 0.47."""
         candidates = [hit("alto_denso", 0.59), hit("baixo_denso", 0.47)]
-        rr = RerankerFake(scores=[0.004, 0.11])
+        rr = FakeReranker(scores=[0.004, 0.11])
         outcome = two_stage(candidates, "q", rr, POLITICA_MEMORIA, TEXTO)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["baixo_denso"])
 
-    def test_respeita_o_teto_de_resultados(self):
+    def test_respects_the_result_ceiling(self):
         candidates = [hit(str(i), 0.9) for i in range(20)]
-        rr = RerankerFake(scores=[0.9] * 20)
+        rr = FakeReranker(scores=[0.9] * 20)
         outcome = two_stage(candidates, "q", rr, Policy(0.45, 0.58, 0.10, 3), TEXTO)
         self.assertEqual(len(outcome.scored), 3)
 
 
-class TestSemVeto(unittest.TestCase):
+class TestWithoutVeto(unittest.TestCase):
     """Política de documentos: quem pergunta já escolheu o documento, então
     silêncio é pior que ordem imperfeita."""
 
-    def test_entrega_o_fraco_no_fim_marcado(self):
+    def test_delivers_the_weak_ones_last_and_marked(self):
         candidates = [hit("a", 0.9), hit("b", 0.9)]
-        rr = RerankerFake(scores=[0.80, 0.02])
+        rr = FakeReranker(scores=[0.80, 0.02])
         outcome = two_stage(candidates, "q", rr, POLITICA_DOCS, TEXTO)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["a", "b"])
         self.assertEqual([s.origin for s in outcome.scored], [CE, CE_FRACO])
         self.assertTrue(outcome.scored[1].is_weak)
 
-    def test_nunca_devolve_vazio_tendo_candidato(self):
+    def test_never_returns_empty_when_a_candidate_exists(self):
         candidates = [hit("a", 0.9), hit("b", 0.9)]
-        rr = RerankerFake(scores=[0.05, 0.03])
+        rr = FakeReranker(scores=[0.05, 0.03])
         outcome = two_stage(candidates, "q", rr, POLITICA_DOCS, TEXTO)
         self.assertEqual(len(outcome.scored), 2, "com veto isto viraria silêncio")
         self.assertTrue(all(s.is_weak for s in outcome.scored))
 
 
-class TestColapsoCrossLingual(unittest.TestCase):
+class TestCrossLingualCollapse(unittest.TestCase):
     """Quando o cross-encoder colapsa, a ORDEM dele também é ruído."""
 
-    def test_detecta_colapso_e_volta_para_a_ordem_densa(self):
+    def test_detects_collapse_and_falls_back_to_dense_order(self):
         candidates = [hit("melhor_denso", 0.60), hit("pior_denso", 0.46)]
         # invertido de propósito: o CE colapsado "prefere" o pior denso
-        rr = RerankerFake(scores=[0.0004, 0.0009])
+        rr = FakeReranker(scores=[0.0004, 0.0009])
         outcome = two_stage(candidates, "q", rr, POLITICA_DOCS, TEXTO)
         self.assertTrue(outcome.collapsed)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["melhor_denso", "pior_denso"],
                          "ordem densa, não a do CE colapsado")
         self.assertTrue(all(s.origin == DENSO for s in outcome.scored))
 
-    def test_colapso_em_memoria_RESTAURA_o_corte_estrito(self):
+    def test_collapse_in_memory_RESTORES_the_strict_cut(self):
         """Regressão: o colapso descarta o julgamento, então o piso permissivo volta
         a não ter quem o limpe. Sem isto, o modo COM re-rank devolvia candidato que o
         modo SEM re-rank nunca devolveria — o defeito que o pipeline existe para não
         ter. Só aparece na política de MEMÓRIA, onde os dois pisos diferem."""
         candidates = [hit("passa", 0.90), hit("permissivo", 0.50), hit("permissivo2", 0.46)]
-        rr = RerankerFake(scores=[0.0004, 0.0009, 0.0002])
+        rr = FakeReranker(scores=[0.0004, 0.0009, 0.0002])
         outcome = two_stage(candidates, "q", rr, POLITICA_MEMORIA, TEXTO)
         self.assertTrue(outcome.collapsed)
         self.assertEqual([s.item["id"] for s in outcome.scored], ["passa"],
                          "0.50 e 0.46 só eram aceitáveis com o cross-encoder para julgar")
 
-    def test_colapso_em_docs_NAO_devolve_silencio(self):
+    def test_collapse_in_docs_does_NOT_return_silence(self):
         """A outra metade do par: com os pisos iguais, restaurar o estrito não corta
         nada, e a pergunta em outra língua continua sendo respondida."""
         candidates = [hit("a", 0.46), hit("b", 0.44)]  # faixa típica cross-lingual
-        rr = RerankerFake(scores=[0.0004, 0.0002])
+        rr = FakeReranker(scores=[0.0004, 0.0002])
         outcome = two_stage(candidates, "q", rr, POLITICA_DOCS, TEXTO)
         self.assertTrue(outcome.collapsed)
         self.assertEqual(len(outcome.scored), 2, "silêncio aqui seria pior que ordem imperfeita")
 
-    def test_score_baixo_mas_acima_do_limiar_nao_e_colapso(self):
+    def test_low_score_above_the_threshold_is_not_collapse(self):
         candidates = [hit("a", 0.9), hit("b", 0.9)]
-        rr = RerankerFake(scores=[0.05, 0.02])  # 0.05 > COLLAPSE_MAX
+        rr = FakeReranker(scores=[0.05, 0.02])  # 0.05 > COLLAPSE_MAX
         outcome = two_stage(candidates, "q", rr, POLITICA_DOCS, TEXTO)
         self.assertFalse(outcome.collapsed, "0.05 é relevância baixa, não colapso")
 
-    def test_colapso_pode_ser_desligado_por_politica(self):
+    def test_collapse_detection_can_be_turned_off_by_policy(self):
         policy = Policy(0.45, 0.58, 0.10, 5, veto=False, detect_collapse=False)
-        rr = RerankerFake(scores=[0.0004, 0.0009])
+        rr = FakeReranker(scores=[0.0004, 0.0009])
         outcome = two_stage([hit("a", 0.60), hit("b", 0.46)], "q", rr, policy, TEXTO)
         self.assertFalse(outcome.collapsed)
 
 
-class TestRastro(unittest.TestCase):
-    def test_registra_conversao_de_escala(self):
-        rr = RerankerFake(scores=[0.9, 0.5], was_logit=True)
+class TestTrace(unittest.TestCase):
+    def test_records_the_scale_conversion(self):
+        rr = FakeReranker(scores=[0.9, 0.5], was_logit=True)
         outcome = two_stage([hit("a", 0.9), hit("b", 0.9)], "q", rr,
                          Policy(0.45, 0.58, 0.10, 1), TEXTO)
         self.assertTrue(outcome.scale_converted)
 
-    def test_registra_melhor_denso_mesmo_sem_resultado(self):
+    def test_records_the_best_dense_score_even_with_no_result(self):
         outcome = two_stage([hit("a", 0.30)], "q", None, POLITICA_MEMORIA, TEXTO)
         self.assertEqual(outcome.scored, [])
         self.assertAlmostEqual(outcome.best_dense, 0.30)
 
-    def test_by_rerank_distingue_a_procedencia(self):
-        rr = RerankerFake(scores=[0.9])
+    def test_by_rerank_distinguishes_the_origin(self):
+        rr = FakeReranker(scores=[0.9])
         com_ce = two_stage([hit("a", 0.5)], "q", rr, POLITICA_MEMORIA, TEXTO)
         sem_ce = two_stage([hit("a", 0.9)], "q", None, POLITICA_MEMORIA, TEXTO)
         self.assertTrue(com_ce.by_rerank)
         self.assertFalse(sem_ce.by_rerank)
 
-    def test_query_chega_ao_reranker_e_os_textos_tambem(self):
-        rr = RerankerFake(scores=[0.9, 0.8])
+    def test_the_query_reaches_the_reranker_and_so_do_the_texts(self):
+        rr = FakeReranker(scores=[0.9, 0.8])
         two_stage([hit("a", 0.5, "texto A"), hit("b", 0.5, "texto B")],
                   "minha pergunta", rr, POLITICA_MEMORIA, TEXTO)
         query, docs = rr.calls[0]
@@ -250,16 +250,16 @@ class TestRastro(unittest.TestCase):
         self.assertEqual(docs, ["texto A", "texto B"])
 
 
-class TestPiso(unittest.TestCase):
-    def test_piso_relaxa_so_quando_ha_segundo_estagio(self):
+class TestFloor(unittest.TestCase):
+    def test_floor_relaxes_only_when_a_second_stage_exists(self):
         self.assertAlmostEqual(POLITICA_MEMORIA.floor_for(True), 0.45)
         self.assertAlmostEqual(POLITICA_MEMORIA.floor_for(False), 0.58)
 
 
-class TestContratoDoDuble(unittest.TestCase):
-    def test_o_fake_satisfaz_o_protocolo_sem_herdar_nada(self):
+class TestFakeContract(unittest.TestCase):
+    def test_the_fake_satisfies_the_protocol_without_inheriting_anything(self):
         from core.ports import RerankModel
-        self.assertIsInstance(RerankerFake(), RerankModel)
+        self.assertIsInstance(FakeReranker(), RerankModel)
 
 
 if __name__ == "__main__":

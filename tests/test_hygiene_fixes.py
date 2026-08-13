@@ -32,35 +32,35 @@ def load_hook():
     return recall, Path(tmp)
 
 
-class TestPodaDoEstado(unittest.TestCase):
+class TestStatePruning(unittest.TestCase):
     """Entrada em `seen` só importa enquanto pode evitar uma reinjeção."""
 
-    def test_descarta_o_que_nao_muda_mais_decisao(self):
+    def test_drops_what_can_no_longer_change_a_decision(self):
         recall, _ = load_hook()
         state = {"round": 20, "seen": {"recente": 19, "no_limite": 12, "velha": 5}}
         pruned = recall.prune_state(state)
         self.assertEqual(pruned, 2, "12 e 5 estão a >= 8 rodadas de distância")
         self.assertEqual(set(state["seen"]), {"recente"})
 
-    def test_mantem_o_que_ainda_evita_reinjecao(self):
+    def test_keeps_what_still_prevents_a_reinjection(self):
         recall, _ = load_hook()
         state = {"round": 10, "seen": {"a": 9, "b": 4}}  # 10-4 = 6 < 8
         recall.prune_state(state)
         self.assertEqual(set(state["seen"]), {"a", "b"})
 
-    def test_valor_corrompido_e_descartado(self):
+    def test_corrupted_value_is_discarded(self):
         recall, _ = load_hook()
         state = {"round": 5, "seen": {"ok": 4, "lixo": "nao é numero", "nulo": None}}
         recall.prune_state(state)
         self.assertEqual(set(state["seen"]), {"ok"})
 
-    def test_estado_vazio_nao_quebra(self):
+    def test_empty_state_does_not_break(self):
         recall, _ = load_hook()
         self.assertEqual(recall.prune_state({}), 0)
 
 
-class TestLimpezaDeSessoesMortas(unittest.TestCase):
-    def test_remove_antigo_e_preserva_recente(self):
+class TestDeadSessionCleanup(unittest.TestCase):
+    def test_removes_the_old_and_keeps_the_recent(self):
         recall, dir_ = load_hook()
         previous = dir_ / "recall-morta.json"
         recent = dir_ / "recall-viva.json"
@@ -73,7 +73,7 @@ class TestLimpezaDeSessoesMortas(unittest.TestCase):
         self.assertFalse(previous.exists())
         self.assertTrue(recent.exists())
 
-    def test_nao_toca_o_log(self):
+    def test_does_not_touch_the_log(self):
         recall, dir_ = load_hook()
         log = dir_ / "recall.log"
         log.write_text("linha")
@@ -83,10 +83,10 @@ class TestLimpezaDeSessoesMortas(unittest.TestCase):
         self.assertTrue(log.exists(), "o log não é estado de sessão")
 
 
-class TestEnvTolerante(unittest.TestCase):
+class TestTolerantEnvReading(unittest.TestCase):
     """Lido no carregamento do módulo, ANTES do catch-all — não pode explodir."""
 
-    def test_numero_valido(self):
+    def test_valid_number(self):
         recall, _ = load_hook()
         os.environ["QCTX_TESTE_NUM"] = "42"
         try:
@@ -94,7 +94,7 @@ class TestEnvTolerante(unittest.TestCase):
         finally:
             del os.environ["QCTX_TESTE_NUM"]
 
-    def test_numero_invalido_cai_no_default_e_registra(self):
+    def test_invalid_number_falls_back_to_the_default_and_is_recorded(self):
         recall, _ = load_hook()
         recall._pending_notes.clear()
         os.environ["QCTX_TESTE_NUM"] = "14k"
@@ -105,12 +105,12 @@ class TestEnvTolerante(unittest.TestCase):
         finally:
             del os.environ["QCTX_TESTE_NUM"]
 
-    def test_ausente_usa_default(self):
+    def test_absent_uses_the_default(self):
         recall, _ = load_hook()
         self.assertAlmostEqual(recall.env_num("QCTX_NAO_EXISTE", "NEM_ESTE", "0.58"), 0.58)
 
 
-class TestTtlPreservadoNoRefresh(unittest.TestCase):
+class TestTtlPreservedAcrossRefresh(unittest.TestCase):
     def _index(self):
         q, emb = FakeVectorStore(), FakeEmbedder()
 
@@ -123,13 +123,13 @@ class TestTtlPreservadoNoRefresh(unittest.TestCase):
 
         return path
 
-    def test_duracao_e_guardada_na_indexacao(self):
+    def test_lifetime_is_stored_at_index_time(self):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=3600)
         md = list(q.collections["tmp"]["pontos"].values())[0]["payload"]["metadata"]
         self.assertEqual(md["ttl_seconds"], 3600)
 
-    def test_refresh_reusa_a_duracao_em_vez_do_default(self):
+    def test_refresh_reuses_the_lifetime_instead_of_the_default(self):
         idx, q = self._index()
         path = self._write_file()
         idx.index_file(path, ttl_seconds=3600)          # o usuário pediu 1 hora
@@ -141,7 +141,7 @@ class TestTtlPreservadoNoRefresh(unittest.TestCase):
         self.assertGreater(remaining, 3500)
         self.assertNotAlmostEqual(remaining, DEFAULT_TTL_SECONDS, delta=100)
 
-    def test_biblioteca_nao_ganha_validade_no_refresh(self):
+    def test_library_gains_no_expiry_on_refresh(self):
         idx, q = self._index()
         path = self._write_file()
         idx.keep_file(path)
@@ -151,7 +151,7 @@ class TestTtlPreservadoNoRefresh(unittest.TestCase):
             self.assertNotIn("expires_at_ts", p["payload"])
 
 
-class TestUpdateSemReembedding(unittest.TestCase):
+class TestUpdateWithoutReembedding(unittest.TestCase):
     def _store(self, embedder=None):
         q = FakeVectorStore()
         emb = embedder or FakeEmbedder()
@@ -159,7 +159,7 @@ class TestUpdateSemReembedding(unittest.TestCase):
 
         return MemoryStore(q, emb, None, "mem", 8), q, emb
 
-    def test_metadata_sozinha_nao_chama_embedding(self):
+    def test_metadata_alone_does_not_call_embedding(self):
         s, q, emb = self._store()
         mid = s.store("texto que não muda")["id"]
         calls_before = len(emb.calls)
@@ -168,7 +168,7 @@ class TestUpdateSemReembedding(unittest.TestCase):
         self.assertEqual(len(emb.calls), calls_before, "vetor idêntico não se recalcula")
         self.assertEqual(q.get_point("mem", mid)["payload"]["metadata"], {"type": "feedback"})
 
-    def test_texto_igual_ao_anterior_tambem_nao_chama(self):
+    def test_text_equal_to_the_previous_one_also_skips_the_call(self):
         s, _, emb = self._store()
         mid = s.store("mesmo texto")["id"]
         antes = len(emb.calls)
@@ -176,7 +176,7 @@ class TestUpdateSemReembedding(unittest.TestCase):
         self.assertFalse(res["reembedded"])
         self.assertEqual(len(emb.calls), antes)
 
-    def test_texto_diferente_chama(self):
+    def test_different_text_calls(self):
         s, _, emb = self._store()
         mid = s.store("original")["id"]
         antes = len(emb.calls)
@@ -184,7 +184,7 @@ class TestUpdateSemReembedding(unittest.TestCase):
         self.assertTrue(res["reembedded"])
         self.assertEqual(len(emb.calls), antes + 1)
 
-    def test_corrigir_etiqueta_FUNCIONA_com_embedding_fora(self):
+    def test_fixing_a_label_WORKS_with_embedding_down(self):
         """O motivo real do conserto: a operação não depende de embedding, então não
         pode ficar impossível quando o endpoint está fora."""
         q = FakeVectorStore()
@@ -198,14 +198,14 @@ class TestUpdateSemReembedding(unittest.TestCase):
         self.assertEqual(res["status"], "updated")
         self.assertEqual(q.get_point("mem", mid)["payload"]["metadata"], {"type": "corrigido"})
 
-    def test_vetor_e_preservado_intacto(self):
+    def test_vector_is_preserved_untouched(self):
         s, q, _ = self._store()
         mid = s.store("texto")["id"]
         vetor_antes = list(q.get_point("mem", mid)["vector"])
         s.update(mid, metadata={"x": 1})
         self.assertEqual(q.get_point("mem", mid)["vector"], vetor_antes)
 
-    def test_as_quatro_chaves_sobrevivem_ao_caminho_sem_reembedding(self):
+    def test_the_four_keys_survive_the_no_reembedding_path(self):
         s, q, _ = self._store()
         mid = s.store("texto", {"type": "a"})["id"]
         s.update(mid, metadata={"type": "b"})

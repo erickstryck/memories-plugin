@@ -19,29 +19,29 @@ from core.docs import DocsError, doc_id_for, parse_ttl, source_changed
 
 
 class TestTTL(unittest.TestCase):
-    def test_unidades(self):
+    def test_units(self):
         self.assertEqual(parse_ttl("30s"), 30)
         self.assertEqual(parse_ttl("30m"), 1800)
         self.assertEqual(parse_ttl("2h"), 7200)
         self.assertEqual(parse_ttl("7d"), 604800)
 
-    def test_segundos_puros(self):
+    def test_bare_seconds(self):
         self.assertEqual(parse_ttl("90"), 90)
 
-    def test_aceita_espaco_e_maiuscula(self):
+    def test_accepts_spaces_and_uppercase(self):
         self.assertEqual(parse_ttl(" 24H "), 86400)
 
-    def test_invalido_levanta(self):
+    def test_invalid_raises(self):
         for bad in ("", "abc", "24x", "-5h"):
             with self.assertRaises(DocsError):
                 parse_ttl(bad)
 
 
 class TestDocId(unittest.TestCase):
-    def test_estavel_para_o_mesmo_caminho(self):
+    def test_stable_for_the_same_path(self):
         self.assertEqual(doc_id_for("/tmp/a.md"), doc_id_for("/tmp/a.md"))
 
-    def test_caminho_relativo_e_absoluto_dao_o_mesmo_id(self):
+    def test_relative_and_absolute_paths_give_the_same_id(self):
         cwd = os.getcwd()
         try:
             os.chdir("/tmp")
@@ -50,11 +50,11 @@ class TestDocId(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
-    def test_caminhos_diferentes_dao_ids_diferentes(self):
+    def test_different_paths_give_different_ids(self):
         self.assertNotEqual(doc_id_for("/tmp/a.md"), doc_id_for("/tmp/b.md"))
 
 
-class TestObsolescencia(unittest.TestCase):
+class TestStaleness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.file_path = Path(self.tmp.name) / "doc.md"
@@ -66,37 +66,37 @@ class TestObsolescencia(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_arquivo_intocado_nao_e_obsoleto(self):
+    def test_untouched_file_is_not_stale(self):
         self.assertIsNone(source_changed(str(self.file_path), self.mtime, self.size))
 
-    def test_round_trip_de_float_nao_gera_falso_positivo(self):
+    def test_float_round_trip_does_not_produce_a_false_positive(self):
         """O bug original: JSON devolvia ...9956775 para ...9956777 gravado."""
         quase = self.mtime + 2.4e-07
         self.assertIsNone(source_changed(str(self.file_path), quase, self.size),
                           "diferença de 1e-7 é ruído de serialização, não edição")
 
-    def test_mtime_arredondado_a_milissegundo_nao_gera_falso_positivo(self):
+    def test_mtime_rounded_to_the_millisecond_produces_no_false_positive(self):
         self.assertIsNone(source_changed(str(self.file_path), round(self.mtime, 3), self.size))
 
-    def test_mudanca_de_tamanho_e_detectada(self):
+    def test_size_change_is_detected(self):
         self.file_path.write_text("conteudo original com mais texto\n")
         reason = source_changed(str(self.file_path), self.mtime, self.size)
         self.assertIsNotNone(reason)
         self.assertIn("tamanho", reason)
 
-    def test_mudanca_de_mtime_com_mesmo_tamanho_e_detectada(self):
+    def test_mtime_change_at_the_same_size_is_detected(self):
         futuro = self.mtime + 60
         os.utime(self.file_path, (futuro, futuro))
         reason = source_changed(str(self.file_path), self.mtime, self.size)
         self.assertIsNotNone(reason, "edição que preserva o tamanho ainda muda o mtime")
 
-    def test_arquivo_removido_e_reportado(self):
+    def test_removed_file_is_reported(self):
         path = str(self.file_path)
         os.unlink(path)
         self.assertEqual(source_changed(path, self.mtime, self.size),
                          "arquivo não existe mais")
 
-    def test_metadado_ausente_nao_quebra(self):
+    def test_missing_metadata_does_not_break(self):
         self.assertIsNone(source_changed(str(self.file_path), None, None))
 
 
