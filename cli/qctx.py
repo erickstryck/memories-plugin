@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
 import core.docs  # noqa: E402
+import core.setup  # noqa: E402
 from core.config import ConfigError  # noqa: E402
 
 
@@ -130,6 +131,71 @@ def cmd_config_detect(args, cfg):
     print(f"{cfg.embed_model} devolve {dim} dimensões (config dizia {cfg.vector_size})")
     print(f"  vector_size atualizado em {caminho}")
     print("  confira com `qctx collections list` quais coleções seguem compatíveis")
+
+
+def _render_check(c: dict) -> None:
+    marca = "ok  " if c["ok"] else ("aviso" if c["aviso"] else "FALHA")
+    print(f"  [{marca:5}] {c['nome']:20} {c['detalhe']}")
+    if not c["ok"] and c["correcao"]:
+        print(f"            -> {c['correcao']}")
+
+
+def cmd_setup(args, cfg):
+    """Diagnóstico guiado. NÃO bloqueia em stdin quando não há terminal.
+
+    Isso não é detalhe: este comando existe para ser chamado também por um agente
+    ou por um script, e um `input()` esperando resposta que nunca vem penduraria a
+    chamada até o timeout. Sem TTY, o comando diagnostica, imprime os comandos
+    exatos que faltam e sai.
+    """
+    rel = core.setup.diagnose(cfg)
+    if args.json:
+        saida(rel, True)
+
+        return
+
+    print("diagnóstico:\n")
+    for c in rel["checks"]:
+        _render_check(c)
+
+    if rel["pronto"]:
+        print("\npronto para usar.")
+    else:
+        print(f"\n{len(rel['bloqueios'])} item(ns) impedem o uso — os comandos acima resolvem.")
+
+    interativo = sys.stdin.isatty() and not args.check
+    if not interativo:
+        if rel["sugestoes_memoria"] and not cfg.memory_collection:
+            print("\ncoleções candidatas para memória (mais povoadas primeiro):")
+            for i, s_ in enumerate(rel["sugestoes_memoria"], 1):
+                print(f"  {i}. {s_['collection']:34} {s_['points']:>8} pontos")
+            print("\nescolha com: qctx config set memory-collection <nome>")
+        if not sys.stdin.isatty():
+            print("\n(sem terminal interativo — nada foi alterado)")
+
+        return
+
+    print("\n--- configurar (Enter mantém o valor atual) ---")
+    opcoes = [s_["collection"] for s_ in rel["sugestoes_memoria"]]
+    for i, s_ in enumerate(opcoes, 1):
+        print(f"  {i}. {s_}")
+    escolha = core.setup.escolher_por_indice(
+        opcoes, input(f"coleção de memória [{cfg.memory_collection or 'nenhuma'}]: "))
+    if escolha:
+        core.save({"memory_collection": escolha})
+        print(f"  memory_collection = {escolha}")
+    for chave, atual in (("docs_collection", cfg.docs_collection),
+                         ("library_collection", cfg.library_collection)):
+        resp = input(f"{chave} [{atual}]: ").strip()
+        if resp:
+            core.save({chave: resp})
+            print(f"  {chave} = {resp}")
+    if rel["dim_detectada"] and rel["dim_detectada"] != cfg.vector_size:
+        core.save({"vector_size": rel["dim_detectada"]})
+        print(f"  vector_size = {rel['dim_detectada']} (detectado do endpoint)")
+    print("\nrodando o diagnóstico de novo:\n")
+    for c in core.setup.diagnose(core.load())["checks"]:
+        _render_check(c)
 
 
 # ---- memory ----------------------------------------------------------------
@@ -329,6 +395,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="qctx", description=__doc__.splitlines()[0])
     ap.add_argument("--json", action="store_true", help="saída em JSON")
     sub = ap.add_subparsers(dest="grupo", required=True)
+
+    p = sub.add_parser("setup", help="diagnóstico guiado da configuração")
+    p.add_argument("--check", action="store_true",
+                   help="só diagnostica, nunca pergunta nem altera")
+    p.set_defaults(fn=cmd_setup)
 
     col = sub.add_parser("collections", help="inspecionar coleções do Qdrant")
     colsub = col.add_subparsers(dest="acao", required=True)

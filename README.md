@@ -74,6 +74,22 @@ faltando transformaria falha de ambiente em perda silenciosa de funcionalidade.
 
 ## Configuração
 
+Comece pelo diagnóstico guiado:
+
+```bash
+python3 cli/qctx.py setup
+```
+
+Ele verifica Qdrant, endpoint de embedding (detectando a dimensão real do modelo),
+endpoint de re-rank (inclusive a escala em que ele responde) e as três coleções —
+e imprime, para cada item que falta, o comando exato que resolve. Num terminal
+interativo ele pergunta e grava; **sem TTY ele nunca bloqueia**, apenas relata.
+Isso é deliberado: o comando também é chamado por agente e por script, e um prompt
+esperando resposta que nunca vem penduraria a chamada.
+
+`--check` força o modo somente-diagnóstico; `--json` devolve o retrato completo
+para consumo por programa.
+
 Precedência: **variável de ambiente > arquivo > default**. O arquivo vive em
 `~/.config/qdrant-context/config.json`.
 
