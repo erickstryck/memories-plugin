@@ -20,10 +20,11 @@ import uuid
 from dataclasses import dataclass
 
 from . import retrieval
+from .errors import CoreError
 from datetime import datetime, timezone
 
 
-class MemoryError_(Exception):
+class MemoryError_(CoreError):
     pass
 
 
@@ -51,7 +52,23 @@ class MemoryStore:
         self.vector_size = vector_size
 
     def ensure(self) -> None:
+        """Garante a coleção. Só para caminho de ESCRITA."""
         self.q.ensure_collection(self.collection, self.vector_size)
+
+    def require_existing(self) -> None:
+        """Exige que a coleção exista. Para caminho de LEITURA.
+
+        Ler não pode CRIAR: com um erro de digitação no nome, `ensure` criava uma
+        coleção vazia, a busca devolvia zero hits e o consumidor concluía "não há
+        precedente registrado sobre este assunto". Ou seja um typo de configuração
+        virava a afirmação mais perigosa que este sistema pode fazer. Melhor falhar
+        alto — e o hook transforma isso em aviso explícito de indisponibilidade.
+        """
+        if self.q.collection_info(self.collection) is None:
+            raise MemoryError_(
+                f"coleção de memória {self.collection!r} não existe. Confira o nome com "
+                f"`collections list`; nada é criado por uma leitura."
+            )
 
     # ---- escrita -----------------------------------------------------------
 
@@ -131,7 +148,7 @@ class MemoryStore:
     def find(self, query: str, limit: int = 5) -> list[dict]:
         """Busca densa pura, sem re-rank. Barata; use quando a ordem entre os
         relevantes não importa (por exemplo para deduplicar antes de gravar)."""
-        self.ensure()
+        self.require_existing()
         vetor = self.embedder.embed_one(query)
         saida = []
         for hit in self.q.search(self.collection, vetor, limit):
@@ -159,7 +176,7 @@ class MemoryStore:
         `input` como array. A fusão é por id pelo MAIOR score: um registro que aparece
         em dois ângulos não deve ser penalizado pelo pior deles.
         """
-        self.ensure()
+        self.require_existing()
         vetores = self.embedder.embed(queries)
         lotes = [[self._normaliza(h) for h in self.q.search(self.collection, v, top_k)]
                  for v in vetores]
@@ -216,7 +233,7 @@ class MemoryStore:
                 "updated_at": p.get("updated_at")}
 
     def list_page(self, limit: int = 20, offset=None) -> dict:
-        self.ensure()
+        self.require_existing()
         pontos, proximo = self.q.scroll(self.collection, limit=limit, offset=offset)
         memorias = [{
             "id": pt.get("id"),

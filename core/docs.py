@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import retrieval
+from .errors import CoreError
 from .chunk import chunk_text, is_probably_binary, mode_for_suffix
 
 DEFAULT_TTL_SECONDS = 24 * 3600
@@ -44,7 +45,7 @@ DENSE_FLOOR = 0.30
 SCOPES = ("all", "tmp", "library")
 
 
-class DocsError(Exception):
+class DocsError(CoreError):
     pass
 
 
@@ -268,6 +269,10 @@ class DocIndex:
             raise DocsError(f"escopo inválido: {scope!r} (use {', '.join(SCOPES)})")
         escopos = ("tmp", "library") if scope == "all" else (scope,)
 
+        # Os dois pisos IGUAIS, de propósito: sem veto, "voltar ao corte estrito"
+        # quando o julgamento não acontece tem de ser um no-op. Se fossem diferentes,
+        # o colapso cross-lingual (denso na faixa de 0.46) devolveria silêncio —
+        # exatamente o que esta política existe para evitar.
         policy = retrieval.Policy(
             dense_floor=DENSE_FLOOR, strict_floor=DENSE_FLOOR, min_score=min_score,
             max_results=limit, veto=False, detect_collapse=True, order_matters=True,

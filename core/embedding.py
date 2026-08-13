@@ -4,14 +4,15 @@ Uma responsabilidade: texto -> vetor. O que era um módulo `models.py` com duas
 famílias de modelo virou dois, porque nada aqui muda quando o contrato do re-rank
 muda, e vice-versa — juntá-los fazia toda alteração num tocar o outro.
 """
-from .http import bearer, post_json
+from .errors import CoreError
+from .http import HttpError, bearer, post_json
 
 #: Lote por requisição. O endpoint aceita `input` como array, então N textos custam
 #: N/EMBED_BATCH idas à rede em vez de N.
 EMBED_BATCH = 32
 
 
-class EmbeddingError(Exception):
+class EmbeddingError(CoreError):
     pass
 
 
@@ -35,8 +36,14 @@ class Embedder:
         saida: list[list[float]] = []
         for i in range(0, len(textos), EMBED_BATCH):
             lote = textos[i:i + EMBED_BATCH]
-            res = post_json(self.url, {"model": self.model, "input": lote},
-                            headers=bearer(self.api_key), timeout=self.timeout)
+            try:
+                res = post_json(self.url, {"model": self.model, "input": lote},
+                                headers=bearer(self.api_key), timeout=self.timeout)
+            except HttpError as exc:
+                # Traduz para o erro do domínio: quem chama fala de embedding, não
+                # de transporte, e capturar HttpError obrigaria todo consumidor a
+                # conhecer a camada de baixo.
+                raise EmbeddingError(str(exc)) from exc
             data = res.get("data")
             if not isinstance(data, list) or len(data) != len(lote):
                 quantos = len(data) if isinstance(data, list) else "?"

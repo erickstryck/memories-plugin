@@ -11,6 +11,7 @@ from dataclasses import dataclass, asdict
 
 from .config import Config, ConfigError
 from .embedding import Embedder
+from .errors import CoreError
 from .reranking import Reranker
 
 #: Prefixos de coleção gerada por outro sistema — não são candidatas úteis.
@@ -51,7 +52,7 @@ def _check_embed(cfg: Config) -> tuple[Check, int | None]:
     emb = Embedder(url, cfg.embed_model, cfg.api_key, timeout=30.0)
     try:
         dim = emb.detect_dimension()
-    except EmbeddingError as exc:
+    except CoreError as exc:
         return Check("Embedding", False, f"{url} não respondeu: {exc}",
                      f"confira se o modelo {cfg.embed_model!r} está servido nesse endereço"), None
     detalhe = f"{cfg.embed_model} devolve {dim} dimensões"

@@ -46,7 +46,11 @@ class RerankerFake:
 
 POLITICA_MEMORIA = Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
                           max_results=6, veto=True)
-POLITICA_DOCS = Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
+# Espelha `core/docs.py`: os DOIS pisos iguais, de propósito. Em documentos não há
+# veto e o objetivo é nunca devolver silêncio, então "voltar ao corte estrito" tem
+# de ser um no-op — se fosse 0.58, o colapso cross-lingual (denso ~0.46) devolveria
+# vazio, que é exatamente o que essa política existe para evitar.
+POLITICA_DOCS = Policy(dense_floor=0.30, strict_floor=0.30, min_score=0.10,
                        max_results=5, veto=False, order_matters=True)
 
 
@@ -183,6 +187,27 @@ class TestColapsoCrossLingual(unittest.TestCase):
         self.assertEqual([s.item["id"] for s in fora.scored], ["melhor_denso", "pior_denso"],
                          "ordem densa, não a do CE colapsado")
         self.assertTrue(all(s.origin == DENSO for s in fora.scored))
+
+    def test_colapso_em_memoria_RESTAURA_o_corte_estrito(self):
+        """Regressão: o colapso descarta o julgamento, então o piso permissivo volta
+        a não ter quem o limpe. Sem isto, o modo COM re-rank devolvia candidato que o
+        modo SEM re-rank nunca devolveria — o defeito que o pipeline existe para não
+        ter. Só aparece na política de MEMÓRIA, onde os dois pisos diferem."""
+        candidatos = [hit("passa", 0.90), hit("permissivo", 0.50), hit("permissivo2", 0.46)]
+        rr = RerankerFake(scores=[0.0004, 0.0009, 0.0002])
+        fora = two_stage(candidatos, "q", rr, POLITICA_MEMORIA, TEXTO)
+        self.assertTrue(fora.collapsed)
+        self.assertEqual([s.item["id"] for s in fora.scored], ["passa"],
+                         "0.50 e 0.46 só eram aceitáveis com o cross-encoder para julgar")
+
+    def test_colapso_em_docs_NAO_devolve_silencio(self):
+        """A outra metade do par: com os pisos iguais, restaurar o estrito não corta
+        nada, e a pergunta em outra língua continua sendo respondida."""
+        candidatos = [hit("a", 0.46), hit("b", 0.44)]  # faixa típica cross-lingual
+        rr = RerankerFake(scores=[0.0004, 0.0002])
+        fora = two_stage(candidatos, "q", rr, POLITICA_DOCS, TEXTO)
+        self.assertTrue(fora.collapsed)
+        self.assertEqual(len(fora.scored), 2, "silêncio aqui seria pior que ordem imperfeita")
 
     def test_score_baixo_mas_acima_do_limiar_nao_e_colapso(self):
         candidatos = [hit("a", 0.9), hit("b", 0.9)]

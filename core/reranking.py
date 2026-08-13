@@ -19,10 +19,11 @@ Duas coisas moram aqui, e nenhuma é o algoritmo de recuperação — esse está
 import math
 from dataclasses import dataclass
 
+from .errors import CoreError
 from .http import HttpError, bearer, post_json
 
 
-class RerankError(Exception):
+class RerankError(CoreError):
     pass
 
 
@@ -155,20 +156,24 @@ class Reranker:
 
         info["descartados"] = max(0, len(documentos) - self.max_docs)
         candidatos = [d[:self.doc_chars] for d in documentos[:self.max_docs]]
+        # A LEITURA da resposta fica DENTRO do try: um servidor que responde uma
+        # lista, ou um score em string, fazia o parse explodir e quebrava a promessa
+        # de "nunca levanta" — justamente com a resposta inesperada, que é quando a
+        # promessa importa.
         try:
             resposta = post_json(self.url,
                                  self.contract.body(self.model, query[:self.query_chars], candidatos),
                                  headers=bearer(self.api_key), timeout=self.timeout)
+            pares = [(i, s) for i, s in self.contract.parse(resposta)
+                     if 0 <= i < len(candidatos)]
         except HttpError as exc:
             info["erro"] = str(exc)
 
             return [], info
-        except Exception as exc:  # timeout de socket, DNS, e o que mais vier
+        except Exception as exc:  # resposta em forma inesperada, e o que mais vier
             info["erro"] = f"{type(exc).__name__}: {exc}"
 
             return [], info
-
-        pares = [(i, s) for i, s in self.contract.parse(resposta) if 0 <= i < len(candidatos)]
         if not pares:
             info["erro"] = f"resposta sem hits utilizáveis: {str(resposta)[:200]}"
 

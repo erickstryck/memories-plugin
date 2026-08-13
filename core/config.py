@@ -14,6 +14,8 @@ núcleo portável e o mundo.
 """
 import json
 import os
+
+from .errors import CoreError
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 
@@ -55,7 +57,7 @@ DEFAULTS = {
 }
 
 
-class ConfigError(Exception):
+class ConfigError(CoreError):
     pass
 
 
@@ -100,13 +102,21 @@ class Config:
             raise ConfigError("qdrant_url não configurado (env QCTX_QDRANT_URL ou `config set qdrant-url`)")
 
     def require_memory_collection(self) -> str:
+        """Coleção de memória, validada.
+
+        A checagem de distinção roda AQUI também, e não só nos acervos de documento:
+        antes só `build_docs` a executava, então a colisão passava batido em todo
+        caminho de memória — hook de recall, `store`, `find` — e só aparecia depois,
+        como erro num comando de documento, quando a poluição do acervo já havia
+        acontecido. Guarda que só um caminho executa não é guarda.
+        """
         if not self.memory_collection:
             raise ConfigError(
                 "memory_collection não configurada. Veja as existentes com "
                 "`collections list` e escolha com `config set memory-collection <nome>`"
             )
 
-        return self.memory_collection
+        return self._require_distinta("memory_collection", self.memory_collection)
 
     def require_docs_collection(self) -> str:
         return self._require_doc_collection("docs_collection", self.docs_collection)
@@ -115,6 +125,12 @@ class Config:
         return self._require_doc_collection("library_collection", self.library_collection)
 
     def _require_doc_collection(self, nome_campo: str, valor: str) -> str:
+        if not valor:
+            raise ConfigError(f"{nome_campo} não configurada")
+
+        return self._require_distinta(nome_campo, valor)
+
+    def _require_distinta(self, nome_campo: str, valor: str) -> str:
         """Garante que as TRÊS coleções sejam distintas.
 
         Cada colisão possível tem uma consequência concreta, e nenhuma delas dá
@@ -127,8 +143,6 @@ class Config:
           construção (`drop --all` apaga a coleção), então um comando de limpeza
           passaria a ser capaz de apagar acervo permanente.
         """
-        if not valor:
-            raise ConfigError(f"{nome_campo} não configurada")
         outras = {
             "memory_collection": self.memory_collection,
             "docs_collection": self.docs_collection,

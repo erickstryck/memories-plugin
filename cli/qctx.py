@@ -268,6 +268,40 @@ def cmd_memory_update(args, cfg):
     print(json.dumps(res, ensure_ascii=False) if args.json else f"{res['status']} id={res['id']}")
 
 
+def cmd_memory_store_many(args, cfg):
+    """Lote com UMA ida ao endpoint de embeddings e semântica tudo-ou-nada.
+
+    Existia no núcleo e não tinha superfície: sem isto, um checkpoint com N fatos
+    custava N processos e N chamadas de embedding, e perdia a atomicidade que o
+    método foi escrito para dar.
+    """
+    bruto = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+    itens = json.loads(bruto)
+    if not isinstance(itens, list):
+        print("erro: esperado um array JSON de {information, metadata?}", file=sys.stderr)
+        raise SystemExit(2)
+    res = core.build_memory(cfg).store_many(itens)
+    print(json.dumps(res, ensure_ascii=False) if args.json
+          else f"gravados {res['count']}: {' '.join(res['ids'])}")
+
+
+def cmd_memory_search_collections(args, cfg):
+    """Busca SOMENTE LEITURA em coleções de outros sistemas."""
+    res = core.search_collections(core.build_qdrant(cfg), core.build_embedder(cfg),
+                                  args.query, args.collections or None,
+                                  cfg.vector_size, limit=args.limit)
+    if args.json:
+        saida(res, True)
+
+        return
+    if res["skipped"]:
+        for s_ in res["skipped"]:
+            print(f"  (pulada {s_['collection']}: {s_['motivo']})")
+    for i, h in enumerate(res["results"], 1):
+        print(f"{i}. [{h['collection']}] {h['score']:.3f}  {h['id']}")
+        print(f"   {(h['document'] or str(h['payload']))[:300]}\n")
+
+
 def cmd_memory_list(args, cfg):
     saida(core.build_memory(cfg).list_page(args.limit), True)
 
@@ -391,6 +425,22 @@ def cmd_docs_drop(args, cfg):
 
 # ---- parser ----------------------------------------------------------------
 
+def _propaga_json(parser: argparse.ArgumentParser) -> None:
+    """Acrescenta `--json` a TODO subcomando, recursivamente.
+
+    Quem digita põe a flag no fim (`qctx memory find x --json`) e a documentação
+    prometia que funcionava, mas ela existia só no parser de topo — a chamada
+    natural falhava com "unrecognized arguments". Percorrer os subparsers depois de
+    montados resolve num lugar só; repetir a definição em vinte `add_parser` seria a
+    mesma duplicação que este projeto passou a tarde eliminando.
+    """
+    for acao in parser._subparsers._group_actions if parser._subparsers else []:
+        for sub in getattr(acao, "choices", {}).values():
+            if not any(o == "--json" for a in sub._actions for o in a.option_strings):
+                sub.add_argument("--json", action="store_true", help="saída em JSON")
+            _propaga_json(sub)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="qctx", description=__doc__.splitlines()[0])
     ap.add_argument("--json", action="store_true", help="saída em JSON")
@@ -464,6 +514,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(fn=cmd_memory_list)
 
+    p = memsub.add_parser("store-many", help="lote de fatos, tudo-ou-nada")
+    p.add_argument("file", nargs="?", default="-",
+                   help="arquivo JSON com [{information, metadata?}], ou - para stdin")
+    p.set_defaults(fn=cmd_memory_store_many)
+
+    p = memsub.add_parser("search-collections", help="busca read-only em outros acervos")
+    p.add_argument("query")
+    p.add_argument("--collections", nargs="*", default=None)
+    p.add_argument("--limit", type=int, default=5)
+    p.set_defaults(fn=cmd_memory_search_collections)
+
     docs = sub.add_parser("docs", help="índice efêmero de documentos longos")
     docsub = docs.add_subparsers(dest="acao", required=True)
 
@@ -501,6 +562,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expired", action="store_true")
     p.set_defaults(fn=cmd_docs_drop)
 
+    _propaga_json(ap)
+
     return ap
 
 
@@ -508,7 +571,8 @@ def main() -> None:
     args = build_parser().parse_args()
     try:
         args.fn(args, core.load())
-    except (ConfigError, core.DocsError, core.QdrantError, core.EmbeddingError) as exc:
+    except core.CoreError as exc:
+        # Raiz da hierarquia: erro novo no núcleo já nasce capturado aqui.
         print(f"erro: {exc}", file=sys.stderr)
         raise SystemExit(1)
 

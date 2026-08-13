@@ -65,7 +65,7 @@ idioma, não só semântica. Consequências no desenho:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 127 testes, sem rede, sem dependência
+python3 -m unittest discover -s tests    # 137 testes, sem rede, sem dependência
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # para `qctx` funcionar de qualquer lugar
 ```
 
@@ -181,7 +181,7 @@ core/       núcleo portável — nenhuma referência a host ou agente
   memory.py   CRUD de memórias + recall de dois estágios
   docs.py     índice de documentos, TTL, obsolescência
 cli/        interface de linha de comando sobre o núcleo
-tests/      60 testes de lógica pura, sem rede
+tests/      137 testes offline + 17 de integração
 ```
 
 ## Desenho
@@ -242,5 +242,5 @@ duplicada e sem metadata, e o custo aparece meses depois.
 ## Estado
 
 Pronto e testado: núcleo, CLI, os três acervos, diagnóstico guiado, os dois hooks,
-as duas skills e o manifesto de plugin. 101 testes offline e 17 de integração
+as duas skills e o manifesto de plugin. 137 testes offline e 17 de integração
 contra Qdrant e modelos reais.

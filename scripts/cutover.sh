@@ -94,26 +94,42 @@ diga "=== aplicando ==="
 cp "$SETTINGS" "$SETTINGS.bak-$STAMP" && ok "backup $SETTINGS.bak-$STAMP"
 [ -f "$MCP" ] && cp "$MCP" "$MCP.bak-$STAMP" && ok "backup $MCP.bak-$STAMP"
 
+# IDEMPOTENTE de propósito. O `// []` não é defensividade gratuita: sem ele o filtro
+# quebra com "Cannot iterate over null" em qualquer settings.json sem
+# `.hooks.UserPromptSubmit` — o que inclui RODAR ESTE SCRIPT DUAS VEZES, porque a
+# primeira execução apaga a chave. Sob `set -e` isso abortava depois dos backups e
+# antes do .mcp.json, deixando a virada pela metade.
 tmp="$(mktemp)"
 jq --arg raiz "$RAIZ" '
   # remove os hooks manuais, e depois os grupos que ficaram sem nenhum hook
-  (.hooks.UserPromptSubmit) |= (
-    map(.hooks |= map(select((.command // "") | test("memory-recall|remember-cadence") | not)))
-    | map(select((.hooks | length) > 0))
-  )
-  | (if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end)
+  .hooks = ((.hooks // {}) | .UserPromptSubmit = (
+      ((.UserPromptSubmit // [])
+       | map(.hooks |= map(select((.command // "") | test("memory-recall|remember-cadence") | not)))
+       | map(select(((.hooks // []) | length) > 0)))
+    ))
+  | (if ((.hooks.UserPromptSubmit // []) | length) == 0
+     then del(.hooks.UserPromptSubmit) else . end)
   # não deixa a chave `hooks` vazia para trás: estrofe vazia confunde quem lê o
   # arquivo depois procurando o que está registrado
-  | (if (.hooks | length) == 0 then del(.hooks) else . end)
+  | (if ((.hooks // {}) | length) == 0 then del(.hooks) else . end)
   | .extraKnownMarketplaces["memories-plugin"] = {source: {source: "directory", path: $raiz}}
   | .enabledPlugins["memories-plugin@memories-plugin"] = true
 ' "$SETTINGS" > "$tmp"
-jq -e . "$tmp" >/dev/null && mv "$tmp" "$SETTINGS" && ok "settings.json atualizado"
+if jq -e . "$tmp" >/dev/null 2>&1; then
+  mv "$tmp" "$SETTINGS"; ok "settings.json atualizado"
+else
+  rm -f "$tmp"; erro "a transformação do settings.json não produziu JSON válido — nada foi trocado"
+fi
 
+# Passo INDEPENDENTE: se o de cima falhar, este ainda precisa poder rodar (ou não
+# rodar) por conta própria, em vez de ser abortado por `set -e` no meio da virada.
 if [ "$tem_mcp" = "sim" ]; then
   tmp2="$(mktemp)"
-  jq 'del(.mcpServers["qdrant-memory"])' "$MCP" > "$tmp2"
-  jq -e . "$tmp2" >/dev/null && mv "$tmp2" "$MCP" && ok ".mcp.json atualizado"
+  if jq 'del(.mcpServers["qdrant-memory"])' "$MCP" > "$tmp2" && jq -e . "$tmp2" >/dev/null 2>&1; then
+    mv "$tmp2" "$MCP"; ok ".mcp.json atualizado"
+  else
+    rm -f "$tmp2"; erro ".mcp.json não pôde ser atualizado — remova o servidor à mão"
+  fi
 fi
 
 diga ""

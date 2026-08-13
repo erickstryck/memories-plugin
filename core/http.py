@@ -14,8 +14,10 @@ import json
 import urllib.error
 import urllib.request
 
+from .errors import CoreError
 
-class HttpError(Exception):
+
+class HttpError(CoreError):
     """Falha de transporte ou status de erro. Carrega o corpo, truncado.
 
     O corpo importa: sem ele, `HTTP 400` não distingue modelo inexistente de
@@ -50,6 +52,11 @@ def request_json(url: str, *, method: str = "GET", body=None, headers: dict | No
         raise HttpError(f"não alcancei {url}: {exc.reason}") from exc
     except json.JSONDecodeError as exc:
         raise HttpError(f"{url} respondeu algo que não é JSON: {exc}") from exc
+    except OSError as exc:
+        # `TimeoutError` de socket e o resto da família OSError. Antes escapavam
+        # crus, e o consumidor que capturava só os tipos do domínio morria com
+        # traceback em vez de degradar.
+        raise HttpError(f"falha de rede em {url}: {type(exc).__name__}: {exc}") from exc
 
 
 def post_json(url: str, body, *, headers: dict | None = None, timeout: float = 30.0):

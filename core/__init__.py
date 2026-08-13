@@ -11,6 +11,7 @@ do re-rank existia só num deles — o outro herdaria o bug de volta no dia em q
 precisasse reranquear.
 """
 from .config import Config, ConfigError, load, save, redacted
+from .errors import CoreError
 from .docs import DocIndex, DocsError, parse_ttl, doc_id_for
 from .memory import MemoryStore, Recalled, search_collections
 from .embedding import Embedder, EmbeddingError
@@ -20,6 +21,7 @@ from .retrieval import (CE, CE_FRACO, DENSO, Outcome, Policy, Scored,
                         fuse_by_id, needs_rerank, two_stage)
 
 __all__ = [
+    "CoreError",
     "Config", "ConfigError", "load", "save", "redacted",
     "DocIndex", "DocsError", "parse_ttl", "doc_id_for",
     "MemoryStore", "Recalled", "search_collections",
@@ -57,8 +59,20 @@ def build_reranker(cfg: Config, timeout: float = 15.0, **kw) -> Reranker | None:
     return Reranker(url, cfg.rerank_model, cfg.api_key, timeout=timeout, **kw)
 
 
-def build_memory(cfg: Config) -> MemoryStore:
-    return MemoryStore(build_qdrant(cfg), build_embedder(cfg), build_reranker(cfg),
+def build_memory(cfg: Config, *, timeouts: dict | None = None) -> MemoryStore:
+    """Monta o acesso à memória.
+
+    `timeouts` existe porque quem chama de dentro de um hook tem orçamento próprio:
+    o host mata o hook num prazo, e um timeout de dependência MAIOR que esse prazo
+    significa que o processo morre antes de conseguir avisar o modelo — o usuário
+    paga a latência inteira e ninguém fica sabendo. Os defaults aqui são de uso
+    interativo, não de hook.
+    """
+    t = timeouts or {}
+
+    return MemoryStore(build_qdrant(cfg, timeout=t.get("qdrant", 30.0)),
+                       build_embedder(cfg, timeout=t.get("embed", 60.0)),
+                       build_reranker(cfg, timeout=t.get("rerank", 15.0)),
                        cfg.require_memory_collection(), cfg.vector_size)
 
 

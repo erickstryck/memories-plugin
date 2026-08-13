@@ -105,6 +105,12 @@ class Outcome:
     collapsed: bool = False
     scale_converted: bool = False
     rerank_error: str | None = None
+    dropped: int = 0
+    """Candidatos que o segundo estágio nem viu, por teto de pares.
+
+    Era calculado pelo cliente e lido por ninguém. Candidato descartado sem
+    julgamento pode incluir um que passaria o corte estrito — quem apresenta precisa
+    poder dizer que a lista não é exaustiva."""
 
     @property
     def items(self) -> list[Any]:
@@ -182,6 +188,7 @@ def two_stage(candidatos: list[Any], query: str, reranker, policy: Policy,
     fora.reranked = bool(info.get("ok"))
     fora.scale_converted = bool(info.get("era_logit"))
     fora.rerank_error = info.get("erro")
+    fora.dropped = int(info.get("descartados") or 0)
     fora.best_rerank = max((s for _, s in pares), default=0.0)
 
     # Sem julgamento, o piso permissivo do primeiro estágio ficou sem quem o limpe.
@@ -193,9 +200,13 @@ def two_stage(candidatos: list[Any], query: str, reranker, policy: Policy,
     # Colapso: o score é baixo por incompatibilidade de idioma, não por
     # irrelevância. A ordem do cross-encoder também é ruído aqui.
     if policy.detect_collapse and pares and fora.best_rerank < COLLAPSE_MAX:
+        # Colapso é o julgamento sendo DESCARTADO, então o piso permissivo volta a
+        # não ter quem o limpe — exatamente como quando o re-rank falha. Devolver a
+        # ordem densa sem reaplicar o corte estrito deixava passar candidato que o
+        # modo SEM re-rank nunca devolveria, que é o defeito que este pipeline
+        # existe para não ter.
         fora.collapsed = True
-        fora.scored = [Scored(c, score_de(c), DENSO)
-                       for c in candidatos[:policy.max_results]]
+        fora.scored = _estrito(candidatos, policy, score_de)
 
         return fora
 

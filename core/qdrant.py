@@ -8,10 +8,11 @@ Nenhuma regra de negócio mora aqui — só tradução entre as operações do c
 a API HTTP. É o que permite trocar o banco vetorial escrevendo outro adaptador,
 sem tocar em `memory`, `docs` ou `retrieval`.
 """
+from .errors import CoreError
 from .http import HttpError, request_json
 
 
-class QdrantError(Exception):
+class QdrantError(CoreError):
     pass
 
 
@@ -27,9 +28,11 @@ class Qdrant:
             return request_json(f"{self.base}{path}", method=method, body=body,
                                 headers=headers, timeout=self.timeout)
         except HttpError as exc:
-            # Traduz para o erro do domínio, preservando o status: `collection_info`
-            # e `ensure_collection` distinguem 404 de falha real por ele.
-            raise QdrantError(str(exc)) from exc
+            # Preserva o status no objeto: distinguir 404 por substring da mensagem
+            # quebra quando a mensagem muda.
+            erro = QdrantError(str(exc))
+            erro.status = exc.status
+            raise erro from exc
 
     # ---- coleções ----------------------------------------------------------
 
