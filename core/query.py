@@ -92,11 +92,11 @@ def skip_reason(prompt: str) -> str | None:
 
 
 def content_words(text: str) -> str:
-    seen_map, output = set(), []
+    seen, output = set(), []
     for p in WORD_RE.findall(text.lower()):
-        if p in STOPWORDS or p in seen_map:
+        if p in STOPWORDS or p in seen:
             continue
-        seen_map.add(p)
+        seen.add(p)
         output.append(p)
 
     return " ".join(output)

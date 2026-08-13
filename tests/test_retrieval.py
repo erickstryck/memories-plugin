@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import retrieval
 from core.retrieval import CE, CE_WEAK, DENSE, Policy, fuse_by_id, needs_rerank, two_stage
+from tests.fakes import FakeReranker
 
 
 def hit(id_: str, score: float, text: str = "text"):
@@ -22,26 +23,9 @@ def hit(id_: str, score: float, text: str = "text"):
 TEXT = lambda h: h["document"]  # noqa: E731
 ID = lambda h: h["id"]           # noqa: E731
 
-
-class FakeReranker:
-    """A fake returning the scores it was given. It does not have to inherit from
-    anything — the contract is structural (a Protocol)."""
-
-    def __init__(self, scores=None, ok=True, error=None, was_logit=False):
-        self.scores = scores          # one score per input index
-        self.ok = ok
-        self.error = error
-        self.was_logit = was_logit
-        self.calls = []
-
-    def rank(self, query, documents):
-        self.calls.append((query, list(documents)))
-        if not self.ok:
-            return [], {"ok": False, "error": self.error or "failed", "was_logit": False}
-        scores = self.scores if self.scores is not None else [1.0] * len(documents)
-        pairs = sorted(enumerate(scores[:len(documents)]), key=lambda p: -p[1])
-
-        return pairs, {"ok": True, "error": None, "was_logit": self.was_logit}
+# `FakeReranker` comes from `tests.fakes`. This file used to carry a byte-identical copy
+# of it, which is the drift that lets a fake and its real counterpart disagree in
+# silence — see TestFakeContract below for what now pins them together.
 
 
 MEMORY_POLICY = Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
@@ -258,9 +242,64 @@ class TestFloor(unittest.TestCase):
 
 
 class TestFakeContract(unittest.TestCase):
+    """What ties the fake to the real `Reranker`, beyond the method signature.
+
+    `Protocol` gives structural typing on METHODS, and `rank` returns a dict — so a
+    Protocol check says nothing about the dict's KEYS. That is where the real drift
+    happened: `era_logit`/`erro`/`descartados` were renamed in the producer while two
+    hand-written fakes kept promising the old names, and only a test that read the
+    keys caught it.
+    """
+
     def test_the_fake_satisfies_the_protocol_without_inheriting_anything(self):
         from core.ports import RerankModel
         self.assertIsInstance(FakeReranker(), RerankModel)
+
+    @staticmethod
+    def _real_info_keys() -> set:
+        """The key set the REAL `Reranker.rank` produces, from a real call.
+
+        Port 1 on the loopback refuses instantly, so this needs no server and no DNS
+        (measured: ~5ms). The failure path is the right one to sample: `rank` promises
+        never to raise, so it has to return the full info dict even when the endpoint is
+        unreachable.
+        """
+        from core.reranking import Reranker
+        _, info = Reranker("http://127.0.0.1:1/rerank", "m", timeout=2.0).rank("q", ["a"])
+        assert info["ok"] is False, "expected the refused connection to fail, not succeed"
+
+        return set(info)
+
+    def test_the_fake_promises_no_key_the_real_reranker_lacks(self):
+        real = self._real_info_keys()
+        for label, fake in (("ok", FakeReranker(scores=[0.9])),
+                            ("failing", FakeReranker(ok=False, error="timeout"))):
+            _, info = fake.rank("q", ["a"])
+            extra = set(info) - real
+            self.assertEqual(extra, set(),
+                             f"the {label} fake invents {extra}, which no consumer can rely on")
+
+    def test_every_key_the_pipeline_reads_is_one_the_reranker_produces(self):
+        """Reads the keys out of `two_stage`'s source instead of restating them.
+
+        A restated list would have been renamed alongside the producer and kept agreeing
+        with it — the test has to observe the consumer, not mirror it.
+        """
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(retrieval.two_stage))
+        read = {
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "info" and node.args
+            and isinstance(node.args[0], ast.Constant)
+        }
+        self.assertTrue(read, "expected two_stage to read info keys; did the shape change?")
+        missing = read - self._real_info_keys()
+        self.assertEqual(missing, set(),
+                         f"two_stage reads {missing}, which Reranker.rank never sets")
 
 
 if __name__ == "__main__":

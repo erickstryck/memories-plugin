@@ -67,7 +67,7 @@ different angles beat one long query.
 | a precedent settles it | apply it, say it is precedent and cite the id. Do not re-derive. |
 | the memory records a **decision or veto** by the user | it holds. Do not re-propose what was vetoed; if you think it should change, say explicitly that it is a reversal, with the new evidence. |
 | the memory cites a file, a line, a flag or a version | **verify it against the current tree** before acting. |
-| the memory contradicts what you measured | the measurement wins — and then **fix the memory** (§2.4). Never leave a knowingly wrong memory standing. |
+| the memory contradicts what you measured | the measurement wins — and then **fix the memory** (§2.3). Never leave a knowingly wrong memory standing. |
 | nothing relevant | carry on, and consider whether the answer you are about to produce deserves saving. |
 
 ### The failure modes this exists to prevent

@@ -67,7 +67,7 @@ language, not just semantics. Consequences in the design:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 161 tests, no network, no dependencies
+python3 -m unittest discover -s tests    # 178 collected, 161 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 

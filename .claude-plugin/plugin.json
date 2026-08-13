@@ -1,7 +1,7 @@
 {
   "name": "memories-plugin",
   "description": "Long-term semantic memory with automatic recall on every prompt, plus an index for long documents (a permanent library and a temporary archive with TTL), on top of Qdrant",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Erick Batista"
   },

@@ -102,13 +102,13 @@ class ScoreContract(WireContract):
         return _pairs(response.get("data") or [], "score")
 
 
-def _pairs(lines: list, field: str) -> list[tuple[int, float]]:
+def _pairs(rows: list, field: str) -> list[tuple[int, float]]:
     output = []
-    for line in lines:
-        if not isinstance(line, dict):
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        idx = line.get("index")
-        value = line.get(field, line.get("relevance_score", line.get("score")))
+        idx = row.get("index")
+        value = row.get(field, row.get("relevance_score", row.get("score")))
         if not isinstance(idx, int) or value is None:
             continue
         output.append((idx, float(value)))

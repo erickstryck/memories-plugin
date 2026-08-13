@@ -86,7 +86,8 @@ def _check_rerank(cfg: Config) -> Check:
     scale = "raw logit (normalized to sigmoid)" if info["was_logit"] else "sigmoid 0..1"
     best = max(s for _, s in pairs)
     top_is_right = pairs[0][0] == 0
-    detail = f"{cfg.rerank_model} answers in {scale}; best score {best:.3f}"
+    detail = (f"{cfg.rerank_model} answers in {scale} via the {info['contract']} "
+              f"contract; best score {best:.3f}")
     if not top_is_right:
         return Check("Re-rank", False,
                      f"{detail} — but it ranked the WRONG answer first",
