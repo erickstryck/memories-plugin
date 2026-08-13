@@ -18,7 +18,13 @@ set -euo pipefail
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
+# DUAS localizações, e olhar só uma foi um defeito real: a config de MCP que o harness
+# de fato carrega no escopo `user` vive em ~/.claude.json, não em ~/.mcp.json. Este
+# script limpava o segundo, reportava "ok" para o servidor antigo e ele voltava a subir
+# em toda sessão nova — o falso "ok" é pior que a checagem faltando, porque ele afirma
+# que o trabalho foi feito.
 MCP="$HOME/.mcp.json"
+CLAUDE_JSON="$HOME/.claude.json"
 APPLY="${1:-}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -57,11 +63,29 @@ else
   ok "no manual hooks in settings.json"
 fi
 
-has_mcp="$(jq -r 'if .mcpServers["qdrant-memory"] then "yes" else "no" end' "$MCP" 2>/dev/null || echo no)"
-if [ "$has_mcp" = "yes" ]; then
-  note "qdrant-memory MCP server to remove from .mcp.json"
+mcp_in() { jq -e '.mcpServers["qdrant-memory"]' "$1" >/dev/null 2>&1; }
+has_mcp=no; has_mcp_user=no
+mcp_in "$MCP" && has_mcp=yes
+mcp_in "$CLAUDE_JSON" && has_mcp_user=yes
+if [ "$has_mcp" = yes ] || [ "$has_mcp_user" = yes ]; then
+  [ "$has_mcp" = yes ]      && note "qdrant-memory to remove from .mcp.json"
+  [ "$has_mcp_user" = yes ] && note "qdrant-memory to remove from .claude.json (user scope)"
 else
-  ok "no qdrant-memory MCP server in .mcp.json"
+  ok "no qdrant-memory MCP server in .mcp.json or .claude.json"
+fi
+
+# The old hand-made skills are auto-discovered from ~/.claude/skills — being absent from
+# settings.json does NOT unregister them. Left in place, `remember` keeps telling the
+# model to call mcp__qdrant-memory tools that no longer exist, and competes with the
+# plugin's own memory skill.
+retired=""
+for s in remember doc-index; do
+  [ -e "$HOME/.claude/skills/$s" ] && retired="$retired $s"
+done
+if [ -n "$retired" ]; then
+  note "superseded skill(s) to retire from ~/.claude/skills:$retired"
+else
+  ok "no superseded skills in ~/.claude/skills"
 fi
 
 if [ "$failed" -ne 0 ]; then
@@ -76,12 +100,15 @@ say "  settings.json:"
 say "    - removes the manual UserPromptSubmit hooks (recall and checkpoint)"
 say "    + registers the local marketplace $ROOT"
 say "    + enables the memories-plugin plugin (which brings the same two hooks)"
-say "  .mcp.json:"
-say "    - removes the qdrant-memory server (memory becomes the CLI)"
+say "  MCP server (memory becomes the CLI):"
+say "    - removes qdrant-memory from .mcp.json and from .claude.json (user scope)"
+say "  ~/.claude/skills:"
+say "    - retires the hand-made remember/ and doc-index/, which the plugin supersedes"
 say ""
 say "  UNCHANGED: the Qdrant collection, the memories, ~/.secrets, the URLs in .bashrc."
-say "  The old files in ~/.claude/hooks and ~/.claude/skills stay where they are,"
-say "  merely unregistered — delete them after a few sessions if you like."
+say "  The old hook files in ~/.claude/hooks stay where they are, merely unregistered"
+say "  (settings.json is what registers a hook). The skills are MOVED, not deleted,"
+say "  because ~/.claude/skills is auto-discovered — leaving them there keeps them live."
 
 if [ "$APPLY" != "--apply" ]; then
   say ""
@@ -121,9 +148,9 @@ else
   rm -f "$tmp"; fail "the settings.json transform did not produce valid JSON — nothing was swapped"
 fi
 
-# An INDEPENDENT step: if the one above fails, this one still has to be able to run (or
-# not run) on its own, rather than being aborted by `set -e` in the middle of the cutover.
-if [ "$has_mcp" = "yes" ]; then
+# INDEPENDENT steps: if one above fails, these still have to be able to run (or not run)
+# on their own, rather than being aborted by `set -e` in the middle of the cutover.
+if [ "$has_mcp" = yes ]; then
   tmp2="$(mktemp)"
   if jq 'del(.mcpServers["qdrant-memory"])' "$MCP" > "$tmp2" && jq -e . "$tmp2" >/dev/null 2>&1; then
     mv "$tmp2" "$MCP"; ok ".mcp.json updated"
@@ -132,9 +159,35 @@ if [ "$has_mcp" = "yes" ]; then
   fi
 fi
 
+# `claude mcp remove` rather than editing .claude.json here: that file also holds project
+# history and a running session rewrites it, so a hand-rolled read-modify-write can be
+# clobbered mid-flight. The CLI is the supported path; the manual fallback is printed on
+# failure rather than attempted.
+if [ "$has_mcp_user" = yes ]; then
+  cp "$CLAUDE_JSON" "$CLAUDE_JSON.bak-$STAMP" && ok "backup $CLAUDE_JSON.bak-$STAMP"
+  if command -v claude >/dev/null && claude mcp remove qdrant-memory -s user >/dev/null 2>&1; then
+    ok "qdrant-memory removed from user scope"
+  else
+    fail "could not remove it — run: claude mcp remove qdrant-memory -s user"
+  fi
+fi
+
+# Moved, never deleted: they are the user's files, and a wrong call here is trivially
+# reversible only if the originals still exist somewhere.
+if [ -n "$retired" ]; then
+  dest="$HOME/.claude/skills-retired-$STAMP"
+  mkdir -p "$dest"
+  for s in $retired; do
+    mv "$HOME/.claude/skills/$s" "$dest/" && ok "retired $s -> $dest/"
+  done
+fi
+
 say ""
 say "=== now ==="
 say "  1. Open a NEW terminal (or 'exec bash -l') and start claude from there."
-say "  2. Check in the log that there is ONE round per prompt, not two:"
+say "  2. Confirm the old MCP server does NOT come back — it is read at session start,"
+say "     so a running session keeps its process either way:"
+say "       ps -eo args | grep qdrant_memory | grep -v grep"
+say "  3. Check in the log that there is ONE round per prompt, not two:"
 say "       tail -f \"\${QCTX_STATE_DIR:-\$HOME/.memories-plugin/state}/recall.log\""
-say "  3. If anything goes wrong, the .bak-$STAMP backups restore the previous state."
+say "  4. If anything goes wrong, the .bak-$STAMP backups restore the previous state."
