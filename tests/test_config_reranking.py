@@ -75,6 +75,56 @@ class TestPrecedence(unittest.TestCase):
         self.assertEqual(cfgmod.read_file(self.file_path)["memory_collection"], "x")
 
 
+class TestTheProductionCollectionDefaultsArePinned(unittest.TestCase):
+    """HAZARD, stated so it cannot be changed by accident: with an EMPTY config and no
+    `QCTX_*` in the environment, the document tools reach the user's REAL archives.
+    `docs_collection` defaults to `memories_docs_tmp` and `library_collection` to
+    `memories_docs_library` — both live collections on this machine, the permanent one
+    holding kept reference material.
+
+    That IS the intended default: the two hosts share one archive by the user's decision, so
+    nothing here changes it. What was missing is that nothing recorded it — mutating either
+    name survived the whole suite, so neither the names nor the fact that an un-injected
+    Config reaches production was held anywhere. A tool call with no configuration
+    (`docs_refresh` and `docs_drop` have NO required arguments) therefore lands on the
+    operator's library, and every test that walks the tool surface has to inject a Config for
+    exactly this reason — see `tests/test_hermes_tools.py::setUpModule`, which guards it.
+
+    `memory_collection` is the counter-example and it must stay one: no default, and a read
+    that raises with instructions instead of silently searching some other collection.
+    """
+
+    #: A path that does not exist, so `read_file` returns {} and only the DEFAULTS remain.
+    #: `env={}` closes the other door — the real environment is never consulted here.
+    def _bare(self):
+        missing = Path(tempfile.mkdtemp()) / "no-config-here.json"
+
+        return cfgmod.load(missing, env={})
+
+    def test_the_document_defaults_are_the_users_real_production_archives(self):
+        cfg = self._bare()
+        self.assertEqual(cfg.docs_collection, "memories_docs_tmp")
+        self.assertEqual(cfg.library_collection, "memories_docs_library")
+        # And they resolve, i.e. the defaults are usable as-is: this is what makes an
+        # un-injected Config reach production instead of failing.
+        self.assertEqual(cfg.require_docs_collection(), "memories_docs_tmp")
+        self.assertEqual(cfg.require_library_collection(), "memories_docs_library")
+
+    def test_the_memory_collection_has_no_default_and_says_what_to_do(self):
+        cfg = self._bare()
+        self.assertEqual(cfg.memory_collection, "",
+                         "a defaulted memory collection would make a misconfigured install "
+                         "search the wrong archive and report no precedent")
+        with self.assertRaises(cfgmod.ConfigError) as ctx:
+            cfg.require_memory_collection()
+        self.assertIn("config set memory-collection", str(ctx.exception))
+
+    def test_the_defaults_table_and_a_bare_load_cannot_drift_apart(self):
+        cfg = self._bare()
+        for field in ("docs_collection", "library_collection", "memory_collection"):
+            self.assertEqual(getattr(cfg, field), cfgmod.DEFAULTS[field], field)
+
+
 class TestDerivedUrl(unittest.TestCase):
     def _config(self, **kw):
         base = dict(qdrant_url="", qdrant_api_key="", api_base_url="", api_key="",
