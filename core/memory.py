@@ -17,6 +17,7 @@ second gate does not run, the first one's permissive floor MUST go back to the s
 value, otherwise the mode with re-ranking ends up worse than the mode without, which
 is the opposite of the intent.
 """
+import json
 import uuid
 from dataclasses import dataclass
 
@@ -77,7 +78,6 @@ def metadata_from(meta=None, **fields) -> dict:
     elif isinstance(meta, dict):
         base = dict(meta)
     elif isinstance(meta, str):
-        import json
         try:
             parsed = json.loads(meta)
         except ValueError as exc:
