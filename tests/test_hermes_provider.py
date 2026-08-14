@@ -16,6 +16,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+import core
 from hosts.hermes import MemoriesProvider, register
 
 #: Where hermes is installed on this machine. The ABC IS importable from there (measured);
@@ -163,3 +164,99 @@ class TestManifest(unittest.TestCase):
         is not even considered a provider."""
         head = (REPO / "hosts" / "hermes" / "__init__.py").read_text()[:8192]
         self.assertTrue("register_memory_provider" in head or "MemoryProvider" in head)
+
+
+class TestPrefetch(unittest.TestCase):
+    """The read direction, through the hermes entry point.
+
+    The provider is driven with fakes injected into its store slot, so these run offline.
+    """
+
+    def _provider(self, hits, outcome):
+        from core.retrieval import Outcome  # noqa: F401  (documents the shape below)
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class FakeStore:
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return hits, outcome
+
+        p._store = FakeStore()
+        p._state_dir = Path(tempfile.mkdtemp())
+
+        return p
+
+    def test_a_populated_result_carries_the_rules_and_the_memory(self):
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        p = self._provider([FakeHit(id="m1", document="a durable fact", origin=CE)],
+                           Outcome(candidates=1, reranked=True))
+        out = p.prefetch("how does the poll paginate?")
+        self.assertIn("a durable fact", out)
+        self.assertIn("m1", out)
+        self.assertIn("PREVAILS", out, "the rules of use travel with the memory")
+
+    def test_an_empty_complete_result_says_there_is_no_precedent(self):
+        from core.retrieval import Outcome
+        p = self._provider([], Outcome(candidates=4, best_dense=0.31, reranked=True))
+        self.assertIn("There is no recorded precedent", p.prefetch("an absent subject"))
+
+    def test_a_partial_result_withdraws_the_claim(self):
+        from core.retrieval import Outcome
+        p = self._provider([], Outcome(candidates=27, best_dense=0.54,
+                                       suppressed="circuit breaker: 12s ago"))
+        out = p.prefetch("a subject that might have history")
+        self.assertNotIn("There is no recorded precedent", out)
+        self.assertIn("not evidence that no precedent exists", out)
+
+    def test_a_failure_reaches_the_MODEL_and_not_only_the_log(self):
+        """The central contract: silent to the user, never to the model."""
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class Broken:
+            def recall(self, *a, **kw):
+                raise core.EmbeddingError("endpoint down")
+
+        p._store = Broken()
+        p._state_dir = Path(tempfile.mkdtemp())
+        out = p.prefetch("a real question about the archive")
+        self.assertIn("UNAVAILABLE", out)
+        self.assertIn("was not consulted", out)
+
+    def test_an_unexpected_exception_also_reaches_the_model(self):
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class Exploding:
+            def recall(self, *a, **kw):
+                raise RuntimeError("something nobody predicted")
+
+        p._store = Exploding()
+        p._state_dir = Path(tempfile.mkdtemp())
+        self.assertIn("UNAVAILABLE", p.prefetch("a real question about the archive"))
+
+    def test_a_trivial_prompt_costs_nothing(self):
+        """hermes has its own is_trivial_prompt, but it is ENGLISH ONLY — measured: it does
+        not match "ok, pode continuar". The plugin's composed Portuguese filter runs too."""
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class Counting:
+            calls = 0
+
+            def recall(self, *a, **kw):
+                Counting.calls += 1
+
+                return [], None
+
+        p._store = Counting()
+        p._state_dir = Path(tempfile.mkdtemp())
+        for prompt in ("ok", "sim, pode ser", "ok, pode continuar", "/status"):
+            self.assertEqual(p.prefetch(prompt), "", prompt)
+        self.assertEqual(Counting.calls, 0, "a trivial prompt reached the network")
+
+    def test_the_system_prompt_block_is_static_and_not_the_recall(self):
+        block = MemoriesProvider().system_prompt_block()
+        self.assertIn("qctx memory", block)
+        self.assertNotIn("── ", block, "recalled memories go through prefetch, not here")

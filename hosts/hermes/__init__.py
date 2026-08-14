@@ -20,10 +20,13 @@ and `core` is never found. Only `realpath` resolves to the repo.
 VERSION REALITY. Written against hermes v0.20.0 as INSTALLED, not as published: the
 install has no `RecallStatus`, no `recall_status()` and no `unavailable_reason()`. Both
 methods are implemented anyway — inert where nothing calls them, working if hermes is
-upgraded — and `RecallStatus` is imported with a local fallback.
+upgraded. `RecallStatus` is imported lazily inside `recall_status()`, with its own
+`except ImportError: return None`, because importing it at module load would make the
+adapter fail to import at all against the installed v0.20.0.
 """
 import os
 import sys
+from pathlib import Path
 
 #: `realpath` first — see the module docstring. This is the one line that must not be
 #: "simplified" to abspath. Three `dirname()` calls, not two: this file lives at
@@ -35,11 +38,46 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import core  # noqa: E402
+from core import blocks, query, session_state  # noqa: E402
+from core.breaker import Breaker  # noqa: E402
+from core.prompts import INSTRUCTIONS  # noqa: E402
 
 try:  # hermes is present in production and absent in this repo's test run
     from agent.memory_provider import MemoryProvider as _Base
 except ImportError:
     _Base = object
+
+
+#: hermes runs an external provider's prefetch in a thread with this ceiling
+#: (`_EXTERNAL_PREFETCH_TIMEOUT_S` in agent/memory_manager.py, measured 8.0). The recall
+#: measures 0.5-1.7s against the real archive, so blocking is fine and a background queue
+#: would be complexity without a reason. The dependency timeouts below are derived from
+#: this the same way the claude-code hook derives its own: divided among the calls that
+#: will actually be made, never repeated per call.
+HERMES_PREFETCH_BUDGET_S = 8.0
+
+
+def _env(name: str, legacy: str, default: str) -> str:
+    return os.environ.get(name) or os.environ.get(legacy) or default
+
+
+def _env_num(name: str, legacy: str, default: str, kind=float):
+    """Read a number from the environment without letting a typo kill the provider.
+
+    Same tolerance the claude-code hook needed and for the same reason: this runs at import
+    time, before any guard, so `QCTX_RECALL_MAX_CHARS=14k` would otherwise take the whole
+    provider down instead of falling back.
+    """
+    raw = _env(name, legacy, default)
+    try:
+        return kind(raw)
+    except (TypeError, ValueError):
+        return kind(default)
+
+
+def _safe(session_id: str) -> str:
+    """A session id that is safe as a filename."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(session_id or "default"))
 
 
 class MemoriesProvider(_Base):
@@ -48,11 +86,32 @@ class MemoriesProvider(_Base):
     #: Must equal the install directory name — that is what `memory.provider` selects.
     name = "memories"
 
+    # -- tuning, read from the environment with the SAME names the claude-code hook uses --
+    #
+    # Identical names are not a nicety: the equivalence test extracts every QCTX_RECALL_*
+    # name from both adapters and requires the two sets to match, because a setting that
+    # moves one host and not the other is a configuration that only looks shared.
+    STRICT_FLOOR = _env_num("QCTX_RECALL_STRICT_FLOOR", "RECALL_MIN_SCORE", "0.58")
+    DENSE_FLOOR = _env_num("QCTX_RECALL_DENSE_FLOOR", "RECALL_DENSE_FLOOR", "0.45")
+    MIN_SCORE = _env_num("QCTX_RECALL_MIN_SCORE", "RECALL_RERANK_MIN_SCORE", "0.10")
+    MAX_MEMORIES = _env_num("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6", int)
+    MAX_CHARS = _env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
+    MAX_PER_MEM = _env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
+    BREAKER_SECONDS = _env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
+    QDRANT_BUDGET = _env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
+    TOP_K = int(_env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20"))
+
+    BUDGET = blocks.Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
+                           max_per_mem=MAX_PER_MEM,
+                           reinject_after=session_state.REINJECT_AFTER)
+
     def __init__(self):
         self._cfg = None
         self._store = None
         self._reason = ""
         self._session_id = ""
+        self._state_dir = None
+        self._last_count = 0
 
     # -- availability ---------------------------------------------------------
 
@@ -81,6 +140,12 @@ class MemoriesProvider(_Base):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id or "default"
+        # The contract says profile-scoped storage belongs under hermes_home, not at a
+        # path we hardcode. Absent the key (offline tests, an older hermes), `_state_path`
+        # falls back to the plugin's own directory below.
+        hermes_home = kwargs.get("hermes_home")
+        if hermes_home:
+            self._state_dir = Path(hermes_home) / "memories-state"
 
     def shutdown(self) -> None:
         self._store = None
@@ -89,13 +154,123 @@ class MemoriesProvider(_Base):
         return []          # Task 8 fills this
 
     def system_prompt_block(self) -> str:
-        return ""          # Task 5 fills this
+        """STATIC provider info. Recall goes through prefetch, never here."""
+        return (
+            "Long-term memory is available and searched automatically before each turn.\n"
+            "To search or write it yourself, use the memory tools, or the CLI:\n"
+            "  qctx memory recall \"<topic>\"   ·   qctx memory store \"<atomic fact>\"\n"
+            + INSTRUCTIONS
+        )
 
     def prefetch(self, query_text: str, *, session_id: str = "") -> str:
-        return ""          # Task 5 fills this
+        """Recall for the upcoming turn. NEVER raises, ALWAYS tells the model the truth.
+
+        Failure is degradation, not an exception: the turn must proceed. But an absent
+        result is indistinguishable from "there is no precedent" unless we say so, and a
+        model that reads silence goes on to call something unprecedented when nobody
+        looked. So every failure path returns the unavailability block rather than "".
+        """
+        try:
+            return self._prefetch(query_text, session_id or self._session_id)
+        except core.CoreError as exc:
+            return blocks.unavailable_block(type(exc).__name__, str(exc)[:200])
+        except BaseException as exc:  # noqa: BLE001 — see docstring
+            return blocks.unavailable_block("the memory provider",
+                                            f"{type(exc).__name__}: {exc}"[:200])
+
+    def _prefetch(self, query_text: str, session_id: str) -> str:
+        skip = query.skip_reason(query_text)
+        if skip:
+            return ""
+
+        angles = query.angles(query_text)
+        store = self._ensure_store(len(angles))
+        breaker = Breaker(self._state_path("rerank-breaker"), self.BREAKER_SECONDS)
+        idle = breaker.is_open()
+        suppressed = None
+        if idle is not None:
+            store.reranker = None
+            suppressed = f"circuit breaker: the re-rank failed {idle:.0f}s ago"
+
+        policy = core.Policy(dense_floor=self.DENSE_FLOOR, strict_floor=self.STRICT_FLOOR,
+                             min_score=self.MIN_SCORE, max_results=self.BUDGET.max_memories,
+                             veto=True, order_matters=False)
+        hits, outcome = store.recall(angles, policy, self.TOP_K, suppressed=suppressed)
+
+        if outcome is not None and outcome.rerank_error:
+            breaker.arm()
+        elif outcome is not None and outcome.by_rerank:
+            breaker.clear()
+
+        path = self._state_path(f"recall-{_safe(session_id)}.json")
+        state = session_state.load(path)
+        round_no = session_state.next_round(state)
+        seen = state.setdefault("seen", {})
+
+        if not hits:
+            session_state.prune(state)
+            session_state.save(path, state)
+            self._last_count = 0
+
+            return blocks.empty_block(outcome, len(angles))
+
+        full, pointers = blocks.split_by_budget(hits, seen, round_no, self.BUDGET)
+        session_state.prune(state)
+        session_state.save(path, state)
+        self._last_count = len(full)
+
+        return blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET)
 
     def recall_status(self):
-        return None        # Task 5 fills this
+        """Deterministic "recalled N" indicator. Absent from v0.20.0; free if upgraded."""
+        if not getattr(self, "_last_count", 0):
+            return None
+        try:
+            from agent.memory_provider import RecallStatus
+        except ImportError:
+            return None
+
+        return RecallStatus(provider_label="memories", count=self._last_count)
+
+    def _state_path(self, name: str):
+        """State lives under HERMES_HOME when hermes gives us one, and falls back to the
+        plugin's own directory — the same one the claude-code hook uses — otherwise. The
+        `initialize` contract says to use hermes_home for profile-scoped storage instead of
+        hardcoding a path."""
+        base = getattr(self, "_state_dir", None)
+        if base is None:
+            base = Path(os.environ.get("QCTX_STATE_DIR")
+                        or (Path.home() / ".memories-plugin" / "state"))
+            self._state_dir = base
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None          # state is a convenience; losing it must not cost a search
+
+        return base / name
+
+    def _ensure_store(self, n_angles: int):
+        """Build the memory store once per session, with timeouts DERIVED from the host's
+        prefetch ceiling rather than picked per call.
+
+        hermes runs an external provider's prefetch in a thread capped at
+        HERMES_PREFETCH_BUDGET_S. `recall` issues one vector search PER ANGLE, so a
+        per-call timeout multiplies by the angle count — that is exactly how the
+        claude-code hook's budget came to exceed its own host deadline. Dividing a total
+        among the calls that will actually be made does not multiply.
+        """
+        if self._store is not None:
+            return self._store
+        qdrant_calls = max(1, n_angles + 1)      # one existence check, then one per angle
+        share = HERMES_PREFETCH_BUDGET_S / 4.0   # embed + qdrant total + rerank + headroom
+        self._store = core.build_memory(
+            self._cfg or core.load(),
+            timeouts={"embed": share,
+                      "qdrant": share / qdrant_calls,
+                      "rerank": share},
+        )
+
+        return self._store
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         pass               # Task 7 fills this
