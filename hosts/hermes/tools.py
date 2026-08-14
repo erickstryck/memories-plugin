@@ -128,8 +128,15 @@ def _text(args: dict, name: str, *, blank_is_absent: bool = True):
     if value is None:
         return None
     if not isinstance(value, str):
+        # The hint is per-argument because this coercer serves more than `information`:
+        # `doc_id` runs through it too, and "send the text itself" is meaningless advice for
+        # an identifier. Every other coercer in this module names the argument AND what to do
+        # instead; a message that names the argument and then misdirects is worse than one
+        # that only names it.
+        hint = ("send the text itself" if name == "information"
+                else "send it as a string")
         raise ToolArgError(f"{name!r} must be a string, got {type(value).__name__} "
-                           f"({value!r}) — send the text itself")
+                           f"({value!r}) — {hint}")
     if not value.strip():
         if blank_is_absent:
             return None
