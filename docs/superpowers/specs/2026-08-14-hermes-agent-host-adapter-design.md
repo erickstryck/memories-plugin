@@ -2,6 +2,12 @@
 
 **Data:** 2026-08-14 · **Repo:** `memories-plugin` @ `2ceb111` · **Alvo:** hermes-agent v0.20.0 (2026.8.3)
 
+> **Correção de 2026-08-14, depois de ler o install real.** A primeira versão desta spec foi
+> escrita a partir do HEAD do GitHub, que está À FRENTE do que está instalado. Medido no
+> install (`~/.hermes/hermes-agent/agent/memory_provider.py`, 357 linhas contra 404 no HEAD):
+> `RecallStatus`, `recall_status()` e `unavailable_reason()` **não existem** na v0.20.0. O
+> desenho sobrevive — ver §3.3 — mas as afirmações foram corrigidas.
+
 ## 1. Objetivo
 
 Um plugin, dois hosts. O `memories-plugin` passa a ser importável pelo hermes-agent com as
@@ -34,9 +40,9 @@ O hermes expõe a ABC `MemoryProvider` (`agent/memory_provider.py`). O encaixe �
 | `on_turn_start(n, msg)` | contador de cadência | roda todo turno e **fornece** o número |
 | `system_prompt_block()` | `INSTRUCTIONS` | texto estático |
 | `get_tool_schemas()` / `handle_tool_call()` | 15 das 20 operações (§3.1) | formato OpenAI function-calling; retorno é string JSON |
-| `is_available()` / `unavailable_reason()` | `core.load()` + guardas | sem rede: só checa config |
-| `recall_status()` | `Outcome` | vira `RecallStatus(count)` — indicador determinístico |
-| `on_session_end(messages)` | **no-op deliberado** | ver §3.2 |
+| `is_available()` | `core.load()` + guardas | sem rede: só checa config |
+| `unavailable_reason()` · `recall_status()` | — | **não existem na v0.20.0**; implementados como forward-compat (§3.3) |
+| `on_session_end(messages)` | **no-op deliberado** | ver §3.4 |
 | `get_config_schema()` / `save_config()` | `core/config.py` | as 2 chaves de API marcadas `secret` → o hermes as manda para `.env` |
 | `shutdown()` | — | no-op |
 
@@ -50,7 +56,31 @@ O hermes expõe a ABC `MemoryProvider` (`agent/memory_provider.py`). O encaixe �
 A CLI `qctx` continua disponível nos dois hosts para as 20 — a restrição é sobre o que o
 **modelo** pode chamar sozinho.
 
-### 3.2 `on_session_end` é no-op nesta versão
+### 3.2 A versão instalada e o que ela não tem
+
+Medido no install, não no GitHub. A v0.20.0 expõe 19 métodos públicos e 4 abstratos
+(`name`, `is_available`, `initialize`, `get_tool_schemas`). Tem `is_trivial_prompt`,
+`queue_prefetch` e `sync_turn`. **Não** tem `RecallStatus`, `recall_status()` nem
+`unavailable_reason()`.
+
+Consequência de desenho: a visibilidade da degradação **não pode** depender de
+`recall_status()`. Ela já não depende — a nota de degradação viaja DENTRO do texto que o
+`prefetch` devolve, que é o mesmo mecanismo do claude-code. O indicador determinístico do
+hermes seria um bônus, não o contrato.
+
+### 3.3 Forward-compat: implementar o que ainda não é chamado
+
+`recall_status()` e `unavailable_reason()` são implementados de qualquer forma. Numa v0.20.0
+ninguém os chama, então são inertes; se o usuário atualizar o hermes, passam a funcionar sem
+tocar no plugin. Custo: duas funções curtas. `RecallStatus` é importado com fallback local,
+porque a classe não existe na versão instalada.
+
+Herança da ABC segue o mesmo padrão: `try: from agent.memory_provider import MemoryProvider`
+com fallback para `object`, porque a suíte de testes deste repo roda **sem** o hermes no path
+(ele tem venv próprio). O registro usa `register(ctx)` — o caminho preferido do loader, que
+não faz `issubclass` — então a herança é conveniência, não requisito.
+
+### 3.4 `on_session_end` é no-op nesta versão
 
 O claude-code não tem gancho de fim de sessão, e a exigência é equivalência. Implementar
 extração de fim de sessão só no hermes criaria uma assimetria de comportamento entre os dois
