@@ -21,8 +21,25 @@ import os
 import sys
 from pathlib import Path
 
-INTERVAL = int(os.environ.get("QCTX_CHECKPOINT_INTERVAL")
-                or os.environ.get("REMEMBER_INTERVAL") or "5")
+def _interval(default: str = "5") -> int:
+    """Read at module load, i.e. BEFORE main's guard — so it must not be able to raise.
+
+    Its sibling `recall.py` learned this the hard way and wrote it down: a malformed
+    number in the environment blew up before any of our code ran, and the user got a
+    traceback instead of the feature. This file had neither the tolerant read nor a
+    top-level guard, so `QCTX_CHECKPOINT_INTERVAL=5x` produced a traceback and a non-zero
+    exit on EVERY interaction of every session.
+    """
+    raw = os.environ.get("QCTX_CHECKPOINT_INTERVAL") or os.environ.get("REMEMBER_INTERVAL") or default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        print(f"checkpoint: {raw!r} is not a number — using {default}", file=sys.stderr)
+
+        return int(default)
+
+
+INTERVAL = _interval()
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
 PROCEDURE = """[memory checkpoint — writing to the long-term archive]
@@ -69,6 +86,23 @@ The commands are in the memory skill; the essence of the procedure is here."""
 
 
 def main() -> None:
+    """Armoured, like the recall hook.
+
+    This runs on every prompt. Anything it cannot do — an unwritable state directory, a
+    full disk — is a reason to inject nothing, never a reason to hand the host a
+    traceback and a non-zero exit on every interaction. Nothing here is load-bearing
+    enough to be worth failing loudly over: the worst outcome of silence is one skipped
+    checkpoint.
+    """
+    try:
+        _run()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — see docstring
+        print(f"checkpoint: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _run() -> None:
     if os.environ.get("QCTX_CHECKPOINT_DISABLED") == "1":
         return
 

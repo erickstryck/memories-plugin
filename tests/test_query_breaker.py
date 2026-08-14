@@ -33,6 +33,28 @@ class TestSkipping(unittest.TestCase):
                   "ok obrigado", "isso, pode fazer"):
             self.assertEqual(skip_reason(p), "trivial prompt", p)
 
+    def test_an_acknowledgement_carrying_only_structural_words_is_skipped(self):
+        """The production escape. `ser`, `de`, `isso` are not in TRIVIAL_WORDS but they
+        are in STOPWORDS, i.e. the package already asserts they carry no meaning. Applying
+        the two sets separately let a three-word "go ahead" buy a full network search —
+        measured: "sim, pode ser" injected a memory at CE 0.110."""
+        for p in ("sim, pode ser", "ok, pode ser isso", "isso, pode ser"):
+            self.assertEqual(skip_reason(p), "trivial prompt", p)
+
+    def test_a_word_in_NEITHER_set_is_content_and_keeps_the_search(self):
+        """Written after this test's first version got it wrong. "isso, pode ser assim"
+        looks like an acknowledgement, but `assim` is in neither set — so by the rule the
+        package actually implements it is content, and the search stands. Recording the
+        boundary here is worth more than quietly adjusting the case that failed."""
+        self.assertIsNone(skip_reason("isso, pode ser assim"))
+
+    def test_composing_the_sets_does_not_swallow_a_real_question(self):
+        """The guard on the guard: one word in neither set is content, and content keeps
+        the search. If this ever fails, the composition became too aggressive."""
+        for p in ("ok, pode continuar o poll", "sim, e a paginação?",
+                  "isso, pode ser no conector novo"):
+            self.assertIsNone(skip_reason(p), p)
+
     def test_confirmation_with_ONE_content_word_is_not_skipped(self):
         """"pode continuar o poll" has a subject: `poll`. It must not be discarded."""
         self.assertIsNone(skip_reason("ok, pode continuar o poll"))

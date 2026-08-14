@@ -16,6 +16,24 @@ class QdrantError(CoreError):
     pass
 
 
+def _is_absent(exc: QdrantError) -> bool:
+    """Whether the failure means "it is not there", decided by STATUS.
+
+    The rule was already written down twenty lines below, when `request` started
+    attaching the status to the exception: telling a 404 apart by a substring of the
+    message breaks the day the message changes. Both readers then went on to do exactly
+    that, and `status` was populated for nobody.
+
+    It is not hypothetical. This Qdrant sits behind a reverse proxy, and proxies echo
+    upstream statuses into their own error bodies. A 502 whose body reads
+    "upstream error: backend returned HTTP 404 while reloading" was read as "the
+    collection does not exist" — so `ensure_collection` believed it was absent and
+    `setup --check` reported it would be created on first use, which is precisely how a
+    dimension mismatch slips past the guard that exists to catch it.
+    """
+    return getattr(exc, "status", None) == 404
+
+
 class Qdrant:
     def __init__(self, base_url: str, api_key: str = "", timeout: float = 30.0):
         self.base = base_url.rstrip("/")
@@ -51,7 +69,7 @@ class Qdrant:
         try:
             res = self.request("GET", f"/collections/{name}")
         except QdrantError as exc:
-            if "HTTP 404" in str(exc):
+            if _is_absent(exc):
                 return None
             raise
         result = res.get("result", {})
@@ -120,7 +138,7 @@ class Qdrant:
         try:
             res = self.request("GET", f"/collections/{name}/points/{point_id}")
         except QdrantError as exc:
-            if "HTTP 404" in str(exc):
+            if _is_absent(exc):
                 return None
             raise
 

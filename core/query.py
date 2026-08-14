@@ -74,8 +74,21 @@ def _only_confirmation(text: str) -> bool:
     words = [p for p in WORD_RE.findall(text.lower()) if p.strip()]
     if not words:
         return False
+    # STOPWORDS count as trivial here, and composing the two sets is the point. They were
+    # applied separately before, so an acknowledgement holding one structural word slipped
+    # through: measured in production, "sim, pode ser" — `sim` and `pode` are TRIVIAL_WORDS,
+    # `ser` is not, but it IS a STOPWORD, i.e. the package already asserts it carries no
+    # meaning. The prompt cleared the 12-char minimum, bought a full search, and injected a
+    # memory at CE 0.110 for a three-word "go ahead".
+    #
+    # This cannot make the filter too aggressive: a word in neither set is content, and one
+    # content word is enough to keep the search. "ok, pode continuar o poll" still searches,
+    # because `poll` is in neither.
+    meaningful = [p for p in words if p not in STOPWORDS]
+    if not meaningful:
+        return True
 
-    return all(p in TRIVIAL_WORDS for p in words)
+    return all(p in TRIVIAL_WORDS for p in meaningful)
 
 
 def skip_reason(prompt: str) -> str | None:

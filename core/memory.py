@@ -127,7 +127,8 @@ class MemoryStore:
         if point is None:
             return {"status": "not_found", "id": mid}
         previous = point.get("payload", {})
-        new_doc = information if information is not None else previous.get("document", "")
+        previous_doc = previous.get("document", "")
+        new_doc = information if information is not None else previous_doc
         new_meta = metadata if metadata is not None else previous.get("metadata", {})
         payload = {"document": new_doc, "metadata": new_meta,
                    "created_at": previous.get("created_at", _now()), "updated_at": _now()}
@@ -136,7 +137,12 @@ class MemoryStore:
         # round trip to get the same number back. Worse, it made fixing a label
         # impossible while the embedding endpoint was down — an operation that does not
         # depend on it.
-        if new_doc == previous.get("document"):
+        # Compared against the SAME default the fallback used. Reading it twice with
+        # different defaults meant a payload with no `document` key produced "" on one
+        # side and None on the other: they compared unequal, so a metadata-only update
+        # took the re-embed branch, embedded the empty string and REPLACED the point's
+        # vector. It corrupted rather than failed, which is the worse of the two.
+        if new_doc == previous_doc:
             self.q.set_payload(self.collection, mid, payload)
 
             return {"status": "updated", "id": mid, "reembedded": False}
@@ -232,6 +238,13 @@ class MemoryStore:
                         metadata=h["metadata"], updated_at=h.get("updated_at"))
 
     def get(self, mid: str) -> dict:
+        # `require_existing` here for the same reason `find` and `recall` have it, and it
+        # was missing on exactly the entry point the memory skill tells the model to use
+        # when following a pointer. With a typo in the collection name a real, existing id
+        # came back as `not_found` — which reads as "that memory was deleted", not "you
+        # are looking in the wrong place". A read must never turn a configuration mistake
+        # into a statement about the archive's contents.
+        self.require_existing()
         point = self.q.get_point(self.collection, mid)
         if point is None:
             return {"status": "not_found", "id": mid}
@@ -254,6 +267,12 @@ class MemoryStore:
         return {"count": len(memories), "memories": memories, "next_offset": next_offset}
 
     def count(self) -> int | None:
+        """Points in the collection, or None when it does not exist yet.
+
+        NOT `require_existing`: None here is a real answer with a real use — the wizard
+        and `setup --check` call this to decide whether a collection is worth suggesting,
+        before anything has been written. The caller distinguishes None from 0.
+        """
         info = self.q.collection_info(self.collection)
 
         return info.get("points") if info else None

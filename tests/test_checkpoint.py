@@ -73,6 +73,25 @@ class TestCheckpointFires(unittest.TestCase):
         self.assertEqual(proc.stdout.strip(), "")
         self.assertEqual(proc.returncode, 0)
 
+    def test_a_malformed_interval_does_not_kill_the_hook(self):
+        """Read at module load, before any guard could catch it. A single bad env var
+        produced a traceback and exit 1 on every interaction of every session."""
+        env = dict(os.environ, QCTX_STATE_DIR=self.tmp.name, QCTX_CHECKPOINT_INTERVAL="5x")
+        env.pop("QCTX_CHECKPOINT_DISABLED", None)
+        proc = subprocess.run([sys.executable, str(HOOK)], input='{"session_id":"bad"}',
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("not a number", proc.stderr, "falling back silently hides the typo")
+
+    def test_an_unwritable_state_dir_does_not_kill_the_hook(self):
+        env = dict(os.environ, QCTX_STATE_DIR="/proc/impossible/state",
+                   QCTX_CHECKPOINT_INTERVAL="1")
+        env.pop("QCTX_CHECKPOINT_DISABLED", None)
+        proc = subprocess.run([sys.executable, str(HOOK)], input='{"session_id":"x"}',
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "", "no state means no checkpoint, not a crash")
+
     def test_sessions_count_independently(self):
         run_hook("alpha", "2", self.tmp.name)
         # A second session starting from zero must not inherit alpha's count.

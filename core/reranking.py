@@ -157,12 +157,14 @@ class Reranker:
             return [], info
 
         info["dropped"] = max(0, len(documents) - self.max_docs)
-        candidates = [d[:self.doc_chars] for d in documents[:self.max_docs]]
-        # READING the response stays INSIDE the try: a server answering with a list, or
-        # with a score as a string, made the parse blow up and broke the "never raises"
-        # promise — precisely on an unexpected response, which is when the promise
-        # matters.
+        # Preparing the input stays inside the try for the same reason reading the
+        # response does. `d[:self.doc_chars]` raises TypeError on anything that is not a
+        # string, and "NEVER raises" has to hold against a caller's mistake too —
+        # otherwise the promise is only kept while nothing goes wrong, which is when no
+        # promise is needed. Reachable today only because `_flatten_hit` guarantees
+        # strings; guarantees held by a distant collaborator are the ones that lapse.
         try:
+            candidates = [d[:self.doc_chars] for d in documents[:self.max_docs]]
             response = post_json(self.url,
                                  self.contract.body(self.model, query[:self.query_chars], candidates),
                                  headers=bearer(self.api_key), timeout=self.timeout)
