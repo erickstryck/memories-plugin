@@ -582,5 +582,47 @@ class TestTheWiringFromOutside(unittest.TestCase):
         self.assertEqual(int(count), 15)
 
 
+class TestTheRealHostAcceptsThem(unittest.TestCase):
+    """Read the acceptance rules off the INSTALL, not off the published documentation.
+
+    Both checks here guard SILENT drops. hermes normalizes every schema and skips the ones
+    it cannot resolve a name from; it also refuses any tool whose name shadows a built-in,
+    logging a warning nobody reads and leaving the model without the tool. Neither failure
+    is visible from inside this repo, so the rules are imported from the install.
+    """
+
+    @unittest.skipUnless(HERMES_INSTALL.exists(), "hermes-agent not installed here")
+    def test_the_hosts_own_normalizer_resolves_every_schema(self):
+        script = (
+            "import json, sys\n"
+            "sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
+            "from agent.memory_manager import normalize_tool_schema\n"
+            "from hosts.hermes import tools\n"
+            "print(json.dumps([normalize_tool_schema(s) is not None and\n"
+            "                  normalize_tool_schema(s)['name'] for s in tools.SCHEMAS]))\n"
+        ) % (str(REPO), str(HERMES_INSTALL))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(set(json.loads(out.stdout)), EXPECTED,
+                         "a schema the host cannot resolve a name from is skipped silently")
+
+    @unittest.skipUnless(HERMES_INSTALL.exists(), "hermes-agent not installed here")
+    def test_no_tool_name_shadows_a_built_in(self):
+        """A provider tool named like a core tool is rejected at registration (#40466 in
+        the host's own comment): built-ins always win, and the model never sees ours."""
+        script = (
+            "import json, sys\n"
+            "sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
+            "from toolsets import _HERMES_CORE_TOOLS\n"
+            "from hosts.hermes import tools\n"
+            "names = {s['name'] for s in tools.SCHEMAS}\n"
+            "print(json.dumps(sorted(names & set(_HERMES_CORE_TOOLS))))\n"
+        ) % (str(REPO), str(HERMES_INSTALL))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), [],
+                         "these names collide with hermes' own tools and would be dropped")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

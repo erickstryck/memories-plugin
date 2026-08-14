@@ -293,5 +293,270 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
                                places=6)
 
 
+def load_cli():
+    """Imports cli/qctx.py as a module. It is a script, not a package member."""
+    import importlib.util
+    path = REPO / "cli" / "qctx.py"
+    spec = importlib.util.spec_from_file_location("qctx_cli_equiv", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    return mod
+
+
+def cli_operations() -> set:
+    """Every leaf subcommand the CLI offers, as `group_action` names.
+
+    Derived by walking the real parser rather than restated, so an operation added to one
+    host and not the other shows up here instead of being noticed in production. The
+    dash-to-underscore mapping is the only convention: `qctx memory store-many` is the
+    `memory_store_many` tool.
+    """
+    def leaves(parser, path=()):
+        subs = getattr(parser, "_subparsers", None)
+        if not subs:
+            yield path
+
+            return
+        for action in subs._group_actions:
+            for name, sub in getattr(action, "choices", {}).items():
+                yield from leaves(sub, path + (name,))
+
+    return {"_".join(path).replace("-", "_") for path in leaves(load_cli().build_parser())}
+
+
+class TestBothHostsOfferTheSameOperations(unittest.TestCase):
+    """The INVOCABLE surface, held to the CLI's.
+
+    Recall and the checkpoint cadence are pushed at the model; these are what it can reach
+    for. The claim is not that the two surfaces are equal — five operations are deliberately
+    out of the model's reach — but that the difference is exactly those five, and that what
+    is offered on both does the same thing. Name parity alone would not show the second
+    half: see TestTheToolsDoWhatTheCLIDoes below.
+    """
+
+    #: Deliberately not tools. Configuration belongs to the operator: a `config set` tool
+    #: would let the model point the archive somewhere else mid-conversation, and `setup` is
+    #: interactive. The CLI keeps all of them.
+    NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
+                         "config_detect"}
+
+    def setUp(self):
+        from hosts.hermes import tools
+        self.tool_names = {s["name"] for s in tools.SCHEMAS}
+        self.cli_names = cli_operations()
+
+    def test_the_cli_walk_found_the_whole_surface(self):
+        """A guard on the derivation itself: if the walk broke, every assertion below would
+        pass over an empty set."""
+        self.assertGreater(len(self.cli_names), 15)
+        self.assertIn("memory_store", self.cli_names)
+        self.assertIn("docs_drop", self.cli_names)
+
+    def test_every_tool_is_an_operation_the_cli_also_offers(self):
+        """A tool with no CLI equivalent is an operation only one host has — the divergence
+        this file exists to prevent, in the other direction."""
+        orphans = self.tool_names - self.cli_names
+        self.assertEqual(orphans, set(),
+                         f"only hermes can do these: {orphans}")
+
+    def test_the_only_cli_operations_withheld_are_the_five_named_ones(self):
+        withheld = self.cli_names - self.tool_names
+        self.assertEqual(withheld, self.NOT_FOR_THE_MODEL,
+                         "the model's surface drifted from the CLI's by something other "
+                         "than the configuration commands")
+
+    def test_no_configuration_operation_became_reachable(self):
+        for name in self.NOT_FOR_THE_MODEL:
+            self.assertNotIn(name, self.tool_names)
+
+
+class TestTheToolsDoWhatTheCLIDoes(unittest.TestCase):
+    """Semantic parity, because name parity is not it.
+
+    A test comparing only the NAMES of things passes over real divergence in what they do —
+    the lesson the tuning-knob tests above already encode. So each case here drives the CLI
+    handler and the hermes tool over the SAME fake archive and compares what landed in it,
+    or what came back, rather than comparing two restatements of the intent.
+    """
+
+    def setUp(self):
+        from core.docs import DocIndex
+        from core.memory import MemoryStore
+        from tests.fakes import FakeEmbedder, FakeVectorStore
+        self.cli = load_cli()
+        self.q, emb = FakeVectorStore(), FakeEmbedder()
+        self.q.ensure_collection("mem", emb.dim)
+        self.store = MemoryStore(self.q, emb, None, "mem", emb.dim)
+        #: What both hosts get when they build their memory access. A test that needs to
+        #: observe HOW they call it (the policy case below) swaps this for a recorder — one
+        #: object for both hosts, so neither can be observed through a different door.
+        self.memory = self.store
+        self.idx = DocIndex(self.q, emb, None, "tmp", "lib", emb.dim)
+        # A Config that reaches nothing: both hosts get their archive injected below, but a
+        # tool call with no configuration at all is refused by design, so the object has to
+        # exist.
+        self.cfg = core_module().Config(
+            qdrant_url="http://localhost:1", qdrant_api_key="", api_base_url="",
+            api_key="", embed_url="http://localhost:1/embeddings", rerank_url="",
+            embed_model="m", rerank_model="", memory_collection="mem",
+            docs_collection="tmp", library_collection="lib", vector_size=emb.dim)
+
+    def _payload_of(self, mid) -> dict:
+        p = dict(self.q.get_point("mem", mid)["payload"])
+        # The timestamps and the id differ by construction — one call happened after the
+        # other, and ids are uuid4. What must match is everything the CALLER decided.
+        for volatile in ("created_at", "updated_at"):
+            p.pop(volatile, None)
+
+        return p
+
+    def _through_the_cli(self, handler, **args):
+        import io
+        import unittest.mock
+        from contextlib import redirect_stdout
+
+        class Args:
+            def __init__(self, **kw):
+                self.json = True
+                self.json_meta = None
+                self.type = self.project = self.area = None
+                self.text = self.id = None
+                self.__dict__.update(kw)
+
+        out = io.StringIO()
+        with unittest.mock.patch.object(self.cli.core, "build_memory",
+                                       lambda cfg, **kw: self.memory), \
+             unittest.mock.patch.object(self.cli.core, "build_docs", lambda cfg: self.idx), \
+             redirect_stdout(out):
+            handler(Args(**args), self.cfg)
+
+        return out.getvalue()
+
+    def _through_the_tool(self, name, **args):
+        import unittest.mock
+        from hosts.hermes import tools
+        with unittest.mock.patch.object(core_module(), "build_memory",
+                                       lambda cfg, **kw: self.memory), \
+             unittest.mock.patch.object(core_module(), "build_docs", lambda cfg: self.idx):
+            return json.loads(tools.dispatch(name, args, cfg=self.cfg))
+
+    def test_store_lands_the_same_record_from_both_hosts(self):
+        """Same fact, same labels, one written through `qctx memory store` and one through
+        the `memory_store` tool. The stored payload has to be indistinguishable."""
+        self._through_the_cli(self.cli.cmd_memory_store,
+                              text="a durable fact about pagination",
+                              json_meta='{"custom": 1}', type="reference", project="p")
+        cli_mid = next(iter(self.q.collections["mem"]["points"]))
+        tool_mid = self._through_the_tool("memory_store",
+                                         information="a durable fact about pagination",
+                                         metadata={"custom": 1}, type="reference",
+                                         project="p")["id"]
+        self.assertNotEqual(cli_mid, tool_mid, "two writes, two records")
+        self.assertEqual(self._payload_of(cli_mid), self._payload_of(tool_mid))
+
+    def test_the_shortcut_precedence_is_the_same_on_both_hosts(self):
+        """`--type` overriding a `type` already in the metadata object is a rule, and a rule
+        settled twice can be settled differently."""
+        self._through_the_cli(self.cli.cmd_memory_store, text="a fact",
+                              json_meta='{"type": "old", "keep": true}', type="new")
+        cli_mid = next(iter(self.q.collections["mem"]["points"]))
+        tool_mid = self._through_the_tool("memory_store", information="a fact",
+                                         metadata={"type": "old", "keep": True},
+                                         type="new")["id"]
+        self.assertEqual(self._payload_of(cli_mid)["metadata"],
+                         {"type": "new", "keep": True})
+        self.assertEqual(self._payload_of(cli_mid), self._payload_of(tool_mid))
+
+    def test_a_text_only_update_keeps_the_labels_on_both_hosts(self):
+        """The `{}` versus None trap: an assembled empty object REPLACES the metadata. Both
+        hosts have to pass None, or one of them silently strips the labels."""
+        for label, write in (("cli", lambda mid: self._through_the_cli(
+                                 self.cli.cmd_memory_update, id=mid, text="corrected")),
+                             ("tool", lambda mid: self._through_the_tool(
+                                 "memory_update", id=mid, information="corrected"))):
+            with self.subTest(host=label):
+                mid = self.store.store("original", {"type": "reference",
+                                                    "project": "p"})["id"]
+                write(mid)
+                self.assertEqual(self.q.get_point("mem", mid)["payload"]["metadata"],
+                                 {"type": "reference", "project": "p"},
+                                 f"{label} wiped the labels of a text-only update")
+
+    def test_recall_reports_the_same_two_halves_on_both_hosts(self):
+        self.store.store("a durable fact about pagination cursors")
+        cli_json = json.loads(self._through_the_cli(
+            self.cli.cmd_memory_recall, query="pagination cursors", limit=6,
+            dense_floor=0.45, strict_floor=0.58, min_score=0.10, top_k=20))
+        tool_json = self._through_the_tool("memory_recall", query="pagination cursors")
+        self.assertEqual(set(cli_json), set(tool_json), {"info", "hits"})
+        self.assertEqual(set(cli_json["info"]), set(tool_json["info"]),
+                         "the trail a consumer reads must have the same fields on both")
+        self.assertEqual([h["document"] for h in cli_json["hits"]],
+                         [h["document"] for h in tool_json["hits"]])
+        self.assertEqual(set(cli_json["hits"][0]), set(tool_json["hits"][0]))
+
+    def test_recall_runs_the_same_policy_on_both_hosts(self):
+        """The CLI's argparse defaults and the hermes tool's floors are the same numbers,
+        read from what each host ACTUALLY handed to `MemoryStore.recall` — not from a
+        restatement of either. A host that relaxed a floor would return memories the other
+        one refuses, which is the divergence that matters and is invisible in the names."""
+        captured = {}
+
+        class Recording:
+            reranker = None
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                captured[len(captured)] = (policy, top_k)
+
+                return [], Outcome(candidates=0)
+
+        self.memory = Recording()
+        self._through_the_cli(self.cli.cmd_memory_recall, query="a topic", limit=6,
+                              dense_floor=0.45, strict_floor=0.58, min_score=0.10,
+                              top_k=20)
+        self._through_the_tool("memory_recall", query="a topic")
+        self.assertEqual(len(captured), 2, "both hosts have to have reached the store")
+        (cli_policy, cli_top_k), (tool_policy, tool_top_k) = captured[0], captured[1]
+        self.assertEqual(cli_policy, tool_policy,
+                         "the two hosts search long-term memory with different policies")
+        self.assertEqual(cli_top_k, tool_top_k)
+
+    def test_drop_takes_the_same_decision_on_both_hosts(self):
+        """Both route through `DocIndex.drop_request`, so the three shapes and the refusal
+        cannot be settled differently. Observed through the SHARED method being called with
+        the same arguments, plus the archive state afterwards."""
+        import unittest.mock
+        path = os.path.join(tempfile.mkdtemp(), "doc.md")
+        Path(path).write_text("# Title\n\nbody about pagination\n")
+        calls = []
+        real = self.idx.drop_request
+
+        def recording(*a, **kw):
+            calls.append((a, kw))
+
+            return real(*a, **kw)
+
+        with unittest.mock.patch.object(self.idx, "drop_request", recording):
+            kept = self.idx.keep_file(path)
+            self._through_the_cli(self.cli.cmd_docs_drop, doc_id=kept["doc_id"],
+                                  scope="library", purge_tmp=False, expired=False)
+            self.assertEqual(len(self.q.collections["lib"]["points"]), 0)
+            self.idx.keep_file(path)
+            self._through_the_tool("docs_drop", doc_id=kept["doc_id"], scope="library")
+            self.assertEqual(len(self.q.collections["lib"]["points"]), 0)
+        self.assertEqual(len(calls), 2, "one of the hosts did not route through the core")
+        cli_call, tool_call = calls
+        self.assertEqual((cli_call[0][0], cli_call[0][1]), (tool_call[0][0], tool_call[0][1]))
+        self.assertEqual(cli_call[1], tool_call[1])
+
+
+def core_module():
+    """The `core` module object the tools module resolves — the same one, patched once."""
+    import core
+
+    return core
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
