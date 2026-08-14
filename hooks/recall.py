@@ -266,11 +266,14 @@ def _run() -> None:
     round_no = st.next_round(state)
     seen_map = state.setdefault("seen", {})
     if not isinstance(seen_map, dict):
-        # A state file can hold valid JSON with a wrong-typed `seen` (a hand-edited file,
-        # a future format change). `split_by_budget` below calls `seen.get(...)` and
-        # `seen[...] = ...` on this value; without the guard, a search that had already
-        # succeeded got its hits thrown away and the model was told the archive had not
-        # been consulted — the exact failure this module exists to prevent.
+        # core.blocks.split_by_budget already degrades a non-dict `seen` to "nothing has
+        # been seen" on its own — it will not raise or drop hits. But it does so on a
+        # LOCAL substitute, on purpose: "the caller owns persistence" (see its docstring),
+        # so it never reaches back into `state["seen"]` to fix it. Without this guard the
+        # corruption would never heal: every round from here on would silently lose the
+        # dedup memory again, forever, instead of just this one. Replacing it here means
+        # the very next `st.save` below persists a clean `{}`, and dedup comes back next
+        # round.
         seen_map = {}
         state["seen"] = seen_map
 

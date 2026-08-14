@@ -45,8 +45,14 @@ def split_by_budget(hits, seen, round_no, budget):
     anything, and the slot it frees reveals MORE of the archive.
 
     Mutates `seen` on purpose — the caller owns persistence, and threading a returned copy
-    through every adapter would be ceremony for the same effect.
+    through every adapter would be ceremony for the same effect. A non-dict `seen` (a
+    hand-edited state file, a future format change) degrades to "nothing has been seen":
+    everything is treated as fresh and nothing is marked, rather than raising. Losing the
+    dedup memory costs one memory reinjected once — it must never cost the search that
+    already ran.
     """
+    if not isinstance(seen, dict):
+        seen = {}
     full_hits, pointers = [], []
     remaining = budget.max_chars
     for h in hits:

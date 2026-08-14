@@ -138,3 +138,27 @@ class TestBudget(unittest.TestCase):
         out = blocks.recall_block([big], [], 2, Outcome(candidates=1, reranked=True), BUDGET)
         self.assertIn("truncated at", out)
         self.assertIn("big1", out)
+
+
+
+class TestBudgetWithACorruptedSeen(unittest.TestCase):
+    """`seen` is loaded from a state file the caller does not fully control (a hand-edited
+    file, a future format change). A non-dict `seen` must degrade to "nothing has been
+    seen" — everything goes to `full` subject to the budget, nothing raises, nothing marks
+    a memory as seen (there is nothing sane to mark it ON). Losing the dedup memory costs
+    one memory reinjected once; it must never cost the search that already ran.
+    """
+
+    def test_a_string_seen_treats_everything_as_unseen(self):
+        hits = [FakeHit(id="a"), FakeHit(id="b")]
+        full, pointers = blocks.split_by_budget(hits, "corrupted", round_no=5, budget=BUDGET)
+        self.assertEqual([h.id for h in full], ["a", "b"])
+        self.assertEqual(pointers, [])
+
+    def test_a_list_seen_treats_everything_as_unseen(self):
+        full, _ = blocks.split_by_budget([FakeHit(id="a")], ["a"], round_no=5, budget=BUDGET)
+        self.assertEqual([h.id for h in full], ["a"])
+
+    def test_a_None_seen_treats_everything_as_unseen(self):
+        full, _ = blocks.split_by_budget([FakeHit(id="a")], None, round_no=5, budget=BUDGET)
+        self.assertEqual([h.id for h in full], ["a"])
