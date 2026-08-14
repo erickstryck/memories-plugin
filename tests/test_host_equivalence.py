@@ -153,6 +153,55 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
         self.assertEqual(out.stdout.split(),
                          ["shared_memory", "shared_tmp", "shared_library"])
 
+    def test_the_hermes_wizard_writes_what_claude_code_actually_loads(self):
+        """The claim this task adds: `hermes memory setup` -> `save_config` writes the
+        SAME file the test above proves claude-code reads. The test above writes the file
+        by hand, which only proves the FILE FORMAT is shared; it says nothing about the
+        wizard's own write path. This one drives that path — `MemoriesProvider.save_config`
+        — and reads the result back through `core.load()`, the exact function claude-code's
+        hook and CLI call.
+
+        Also proves the merge half of the same claim: a field neither wizard call ever
+        named (`embed_model`) has to survive, because the user may already be running
+        claude-code against this file when they open the hermes wizard, and clobbering it
+        would break a session that has nothing to do with the setup flow.
+
+        Runs entirely in ONE subprocess with QCTX_CONFIG set in its environment before
+        launch: `core.config.DEFAULT_CONFIG_PATH` is computed once at import time
+        (core/config.py:22-25), so setting the variable any later — or in a second,
+        separate subprocess without re-passing it — would silently miss the file this test
+        just wrote and either fail loudly (nonexistent path) or, worse, land on whatever
+        path was frozen in by an earlier import in this process, which could be the
+        operator's real config.
+        """
+        cfg_dir = Path(tempfile.mkdtemp())
+        cfg_path = cfg_dir / "config.json"
+        cfg_path.write_text(json.dumps({"embed_model": "already-configured-model"}))
+        env = dict(os.environ, QCTX_CONFIG=str(cfg_path))
+        script = (
+            "import sys, json; sys.path.insert(0, %r)\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "MemoriesProvider().save_config({\n"
+            "    'qdrant_url': 'http://example.invalid/qdrant',\n"
+            "    'api_base_url': 'http://example.invalid/v1',\n"
+            "    'memory_collection': 'wizard_shared_memory',\n"
+            "    'docs_collection': 'wizard_shared_tmp',\n"
+            "    'library_collection': 'wizard_shared_library',\n"
+            "}, %r)\n"
+            "import core\n"
+            "cfg = core.load()\n"
+            "print(cfg.require_memory_collection())\n"
+            "print(cfg.require_docs_collection())\n"
+            "print(cfg.require_library_collection())\n"
+            "print(cfg.embed_model)\n"
+        ) % (str(REPO), str(cfg_dir))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.split(),
+                         ["wizard_shared_memory", "wizard_shared_tmp",
+                          "wizard_shared_library", "already-configured-model"])
+
     def test_the_tuning_knobs_have_the_same_names_in_both_hosts(self):
         """Equivalent CONFIGURATION means the same env var moves the same number in both.
         Read from each adapter's source rather than restated, so a rename in one shows up
