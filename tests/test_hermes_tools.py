@@ -849,6 +849,38 @@ class TestTheWiringFromOutside(unittest.TestCase):
         out = self._run("print(json.dumps([s['name'] for s in provider.get_tool_schemas()]))\n")
         self.assertEqual(set(json.loads(out)), EXPECTED)
 
+    def test_the_setup_wizard_surface_survives_the_real_loader_too(self):
+        """The config wizard's two methods, driven through the loader hermes really uses.
+
+        They are covered elsewhere by direct import, which proves they work — it does not
+        prove hermes can reach them. That distinction is not academic here: the Critical this
+        class exists for was code that behaved correctly on import and could not be loaded by
+        `_load_provider_from_dir` at all, and the tool tests above would not have caught the
+        same breakage in `get_config_schema`/`save_config` because they never call them.
+
+        `save_config` writes through `core.save` to whatever `core.load` reads, so this would
+        target the operator's REAL config were it not for `_run` handing the child a
+        throwaway `QCTX_CONFIG`. The round-trip is asserted from `core.load()` inside the
+        same child, which is the only way to prove the two halves agree on the file.
+        """
+        out = self._run(
+            "keys = [f['key'] for f in provider.get_config_schema()]\n"
+            "secret = sorted(f['key'] for f in provider.get_config_schema()\n"
+            "                if f.get('secret'))\n"
+            "provider.save_config({'memory_collection': 'loader_probe_collection'},\n"
+            "                     hermes_home=provider_dir)\n"
+            "import core\n"
+            "print(json.dumps({'keys': keys, 'secret': secret,\n"
+            "                  'read_back': core.load().memory_collection}))\n")
+        got = json.loads(out)
+        self.assertIn("memory_collection", got["keys"],
+                      "the wizard cannot offer a field it does not expose")
+        self.assertEqual(got["secret"], ["api_key", "qdrant_api_key"],
+                         "the two API keys must still be the secret ones through this loader")
+        self.assertEqual(got["read_back"], "loader_probe_collection",
+                         "save_config wrote somewhere core.load() does not read — the two "
+                         "hosts would then have separate configurations")
+
     def test_it_dispatches_through_the_provider_and_answers_with_a_json_string(self):
         out = self._run(
             "r = provider.handle_tool_call('memory_teleport', {})\n"
