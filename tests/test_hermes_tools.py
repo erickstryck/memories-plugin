@@ -522,64 +522,145 @@ class TestTheWiringFromOutside(unittest.TestCase):
     """Proof that the tools are reachable through the door hermes actually opens.
 
     A test that imports `hosts.hermes.tools` proves the module works; it does not prove
-    anything reaches it. These drive the PROVIDER, loaded the way hermes loads it — by
-    path, through the install symlink — and read the tool names off the object.
+    anything reaches it. These drive the PROVIDER, loaded through the REAL loader for a
+    user-installed memory provider, against a real install symlink.
+
+    WHICH LOADER, because getting this wrong is how a broken production load passed here
+    once already. `plugin.yaml` declares `kind: exclusive`, and
+    `hermes_cli/plugins.py:1415-1428` explicitly SKIPS exclusive plugins ("handled by
+    category discovery"), so `_load_local_module` — which an earlier version of this test
+    emulated — never loads a memory provider. The real path is
+    `plugins/memory/__init__.py::_load_provider_from_dir` (v0.20.0, lines 218-327), and it
+    does one thing the other does not: it PRE-EXECS every sibling `*.py` before
+    `__init__.py`, registering each in `sys.modules` first and swallowing failures at
+    `logger.debug`. Measured consequence when `tools.py` could not import `core` on its own:
+    the broken shell stayed in `sys.modules`, the package's `from . import tools` succeeded
+    and returned it, `bind_tuning` raised AttributeError, and the provider did not load at
+    all — no recall, no checkpoint, one debug line.
     """
 
-    #: Mirrors hermes_cli/plugins.py::_load_local_module (v0.20.0, lines 2056-2078): a
-    #: synthetic namespace parent, `submodule_search_locations`, and the module registered
-    #: in `sys.modules` BEFORE `exec_module`. That registration is what makes a relative
-    #: import inside the plugin resolvable, and it is the reason this adapter can import a
-    #: sibling module at all — verified here rather than assumed.
-    LOADER = (
-        "import importlib.util, json, sys, types\n"
-        "ns = types.ModuleType('hermes_plugins'); ns.__path__ = []\n"
-        "ns.__package__ = 'hermes_plugins'; sys.modules['hermes_plugins'] = ns\n"
-        "spec = importlib.util.spec_from_file_location('hermes_plugins.memories', %r,\n"
-        "    submodule_search_locations=[%r])\n"
+    #: Mirrors `_load_provider_from_dir` for a USER-installed provider: synthetic parent
+    #: package (`_register_synthetic_package`, :42-57), the module registered in
+    #: `sys.modules` before exec, then the sibling pre-exec loop (:277-297), then
+    #: `exec_module` on `__init__.py`, then `register(ctx)` (:305-311). Two deliberate
+    #: departures, both toward strictness: the sibling failures are RECORDED in
+    #: `SIBLING_ERRORS` instead of being swallowed, and the `__init__.py` failure is left to
+    #: raise instead of being logged — the swallowing is precisely what made the production
+    #: breakage invisible, so a test must not reproduce it.
+    USER_NAMESPACE = "_hermes_user_memory"
+
+    #: Everything up to and including the sibling pre-exec. Split out so the sibling test
+    #: can stop HERE and report which sibling failed, instead of inheriting the
+    #: AttributeError that the failure causes two steps later in `__init__.py`.
+    LOADER_PRE = (
+        "import importlib.machinery, importlib.util, json, pathlib, sys\n"
+        "USER_NS = %(ns)r\n"
+        "provider_dir = %(dir)r\n"
+        "module_name = USER_NS + '.memories'\n"
+        "ns_spec = importlib.machinery.ModuleSpec(USER_NS, None, is_package=True)\n"
+        "ns_spec.submodule_search_locations = []\n"
+        "sys.modules[USER_NS] = importlib.util.module_from_spec(ns_spec)\n"
+        "spec = importlib.util.spec_from_file_location(module_name,\n"
+        "    provider_dir + '/__init__.py', submodule_search_locations=[provider_dir])\n"
         "module = importlib.util.module_from_spec(spec)\n"
-        "module.__package__ = 'hermes_plugins.memories'; module.__path__ = [%r]\n"
-        "sys.modules['hermes_plugins.memories'] = module\n"
-        "spec.loader.exec_module(module)\n"
+        "sys.modules[module_name] = module\n"
+        "SIBLING_ERRORS = {}\n"
+        "for sub in sorted(pathlib.Path(provider_dir).glob('*.py')):\n"
+        "    if sub.name == '__init__.py':\n"
+        "        continue\n"
+        "    full = module_name + '.' + sub.stem\n"
+        "    if full in sys.modules:\n"
+        "        continue\n"
+        "    sub_spec = importlib.util.spec_from_file_location(full, str(sub))\n"
+        "    sub_mod = importlib.util.module_from_spec(sub_spec)\n"
+        "    sys.modules[full] = sub_mod\n"
+        "    try:\n"
+        "        sub_spec.loader.exec_module(sub_mod)\n"
+        "    except Exception as exc:\n"
+        "        SIBLING_ERRORS[sub.name] = '%%s: %%s' %% (type(exc).__name__, exc)\n"
     )
 
-    def _run(self, body: str) -> str:
-        home = Path(tempfile.mkdtemp()) / "plugins"
+    LOADER_INIT = (
+        "spec.loader.exec_module(module)\n"
+        "class Collector:\n"
+        "    provider = None\n"
+        "    def register_memory_provider(self, p):\n"
+        "        self.provider = p\n"
+        "collector = Collector()\n"
+        "module.register(collector)\n"
+        "provider = collector.provider\n"
+    )
+
+    def _run(self, body: str, *, siblings_only: bool = False) -> str:
+        """Load the adapter through the real loader in a subprocess, then run `body`.
+
+        `provider`, `module` and `SIBLING_ERRORS` are in scope for the body — all but
+        `SIBLING_ERRORS` only when `siblings_only` is false.
+
+        The subprocess inherits no PYTHONPATH and runs from an EMPTY directory. Both matter:
+        the adapter has to find `core` by itself, from the symlink, and `python3 -c` puts the
+        working directory on `sys.path` — so running from the repo root made `import core`
+        succeed for free and this very test passed with the bootstrap deleted (measured).
+        hermes runs from wherever the user launched it, never from this repo.
+        """
+        root = Path(tempfile.mkdtemp())
+        home = root / "plugins" / "memory"
         home.mkdir(parents=True)
         link = home / "memories"
         link.symlink_to(REPO / "hosts" / "hermes")
-        script = self.LOADER % (str(link / "__init__.py"), str(link), str(link)) + body
+        elsewhere = Path(tempfile.mkdtemp())      # nothing importable in here
+        loader = self.LOADER_PRE if siblings_only else self.LOADER_PRE + self.LOADER_INIT
+        script = loader % {"ns": self.USER_NAMESPACE, "dir": str(link)} + body
         out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             cwd=str(elsewhere),
                              env={k: v for k, v in os.environ.items()
                                   if k in ("PATH", "HOME", "LANG")})
         self.assertEqual(out.returncode, 0, out.stderr)
 
         return out.stdout
 
+    def test_the_real_loader_produces_a_provider_at_all(self):
+        """The regression this class exists for: `_load_provider_from_dir` returning None
+        means hermes has NO memory provider, and says so only at debug level."""
+        out = self._run("print(type(provider).__name__)\n"
+                        "print(provider.name)\n")
+        kind, name = out.strip().splitlines()[:2]
+        self.assertEqual(kind, "MemoriesProvider")
+        self.assertEqual(name, "memories")
+
+    def test_no_sibling_module_fails_its_pre_exec(self):
+        """Each sibling is exec'd on its own, BEFORE `__init__.py` has bootstrapped
+        anything. A sibling that cannot stand alone leaves a broken shell in `sys.modules`
+        that the package's own relative import then picks up in silence."""
+        out = self._run("print(json.dumps(SIBLING_ERRORS))\n", siblings_only=True)
+        self.assertEqual(json.loads(out), {},
+                         "a sibling failed to exec standalone; the shell it left behind is "
+                         "what the package's `from . import` will hand back")
+
     def test_a_provider_loaded_the_way_hermes_loads_it_offers_the_fifteen(self):
-        out = self._run(
-            "p = module.MemoriesProvider()\n"
-            "print(json.dumps([s['name'] for s in p.get_tool_schemas()]))\n")
+        out = self._run("print(json.dumps([s['name'] for s in provider.get_tool_schemas()]))\n")
         self.assertEqual(set(json.loads(out)), EXPECTED)
 
     def test_it_dispatches_through_the_provider_and_answers_with_a_json_string(self):
         out = self._run(
-            "p = module.MemoriesProvider()\n"
-            "r = p.handle_tool_call('memory_teleport', {})\n"
+            "r = provider.handle_tool_call('memory_teleport', {})\n"
             "print(json.dumps({'type': type(r).__name__, 'payload': json.loads(r)}))\n")
         answer = json.loads(out)
         self.assertEqual(answer["type"], "str", "the host boundary wants a JSON string")
         self.assertIn("error", answer["payload"])
 
     def test_the_tools_module_is_reached_through_the_package_not_by_luck(self):
-        """`tools` has to be an attribute of the loaded provider module. If the wiring were
-        missing, `get_tool_schemas` could still be hand-written and the module would sit
-        there dead — which is the failure this asserts against."""
+        """`tools` has to be an attribute of the loaded provider module, carrying the real
+        schemas. If the wiring were missing, `get_tool_schemas` could still be hand-written
+        and the module would sit there dead — which is the failure this asserts against."""
         out = self._run("print(module.tools.__name__)\n"
-                        "print(len(module.tools.SCHEMAS))\n")
-        name, count = out.strip().splitlines()[:2]
+                        "print(len(module.tools.SCHEMAS))\n"
+                        "print(module.tools.__file__)\n")
+        name, count, file_ = out.strip().splitlines()[:3]
         self.assertIn("tools", name)
         self.assertEqual(int(count), 15)
+        self.assertTrue(file_.endswith("tools.py"),
+                        "an empty shell registered by the pre-exec has no file of its own")
 
 
 class TestTheRealHostAcceptsThem(unittest.TestCase):

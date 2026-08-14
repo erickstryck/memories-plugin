@@ -18,9 +18,31 @@ rather than rendering, that logic now lives in the core and both call it:
 `core.metadata_from`, `core.outcome_payload`, `DocIndex.drop_request`.
 """
 import json
+import os
+import sys
 
-import core
-import core.docs
+#: The SAME bootstrap `hosts/hermes/__init__.py` does, and it has to be here too — this
+#: module can be the first file of the package to run.
+#:
+#: Measured against the loader that actually loads memory providers
+#: (`plugins/memory/__init__.py::_load_provider_from_dir`, v0.20.0 lines 282-297, NOT
+#: `hermes_cli/plugins.py::_load_local_module`, which skips `kind: exclusive` plugins):
+#: before exec'ing `__init__.py` it pre-execs every sibling `*.py`, registering each in
+#: `sys.modules` FIRST and swallowing any failure at `logger.debug`. Without these three
+#: lines, `import core` here raised ModuleNotFoundError during that pre-exec — `core` only
+#: becomes importable once `__init__.py` inserts the repo root — and the broken shell STAYED
+#: in `sys.modules`, so the package's own `from . import tools` then succeeded and handed
+#: back a module with nothing in it. The provider failed to load entirely, taking recall and
+#: the checkpoint cadence with it, and the only symptom was one debug line.
+#:
+#: `realpath` and THREE `dirname` levels, for the reason the package docstring gives: the
+#: plugin is installed as a symlink, and `abspath` resolves to the symlink's directory.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import core  # noqa: E402
+import core.docs  # noqa: E402
 
 #: Filled by `hosts/hermes/__init__.py` at import time — see `bind_tuning`.
 _TUNING = None
