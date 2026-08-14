@@ -10,6 +10,12 @@ exhaustively searched.
 
 What these tests pin is therefore not formatting but the CLAIM the block makes: whenever
 the pipeline was partial for any reason, the block must not assert absence of precedent.
+
+`empty_block` and `unavailable_block` are still called through the hook, because it still
+delegates to them directly and that delegation is itself the thing worth pinning. The
+degradation-note and populated-block logic moved into `core.blocks` (see tests/test_blocks.py
+for its own coverage) and lost its `hooks.recall` names in the process, so those calls go
+straight to `core.blocks` / `core.prompts` here too — same assertions, new address.
 """
 import os
 import sys
@@ -19,6 +25,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"))
 
+from core import blocks, prompts
 from core.retrieval import CE, DENSE, Outcome, Scored
 
 
@@ -109,7 +116,7 @@ class TestEmptyBlockClaim(unittest.TestCase):
             Outcome(candidates=27, best_dense=0.54, suppressed="circuit breaker: 12s ago"),
         ]
         for outcome in cases:
-            note = self.recall._degradation_note(outcome)
+            note = blocks.degradation_note(outcome, self.recall.MAX_MEMORIES)
             out = self.recall.empty_block(outcome, 2)
             if note:
                 self.assertNotIn(FLAT_CLAIM, out, f"note present but claim flat: {note!r}")
@@ -122,7 +129,8 @@ class TestDegradationNote(unittest.TestCase):
         self.recall = load_hook()
 
     def test_a_complete_pipeline_gets_no_note(self):
-        self.assertEqual(self.recall._degradation_note(Outcome(candidates=3, reranked=True)), "")
+        self.assertEqual(
+            blocks.degradation_note(Outcome(candidates=3, reranked=True), self.recall.MAX_MEMORIES), "")
 
     def test_dropped_candidates_are_silent_when_the_slots_were_filled(self):
         """Warning on every prompt is crying wolf: what got dropped is the lowest-scoring
@@ -130,11 +138,11 @@ class TestDegradationNote(unittest.TestCase):
         include it anyway."""
         full = Outcome(candidates=40, reranked=True, dropped=28,
                        scored=[Scored({}, 0.9, CE)] * self.recall.MAX_MEMORIES)
-        self.assertEqual(self.recall._degradation_note(full), "")
+        self.assertEqual(blocks.degradation_note(full, self.recall.MAX_MEMORIES), "")
 
     def test_a_failed_rerank_says_the_strict_cut_came_back(self):
-        note = self.recall._degradation_note(
-            Outcome(candidates=5, rerank_error="HTTP 503 on POST /rerank"))
+        note = blocks.degradation_note(
+            Outcome(candidates=5, rerank_error="HTTP 503 on POST /rerank"), self.recall.MAX_MEMORIES)
         self.assertIn("did NOT run", note)
         self.assertIn("strict cut was reapplied", note,
                       "the reader has to know the floor moved, not just that something failed")
@@ -147,8 +155,9 @@ class TestDegradationNote(unittest.TestCase):
         and with "nothing is relevant". Naming only the first sends the reader looking for a
         translation problem that may not exist.
         """
-        note = self.recall._degradation_note(
-            Outcome(candidates=5, reranked=True, collapsed=True, best_rerank=0.0004))
+        note = blocks.degradation_note(
+            Outcome(candidates=5, reranked=True, collapsed=True, best_rerank=0.0004),
+            self.recall.MAX_MEMORIES)
         self.assertIn("at or near zero", note)
         self.assertIn("different languages", note)
         self.assertIn("nothing is relevant", note,
@@ -162,9 +171,10 @@ class TestDegradationNote(unittest.TestCase):
         none. No error, no collapse, no note, and the block then claimed no precedent
         exists. For 300 seconds after every rerank failure.
         """
-        note = self.recall._degradation_note(
+        note = blocks.degradation_note(
             Outcome(candidates=27, best_dense=0.536,
-                    suppressed="circuit breaker: the re-rank failed 12s ago"))
+                    suppressed="circuit breaker: the re-rank failed 12s ago"),
+            self.recall.MAX_MEMORIES)
         self.assertIn("circuit breaker", note)
         self.assertIn("strict cut was reapplied", note)
 
@@ -193,34 +203,36 @@ class TestBuildBlock(unittest.TestCase):
         return h
 
     def test_the_rules_of_use_travel_with_the_memories(self):
-        out = self.recall.build_block([self._hit()], [], 3, Outcome(candidates=1, reranked=True))
-        self.assertIn(self.recall.INSTRUCTIONS, out,
+        out = blocks.recall_block([self._hit()], [], 3, Outcome(candidates=1, reranked=True),
+                                  self.recall.BUDGET)
+        self.assertIn(prompts.INSTRUCTIONS, out,
                       "a memory without its rules of use gets applied out of context")
         self.assertIn("a durable fact", out)
         self.assertIn("abc123", out, "the id is how the model retrieves the rest")
 
     def test_dense_origin_is_marked_so_it_is_not_read_as_a_verdict(self):
-        out = self.recall.build_block([self._hit(origin=DENSE, score=0.61)], [], 2,
-                                      Outcome(candidates=1))
+        out = blocks.recall_block([self._hit(origin=DENSE, score=0.61)], [], 2,
+                                  Outcome(candidates=1), self.recall.BUDGET)
         self.assertIn(DENSE, out)
 
     def test_pointers_say_why_they_are_not_included_in_full(self):
-        out = self.recall.build_block([self._hit()], [self._hit(mid="ptr9", doc="x " * 200)],
-                                      2, Outcome(candidates=2, reranked=True))
+        out = blocks.recall_block([self._hit()], [self._hit(mid="ptr9", doc="x " * 200)],
+                                  2, Outcome(candidates=2, reranked=True), self.recall.BUDGET)
         self.assertIn("ptr9", out)
         self.assertIn("retrieve them by", out)
 
     def test_an_oversized_memory_is_truncated_and_says_so_with_its_id(self):
         big = self._hit(mid="big1", doc="y" * (self.recall.MAX_PER_MEM + 500))
-        out = self.recall.build_block([big], [], 2, Outcome(candidates=1, reranked=True))
+        out = blocks.recall_block([big], [], 2, Outcome(candidates=1, reranked=True), self.recall.BUDGET)
         self.assertIn("truncated at", out)
         self.assertIn("big1", out, "truncation is only recoverable if the id is given")
         self.assertLess(len(out), self.recall.MAX_PER_MEM + 3000)
 
     def test_a_partial_judgement_is_carried_into_the_populated_block_too(self):
-        out = self.recall.build_block([self._hit()], [], 2,
-                                      Outcome(candidates=30, reranked=True,
-                                              dropped=18, dropped_above_floor=4))
+        out = blocks.recall_block([self._hit()], [], 2,
+                                  Outcome(candidates=30, reranked=True,
+                                          dropped=18, dropped_above_floor=4),
+                                  self.recall.BUDGET)
         self.assertIn("partial judgement", out)
 
 
