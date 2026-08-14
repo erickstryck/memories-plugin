@@ -17,6 +17,7 @@ pre-upgrade ABC too, which is what the comment at hosts/hermes/__init__.py:505 s
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -539,6 +540,87 @@ class TestCheckpointIntervalIsRobust(unittest.TestCase):
         env = dict(os.environ, REMEMBER_INTERVAL="9")
         env.pop("QCTX_CHECKPOINT_INTERVAL", None)
         self.assertEqual(self._read_it(env), "9")
+
+
+#: Every numeric knob the adapter reads at import time, DERIVED FROM ITS SOURCE rather than
+#: listed here: `ATTR = _env_num("QCTX_...", "LEGACY", "<default>"[, kind])`, and the bare
+#: `ATTR = _env("QCTX_...", "LEGACY", "<numeric default>")` form too — which is exactly the
+#: form that has to be caught, because `int(_env(...))` in the class body is how a knob
+#: skips the tolerant helper.
+_KNOB = re.compile(
+    r'^\s{4}(?P<attr>[A-Z][A-Z0-9_]*)\s*=\s*(?:(?P<cast>int|float)\()?'
+    r'_env(?:_num)?\(\s*"(?P<name>[A-Z][A-Z0-9_]*)"\s*,\s*"(?P<legacy>[A-Z][A-Z0-9_]*)"\s*,'
+    r'\s*"(?P<default>[^"]*)"(?:\s*,\s*(?P<kind>int|float))?\s*\)',
+    re.M)
+
+
+def numeric_knobs() -> list:
+    """(attribute, canonical env name, legacy env name, coded default) for each numeric knob.
+
+    Read out of `hosts/hermes/__init__.py` so a knob added later is covered without anyone
+    remembering to add it here — which is the whole point: the knob that broke was the one
+    nobody thought to list.
+    """
+    source = (REPO / "hosts" / "hermes" / "__init__.py").read_text()
+    found = []
+    for m in _KNOB.finditer(source):
+        try:
+            float(m.group("default"))
+        except ValueError:
+            continue                      # not a numeric knob
+        found.append((m.group("attr"), m.group("name"), m.group("legacy"),
+                      m.group("default")))
+
+    return found
+
+
+class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
+    """No numeric knob may take the whole provider down at import time.
+
+    The measured failure: `TOP_K = int(_env("QCTX_RECALL_TOP_K", ...))` — the one numeric
+    knob that skipped `_env_num` — turned `QCTX_RECALL_TOP_K=8x` into a ValueError while the
+    class body was executing. hermes' loader swallows that at `logger.debug`, and
+    `agent/agent_init.py` only warns when the provider is NOT None, so a None provider says
+    NOTHING: no recall, no checkpoint, no tools, no message. The same value on claude-code
+    imports fine and degrades to a visible unavailability block.
+
+    Not hypothetical either: `QCTX_RECALL_MAX_CHARS=14k` is the mistake that made `_env_num`
+    exist in the first place, and `RECALL_*` variables are exported from this user's
+    `.bashrc`.
+
+    The knob list is DERIVED from the adapter's source, so a future knob written with a bare
+    `int(...)` fails this test instead of waiting for a typo in production.
+    """
+
+    def test_the_derivation_found_the_knobs(self):
+        """A guard on the guard: if the regex stopped matching, everything below would pass
+        over an empty list."""
+        knobs = numeric_knobs()
+        attrs = {attr for attr, *_ in knobs}
+        self.assertGreaterEqual(len(knobs), 9, f"only found {attrs}")
+        for expected in ("TOP_K", "MAX_CHARS", "STRICT_FLOOR", "CHECKPOINT_INTERVAL"):
+            self.assertIn(expected, attrs)
+
+    def test_a_malformed_value_falls_back_instead_of_killing_the_import(self):
+        knobs = numeric_knobs()
+        env = dict(os.environ)
+        for _, name, legacy, _ in knobs:
+            env[name] = "not-a-number"
+            env.pop(legacy, None)
+        script = (
+            "import sys, json; sys.path.insert(0, %r)\n"
+            "from hosts.hermes import MemoriesProvider as P\n"
+            "print(json.dumps({a: getattr(P, a) for a in %r}))\n"
+        ) % (str(REPO), [attr for attr, *_ in knobs])
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0,
+                         "a malformed knob took the whole provider down at import time, "
+                         "where hermes reports nothing at all:\n" + out.stderr)
+        values = json.loads(out.stdout.strip().splitlines()[-1])
+        for attr, _, _, default in knobs:
+            self.assertAlmostEqual(float(values[attr]), float(default), places=6,
+                                   msg=f"{attr} did not fall back to its coded default")
 
 
 class TestCheckpointFailureDoesNotCostRecall(unittest.TestCase):

@@ -112,7 +112,13 @@ class MemoriesProvider(_Base):
     MAX_PER_MEM = _env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
     BREAKER_SECONDS = _env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
     QDRANT_BUDGET = _env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
-    TOP_K = int(_env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20"))
+    #: Read through `_env_num` like every other numeric knob above, and NOT with a bare
+    #: `int(_env(...))` — measured: `QCTX_RECALL_TOP_K=8x` raised ValueError while this class
+    #: body was executing, hermes' loader swallowed it at `logger.debug`, and because the
+    #: provider came back None `agent/agent_init.py` warned about nothing at all. The user
+    #: lost recall, the checkpoint and all 15 tools, silently. The same value on claude-code
+    #: imports fine and degrades to a visible unavailability block.
+    TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int)
 
     #: Turns between checkpoint nudges. Same env var as the claude-code hook
     #: (QCTX_CHECKPOINT_INTERVAL, legacy REMEMBER_INTERVAL) — the equivalence test in
