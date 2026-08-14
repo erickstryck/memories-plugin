@@ -83,9 +83,31 @@ MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
 MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
 BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 
+#: The UserPromptSubmit hook timeout in hooks.json — the deadline the whole invocation
+#: must fit inside. Named here, beside the shares carved out of it, so the relationship
+#: stays visible if any of the three changes; plays the same role `HERMES_PREFETCH_BUDGET_S`
+#: plays in hosts/hermes/__init__.py for that host's own deadline.
+HOST_DEADLINE_S = 20.0
+
+#: The embed and rerank timeouts `core.build_memory` is called with, per invocation — not
+#: per angle, since embeddings batch every angle into one call and re-ranking is one call
+#: over the merged candidate pool.
+EMBED_TIMEOUT_S = 8.0
+RERANK_TIMEOUT_S = 6.0
+
+#: What is left of the host deadline for Qdrant once embed and rerank are paid for.
+QDRANT_SHARE_S = HOST_DEADLINE_S - EMBED_TIMEOUT_S - RERANK_TIMEOUT_S
+
 #: Total seconds allowed for ALL Qdrant calls in one invocation, divided among them.
 #: A per-call timeout multiplies by the number of angles; a total does not, which is
 #: what keeps the worst case inside the host deadline in hooks.json.
+#:
+#: QCTX_RECALL_QDRANT_BUDGET is a ceiling the deployer may TIGHTEN, never raise past
+#: QDRANT_SHARE_S — the same rule hosts/hermes/__init__.py applies to its own derived
+#: share (there capped by HERMES_PREFETCH_BUDGET_S / 4.0), so the knob means the same
+#: thing on both hosts: a value below the host's share moves the timeout, a value above
+#: it is clamped. The default (5.0) sits below QDRANT_SHARE_S (6.0), so the cap changes
+#: nothing about the default — it only bounds how far the knob can raise the ceiling.
 QDRANT_BUDGET = env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
 
 #: What fits in this host's context window — read from our own environment and handed
@@ -193,11 +215,15 @@ def _run() -> None:
         # exception, so the catch-all in main() cannot help.
         #
         # So the budget is divided, not repeated: the whole Qdrant allowance is split
-        # across the calls that will actually be made.
+        # across the calls that will actually be made. QDRANT_BUDGET is capped at
+        # QDRANT_SHARE_S before the split — a deployer can tighten it, never raise it past
+        # what this host's own deadline can afford — the same min() hosts/hermes applies
+        # to its own derived share.
         qdrant_calls = len(angles) + 1
-        store = core.build_memory(cfg, timeouts={"embed": 8.0,
-                                                 "qdrant": QDRANT_BUDGET / qdrant_calls,
-                                                 "rerank": 6.0})
+        qdrant_total = min(QDRANT_BUDGET, QDRANT_SHARE_S)
+        store = core.build_memory(cfg, timeouts={"embed": EMBED_TIMEOUT_S,
+                                                 "qdrant": qdrant_total / qdrant_calls,
+                                                 "rerank": RERANK_TIMEOUT_S})
     except core.ConfigError as exc:
         # NOT silent. On this path the hook does nothing at all, for every prompt of every
         # session, while the memory skill tells the model a hook already guarantees the
