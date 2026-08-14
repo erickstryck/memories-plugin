@@ -151,6 +151,33 @@ class TestSchemas(unittest.TestCase):
                       "and that the default reaches the permanent archive")
         self.assertIn("tmp", scope, "and how to avoid it")
 
+    def test_the_update_labels_say_that_sending_one_replaces_them_all(self):
+        """`memory_update` is the other tool where omitting an argument DESTROYS something.
+
+        `MemoryStore.update` writes the metadata it is handed; it does not merge. So a record
+        labelled {type, project, area} updated with `type` alone ends up with `{"type": ...}`
+        and the other two are gone — measured through the real dispatcher, and pinned as
+        behaviour in `TestMemoryTools` below. Wholesale replacement is the existing, intended
+        contract and stays; what must not happen is a model discovering it by "fixing one
+        label" and losing the others. So the schema has to say it, like `docs_drop`'s scope
+        default does — and on EVERY property that can trigger it, because a model fills in one
+        argument by reading that argument's own description.
+        """
+        by_name = {s["name"]: s for s in tools.SCHEMAS}
+        update = by_name["memory_update"]
+        self.assertIn("replace", update["description"].lower(),
+                      "the tool's own description must state the replacement")
+        for label in ("metadata", "type", "project", "area"):
+            text = update["parameters"]["properties"][label]["description"].lower()
+            with self.subTest(property=label):
+                self.assertIn("replace", text, "a model reading only this argument would "
+                                               "lose the other labels without noticing")
+                self.assertIn("keep", text, "and it has to say how to avoid it")
+        # The `memory_store` shortcuts must NOT inherit this warning: there are no previous
+        # labels to lose there, and a warning that fires everywhere stops being read.
+        store_type = by_name["memory_store"]["parameters"]["properties"]["type"]
+        self.assertNotIn("replace", store_type["description"].lower())
+
     def test_the_schemas_survive_the_wire(self):
         """hermes serializes these into a chat-completions request. Anything that does not
         JSON-encode takes the WHOLE toolset down, not just this provider's part."""
@@ -501,6 +528,19 @@ class TestMemoryTools(unittest.TestCase):
         self.assertNotIn("status", res)
         self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
                          "a fact worth keeping")
+
+    def test_updating_one_label_replaces_the_whole_set(self):
+        """The behaviour the schema now warns about, pinned so the warning stays true.
+
+        This is the INTENDED contract — `MemoryStore.update` writes the metadata it is given
+        rather than merging — and it is not being changed here. If someone does change it to a
+        merge one day, this test is the reminder that the schema text has to change with it."""
+        mid = self.call("memory_store", information="a fact",
+                        metadata={"type": "reference", "project": "p", "area": "a"})["id"]
+        self.call("memory_update", id=mid, type="project")
+        self.assertEqual(self.q.get_point("mem", mid)["payload"]["metadata"],
+                         {"type": "project"},
+                         "wholesale replacement is the contract the schema describes")
 
     def test_update_can_fix_a_label_without_touching_the_text(self):
         mid = self.call("memory_store", information="text that must survive",

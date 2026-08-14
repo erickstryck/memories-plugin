@@ -340,6 +340,33 @@ _META_PROPERTIES = {
     "area": {"type": "string", "description": "Shortcut for metadata.area."},
 }
 
+#: NOT the shared `_META_PROPERTIES`, for the same reason `docs_drop` does not share `_SCOPE`:
+#: on an UPDATE the labels already exist, and passing any of them REPLACES the whole set —
+#: `core.MemoryStore.update` writes the metadata it is given, it does not merge. That is the
+#: existing, intended contract of this system and it is not changing; what must not happen is
+#: a model discovering it by "fixing one label" and losing the other two. Measured, through
+#: the real dispatcher: a record labelled {type, project, area} updated with `type` alone ends
+#: up with `{"type": ...}` and nothing else. So every property that can trigger the
+#: replacement says so, because a model fills in one argument by reading that argument.
+_REPLACES_THE_LABELS = ("Passing this REPLACES the record's whole label set — any label not "
+                        "sent here or alongside it is REMOVED. Include every label you want "
+                        "to keep (memory_get shows the current ones), or send no labels at "
+                        "all to leave them untouched.")
+
+_UPDATE_META_PROPERTIES = {
+    "metadata": {"type": "object",
+                 "description": "The record's labels after the update, e.g. "
+                                "{\"type\": \"decision\", \"project\": \"x\"}. "
+                                + _REPLACES_THE_LABELS},
+    "type": {"type": "string",
+             "description": "Shortcut for metadata.type: decision, reference, preference, "
+                            "bug, measurement… " + _REPLACES_THE_LABELS},
+    "project": {"type": "string",
+                "description": "Shortcut for metadata.project. " + _REPLACES_THE_LABELS},
+    "area": {"type": "string",
+             "description": "Shortcut for metadata.area. " + _REPLACES_THE_LABELS},
+}
+
 _SCOPE = {"type": "string", "enum": list(core.docs.SCOPES),
           "description": "Which archive: tmp (expiring), library (permanent) or all."}
 
@@ -474,15 +501,18 @@ SCHEMAS = [
         "description": ("Correct an existing memory in place, keeping its id. Use it when "
                         "a stored fact turned out wrong or incomplete, instead of writing "
                         "a second record that contradicts the first. Omitting `information` "
-                        "keeps the text; omitting the labels keeps the labels."),
+                        "keeps the text, and it cannot be blanked — a memory with no text is "
+                        "refused. The labels are REPLACED WHOLESALE, not merged: send every "
+                        "label the record should end up with, or send none at all to leave "
+                        "them as they are."),
         "parameters": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "The memory id to correct."},
                 "information": {"type": "string",
                                 "description": "Replacement text; omit to keep the current "
-                                               "one."},
-                **_META_PROPERTIES,
+                                               "one. It cannot be empty or blank."},
+                **_UPDATE_META_PROPERTIES,
             },
             "required": ["id"],
         },
