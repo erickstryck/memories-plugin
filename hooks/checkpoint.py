@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core import session_state as st  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE as PROCEDURE  # noqa: E402
 
 
@@ -86,7 +87,7 @@ def _run() -> None:
     n += 1
     counter.write_text(str(n))
 
-    if INTERVAL <= 0 or n % INTERVAL != 0:
+    if not st.due(n, INTERVAL):
         return  # silent on the intermediate interactions
 
     print(json.dumps({

@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
 from core import query  # noqa: E402
+from core import session_state as st  # noqa: E402
 from core.blocks import Budget, empty_block, recall_block, split_by_budget, unavailable_block  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 
@@ -87,14 +88,10 @@ BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 #: what keeps the worst case inside the host deadline in hooks.json.
 QDRANT_BUDGET = env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
 
-#: Rounds before reinjecting a memory in full instead of the one-line pointer. The
-#: context may have been compacted in the meantime.
-REINJECT_AFTER = 8
-
 #: What fits in this host's context window — read from our own environment and handed
 #: down to core.blocks, which does not know what host it is running in.
 BUDGET = Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
-               max_per_mem=MAX_PER_MEM, reinject_after=REINJECT_AFTER)
+               max_per_mem=MAX_PER_MEM, reinject_after=st.REINJECT_AFTER)
 
 
 def log(msg: str) -> None:
@@ -131,60 +128,6 @@ def emit(context: str) -> None:
             "additionalContext": context,
         }
     }))
-
-
-def load_state(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return {"round": 0, "seen": {}}
-
-
-def prune_state(state: dict) -> int:
-    """Drops from `seen` whatever can no longer change any decision.
-
-    An entry only matters while `round - seen < REINJECT_AFTER`: past that the memory
-    comes back IN FULL anyway, so keeping it is just occupying space. Without pruning, a
-    long session accumulates one entry per memory per round forever.
-    """
-    round_no = int(state.get("round", 0))
-    seen_map = state.get("seen", {})
-    old_entries = [mid for mid, r in seen_map.items()
-              if not isinstance(r, int) or (round_no - r) >= REINJECT_AFTER]
-    for mid in old_entries:
-        seen_map.pop(mid, None)
-
-    return len(old_entries)
-
-
-def purge_dead_sessions(days: float = 7.0) -> int:
-    """Deletes state for sessions untouched for days.
-
-    Each session creates a file and nothing removed them: the directory grew forever. A
-    session idle for a week is not coming back, and if it does the cost is starting with
-    an empty `seen` — the worst effect is one memory reinjected once.
-    """
-    cutoff = time.time() - days * 86400
-    deleted = 0
-    try:
-        for file_path in STATE_DIR.glob("recall-*.json"):
-            if file_path.stat().st_mtime < cutoff:
-                file_path.unlink()
-                deleted += 1
-    except Exception:
-        pass
-
-    return deleted
-
-
-def save_state(path: Path | None, state: dict) -> None:
-    """No path means state was unavailable this round; that is not an error."""
-    if path is None:
-        return
-    try:
-        path.write_text(json.dumps(state))
-    except Exception:
-        pass
 
 
 def main() -> None:
@@ -317,15 +260,14 @@ def _run() -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_path = STATE_DIR / f"recall-{session}.json"
-        state = load_state(state_path)
+        state = st.load(state_path)
     except Exception as exc:
         log(f"state unavailable ({type(exc).__name__}) — proceeding without reinjection memory")
-    state["round"] = int(state.get("round", 0)) + 1
+    round_no = st.next_round(state)
     seen_map = state.setdefault("seen", {})
-    round_no = state["round"]
 
     if not hits:
-        prune_state(state)
+        st.prune(state)
         # The empty line used to omit CE/collapse, so an empty round could not be told
         # apart afterwards: "the cross-encoder vetoed everything" and "there was no second
         # stage" and "the judgement was discarded" all looked identical in the log. Those
@@ -336,18 +278,18 @@ def _run() -> None:
                + (f" error={outcome.rerank_error!r}" if outcome.rerank_error else ""))
         log(f"round {round_no}: 0 above the cut (best {outcome.best_dense:.3f}) "
             f"in {elapsed:.1f}s | {len(angles)} angles | {why} | {prompt[:60]!r}")
-        save_state(state_path, state)
+        st.save(state_path, state)
         emit(empty_block(outcome, len(angles)))
         return
 
     full_hits, pointers = split_by_budget(hits, seen_map, round_no, BUDGET)
 
-    pruned = prune_state(state)
-    save_state(state_path, state)
+    pruned = st.prune(state)
+    st.save(state_path, state)
     if round_no % 20 == 0:
         # A cheap, occasional sweep: once every 20 rounds is enough to keep the directory
         # from growing, and it does not pay for a `glob` on every prompt.
-        dead = purge_dead_sessions()
+        dead = st.purge_dead(STATE_DIR)
         if dead:
             log(f"cleanup: {dead} dead session state(s) removed")
     scale = " (scale converted)" if outcome.scale_converted else ""

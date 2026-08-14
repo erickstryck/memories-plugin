@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core
+from core import session_state as st
 from core.docs import DEFAULT_TTL_SECONDS, DocIndex
 from core.memory import MemoryStore
 from tests.fakes import FakeEmbedder, FailingFakeEmbedder, FakeVectorStore
@@ -33,53 +34,59 @@ def load_hook():
 
 
 class TestStatePruning(unittest.TestCase):
-    """An entry in `seen` only matters while it can prevent a reinjection."""
+    """An entry in `seen` only matters while it can prevent a reinjection.
+
+    This lived in `hooks/recall.py` as `prune_state`; it moved to `core.session_state.prune`
+    because both hosts keep the same state and want the same pruning rule — only the
+    function's address changed, not the defect it guards against.
+    """
 
     def test_drops_what_can_no_longer_change_a_decision(self):
-        recall, _ = load_hook()
         state = {"round": 20, "seen": {"recent": 19, "at_the_edge": 12, "old": 5}}
-        pruned = recall.prune_state(state)
+        pruned = st.prune(state)
         self.assertEqual(pruned, 2, "12 and 5 are >= 8 rounds away")
         self.assertEqual(set(state["seen"]), {"recent"})
 
     def test_keeps_what_still_prevents_a_reinjection(self):
-        recall, _ = load_hook()
         state = {"round": 10, "seen": {"a": 9, "b": 4}}  # 10-4 = 6 < 8
-        recall.prune_state(state)
+        st.prune(state)
         self.assertEqual(set(state["seen"]), {"a", "b"})
 
     def test_corrupted_value_is_discarded(self):
-        recall, _ = load_hook()
         state = {"round": 5, "seen": {"ok": 4, "junk": "not a number", "null": None}}
-        recall.prune_state(state)
+        st.prune(state)
         self.assertEqual(set(state["seen"]), {"ok"})
 
     def test_empty_state_does_not_break(self):
-        recall, _ = load_hook()
-        self.assertEqual(recall.prune_state({}), 0)
+        self.assertEqual(st.prune({}), 0)
 
 
 class TestDeadSessionCleanup(unittest.TestCase):
+    """This lived in `hooks/recall.py` as `purge_dead_sessions`; it moved to
+    `core.session_state.purge_dead` for the same reason as pruning above — the state
+    directory is now an explicit argument instead of a module-level global.
+    """
+
     def test_removes_the_old_and_keeps_the_recent(self):
-        recall, dir_ = load_hook()
+        dir_ = Path(tempfile.mkdtemp())
         previous = dir_ / "recall-dead.json"
         recent = dir_ / "recall-alive.json"
         for f in (previous, recent):
             f.write_text(json.dumps({"round": 1, "seen": {}}))
         old_ts = time.time() - 10 * 86400
         os.utime(previous, (old_ts, old_ts))
-        removed = recall.purge_dead_sessions(days=7.0)
+        removed = st.purge_dead(dir_, days=7.0)
         self.assertEqual(removed, 1)
         self.assertFalse(previous.exists())
         self.assertTrue(recent.exists())
 
     def test_does_not_touch_the_log(self):
-        recall, dir_ = load_hook()
+        dir_ = Path(tempfile.mkdtemp())
         log = dir_ / "recall.log"
         log.write_text("a line")
         old_ts = time.time() - 30 * 86400
         os.utime(log, (old_ts, old_ts))
-        recall.purge_dead_sessions(days=1.0)
+        st.purge_dead(dir_, days=1.0)
         self.assertTrue(log.exists(), "the log is not session state")
 
 
