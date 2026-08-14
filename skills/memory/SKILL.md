@@ -138,6 +138,12 @@ qctx memory delete <id>
 because the vector becomes the average of several subjects. Metadata always with `type`
 and a date.
 
+**Updating any label replaces them ALL.** `--type project` on a record that carried
+`{type, project, area}` leaves it with `type` alone — the other two are gone, not merged.
+So when you correct one label, pass every label you mean to keep. This is the same
+behaviour the `memory_update` tool has on the other host, and it is deliberate; what is
+not acceptable is discovering it by losing two labels you never meant to touch.
+
 ### 2.5 Confirm
 
 A short list of what was saved or updated, each item with its id, in the user's

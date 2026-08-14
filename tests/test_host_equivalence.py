@@ -996,8 +996,6 @@ def core_module():
     return core
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestBothHostsDegradeInTheSameWORDS(unittest.TestCase):
@@ -1028,3 +1026,7 @@ class TestBothHostsDegradeInTheSameWORDS(unittest.TestCase):
                             ("hermes", hermes_adapter_source())):
             self.assertNotIn("the re-rank was skipped", text,
                              f"{label}: 'skipped' hides that the re-rank FAILED")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

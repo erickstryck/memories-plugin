@@ -216,8 +216,14 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
         # feel like it" with this test still green — which turns an obligation the model owes
         # the archive into a preference it can decline. The instruction and the circumstance
         # that fires it are one requirement, so they get asserted together.
-        self.assertIn("might have", out,
-                      "the search has to be owed to the SUBJECT, not left to inclination")
+        #
+        # A regex, not a literal, and that distinction was itself a review finding: pinning
+        # the exact words "might have" also failed "could have history" and "if there may be
+        # history on the subject" — synonyms that keep the obligation exactly where it
+        # belongs. Fixing prose to the letter is the defect this class's docstring warns
+        # about, and the first version of this line committed it.
+        self.assertRegex(out, r"if (the subject|there) (might|may|could)",
+                         "the search has to be owed to the SUBJECT, not left to inclination")
 
     def test_a_clean_empty_search_is_the_ONLY_state_that_asserts_absence(self):
         """The counterpart. If this one hedged too, the four states would collapse into one
