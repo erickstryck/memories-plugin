@@ -477,10 +477,21 @@ class MemoriesProvider(_Base):
 def _load_tools():
     """Import the sibling `tools` module, in either of the two load modes.
 
-    `from . import tools` is the normal path and the one hermes' own loader supports: it
-    creates a synthetic namespace parent and registers the plugin module in `sys.modules`
-    BEFORE exec (hermes_cli/plugins.py::_load_local_module, v0.20.0, measured), which is
-    what makes a relative import inside the plugin resolvable at all.
+    `from . import tools` is the normal path: the loader creates a synthetic namespace
+    parent and registers the plugin module in `sys.modules` BEFORE exec, which is what
+    makes a relative import inside the plugin resolvable at all.
+
+    DO NOT cite `hermes_cli/plugins.py::_load_local_module` here, as an earlier version of
+    this docstring did. That is the WRONG loader and naming it is how this adapter once
+    shipped broken: `plugin.yaml` declares `kind: exclusive`, and that loader deliberately
+    SKIPS exclusive plugins. Memory providers load through
+    `plugins/memory/__init__.py::_load_provider_from_dir` (v0.20.0, measured), which
+    pre-execs every sibling `*.py` BEFORE this file and swallows the failure at
+    `logger.debug`. That is why `tools.py` bootstraps `sys.path` itself instead of relying
+    on this module having run first — and why the `except ImportError` below cannot be
+    trusted as the safety net it looks like: the pre-exec leaves a broken shell in
+    `sys.modules`, so the relative import SUCCEEDS and hands back a module with nothing in
+    it. See the comment at the top of `tools.py`.
 
     A host that instead execs this file by path WITHOUT registering it cannot resolve one —
     measured: `ModuleNotFoundError: No module named '<synthetic parent>'`, and this repo's

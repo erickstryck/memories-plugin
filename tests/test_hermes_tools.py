@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 import unittest.mock
@@ -301,7 +302,7 @@ class TestDispatch(unittest.TestCase):
             self.assertIsInstance(json.loads(out), (dict, list), name)
 
 
-class TestTheConfigATooLCallRunsAgainst(unittest.TestCase):
+class TestTheConfigAToolCallRunsAgainst(unittest.TestCase):
     """`MemoriesProvider._config()` — where a tool call gets its configuration.
 
     `is_available()` caches it and hermes calls that before initializing, so the fallback to
@@ -741,12 +742,14 @@ class TestTheWiringFromOutside(unittest.TestCase):
         "module = importlib.util.module_from_spec(spec)\n"
         "sys.modules[module_name] = module\n"
         "SIBLING_ERRORS = {}\n"
+        "SIBLINGS_SEEN = []\n"
         "for sub in sorted(pathlib.Path(provider_dir).glob('*.py')):\n"
         "    if sub.name == '__init__.py':\n"
         "        continue\n"
         "    full = module_name + '.' + sub.stem\n"
         "    if full in sys.modules:\n"
         "        continue\n"
+        "    SIBLINGS_SEEN.append(sub.name)\n"
         "    sub_spec = importlib.util.spec_from_file_location(full, str(sub))\n"
         "    sub_mod = importlib.util.module_from_spec(sub_spec)\n"
         "    sys.modules[full] = sub_mod\n"
@@ -778,19 +781,36 @@ class TestTheWiringFromOutside(unittest.TestCase):
         working directory on `sys.path` — so running from the repo root made `import core`
         succeed for free and this very test passed with the bootstrap deleted (measured).
         hermes runs from wherever the user launched it, never from this repo.
+
+        The child gets `QCTX_CONFIG` pointing at a THROWAWAY config. `setUpModule`'s guard
+        against `core.load()` is in-process and cannot reach here, so without this the child
+        resolves the operator's real config — measured: it loaded `claude_memory` and the
+        permanent `memories_docs_library`. Nothing in these bodies touches an archive today,
+        but `docs_refresh` takes no required arguments, so one future body naming a real tool
+        would reindex the user's permanent library with the suite green. That is the exact
+        hole the in-process guard exists to close, so it gets closed on both sides.
         """
         root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         home = root / "plugins" / "memory"
         home.mkdir(parents=True)
         link = home / "memories"
         link.symlink_to(REPO / "hosts" / "hermes")
         elsewhere = Path(tempfile.mkdtemp())      # nothing importable in here
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        throwaway = root / "config.json"
+        throwaway.write_text(json.dumps({
+            "qdrant_url": "http://127.0.0.1:1",
+            "memory_collection": "throwaway_never_real",
+            "docs_collection": "throwaway_never_real_tmp",
+            "library_collection": "throwaway_never_real_library",
+        }))
         loader = self.LOADER_PRE if siblings_only else self.LOADER_PRE + self.LOADER_INIT
         script = loader % {"ns": self.USER_NAMESPACE, "dir": str(link)} + body
+        env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}
+        env["QCTX_CONFIG"] = str(throwaway)
         out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
-                             cwd=str(elsewhere),
-                             env={k: v for k, v in os.environ.items()
-                                  if k in ("PATH", "HOME", "LANG")})
+                             cwd=str(elsewhere), env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
 
         return out.stdout
@@ -807,9 +827,21 @@ class TestTheWiringFromOutside(unittest.TestCase):
     def test_no_sibling_module_fails_its_pre_exec(self):
         """Each sibling is exec'd on its own, BEFORE `__init__.py` has bootstrapped
         anything. A sibling that cannot stand alone leaves a broken shell in `sys.modules`
-        that the package's own relative import then picks up in silence."""
-        out = self._run("print(json.dumps(SIBLING_ERRORS))\n", siblings_only=True)
-        self.assertEqual(json.loads(out), {},
+        that the package's own relative import then picks up in silence.
+
+        Asserts what was SEEN as well as what failed. `SIBLING_ERRORS == {}` alone cannot
+        tell "every sibling exec'd cleanly" from "there was no sibling to exec" — measured:
+        against a directory holding only `__init__.py`, the same loop prints `{}` and the
+        empty-dict assertion passes. So the test would survive `tools.py` disappearing,
+        which is the one thing it is here to notice.
+        """
+        out = self._run("print(json.dumps(SIBLING_ERRORS))\n"
+                        "print(json.dumps(SIBLINGS_SEEN))\n", siblings_only=True)
+        errors, seen = (json.loads(line) for line in out.strip().splitlines()[:2])
+        self.assertIn("tools.py", seen,
+                      "the pre-exec loop saw no tools.py — an empty SIBLING_ERRORS below "
+                      "would then mean 'nothing was tried', not 'nothing failed'")
+        self.assertEqual(errors, {},
                          "a sibling failed to exec standalone; the shell it left behind is "
                          "what the package's `from . import` will hand back")
 
