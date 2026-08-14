@@ -44,8 +44,27 @@ class Chunk:
         return self.end_line - self.start_line + 1
 
 
+#: Above this share of replacement characters, the decode failed rather than succeeded.
+#: Generous on purpose: a legitimate document may carry a stray bad byte, and refusing it
+#: costs the user a file they wanted indexed.
+REPLACEMENT_RATIO = 0.05
+
+
 def is_probably_binary(sample: str) -> bool:
-    return "\x00" in sample
+    """A NUL byte is the strong signal, but not the only one.
+
+    The sample arrives already decoded with `errors="replace"`, so binary content that
+    happens to contain no NUL survived the check and got indexed — 20 KB of high random
+    bytes produced chunks of U+FFFD, spending embedding calls on noise and polluting the
+    archive with vectors that mean nothing. The replacement ratio catches that without
+    refusing a valid file over one bad byte.
+    """
+    if "\x00" in sample:
+        return True
+    if not sample:
+        return False
+
+    return sample.count("\ufffd") / len(sample) > REPLACEMENT_RATIO
 
 
 def mode_for_suffix(suffix: str) -> str:

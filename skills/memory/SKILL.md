@@ -16,17 +16,21 @@ directions, and reading is the one that gets forgotten:
 
 ## A hook already guarantees the floor — the depth is yours
 
-A `UserPromptSubmit` hook runs a search on **every** user prompt, before you see the
-text, and injects the relevant memories. You do not need to search in order to answer
-the prompt itself, and repeating that same generic search is waste.
+A `UserPromptSubmit` hook runs a search before you see the text and injects the relevant
+memories. It runs on most prompts, not all: it deliberately skips prompts under 12
+characters, bare acknowledgements ("ok, pode continuar") and bare slash commands, because
+none of them names a subject. When it does run, you do not need to repeat that same
+generic search.
 
-Read the state of the injected block, because the three mean different things:
+Read the state of the injected block. There are FOUR, and the last one is the one people
+forget because it looks like nothing:
 
 | injected block | what it means |
 |---|---|
 | memories listed | the archive was consulted; treat each one by the table below |
-| "no memory above the relevance cutoff" | the archive **was** consulted and holds nothing. Do not repeat the same broad search. |
-| "automatic recall — UNAVAILABLE" | the search **did not run** (infra down). This is NOT evidence that no precedent exists. Never claim something is unprecedented on the strength of that turn; try `qctx memory recall` yourself. |
+| "no memory above the relevance cutoff" | the archive **was** consulted. If the same block also says the judgement was PARTIAL, that is not evidence of absence — search again with a different angle. Without that caveat, the search was complete: do not repeat it. |
+| "automatic recall — UNAVAILABLE" | the search **did not run** (infra down, or the plugin is not configured). This is NOT evidence that no precedent exists. Never claim something is unprecedented on the strength of that turn; try `qctx memory recall` yourself. |
+| **no block at all** | the hook did not fire: a short or trivial prompt, or the hook is disabled. Nothing was searched, and nothing claims otherwise. If the subject could have precedent, this is on you. |
 
 **What the hook does not cover, and stays entirely yours:**
 

@@ -18,11 +18,11 @@ set -euo pipefail
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
-# DUAS localizações, e olhar só uma foi um defeito real: a config de MCP que o harness
-# de fato carrega no escopo `user` vive em ~/.claude.json, não em ~/.mcp.json. Este
-# script limpava o segundo, reportava "ok" para o servidor antigo e ele voltava a subir
-# em toda sessão nova — o falso "ok" é pior que a checagem faltando, porque ele afirma
-# que o trabalho foi feito.
+# TWO locations, and looking at only one was a real defect: the MCP config the harness
+# actually loads at `user` scope lives in ~/.claude.json, not in ~/.mcp.json. This script
+# cleaned the second, printed "ok" for the old server, and it came back up on every new
+# session — a false "ok" is worse than a missing check, because it asserts the work was
+# done.
 MCP="$HOME/.mcp.json"
 CLAUDE_JSON="$HOME/.claude.json"
 APPLY="${1:-}"
@@ -182,6 +182,18 @@ if [ -n "$retired" ]; then
   done
 fi
 
+# The apply block sets `failed` on each of its own failure paths, and nothing looked at
+# it again: the script printed FAIL, then the success banner, then exited 0. Same defect
+# as the one above, one layer up, inside the commit that fixed it — the checks are only
+# worth having if the exit code carries them.
+if [ "$failed" -ne 0 ]; then
+  say ""
+  say "one or more steps FAILED — see above. The cutover is incomplete and the .bak-$STAMP"
+  say "backups restore the previous state. Do NOT assume the old server is gone; confirm:"
+  say "    ps -eo args | grep qdrant_memory | grep -v grep"
+  exit 1
+fi
+
 say ""
 say "=== now ==="
 say "  1. Open a NEW terminal (or 'exec bash -l') and start claude from there."
@@ -191,3 +203,5 @@ say "       ps -eo args | grep qdrant_memory | grep -v grep"
 say "  3. Check in the log that there is ONE round per prompt, not two:"
 say "       tail -f \"\${QCTX_STATE_DIR:-\$HOME/.memories-plugin/state}/recall.log\""
 say "  4. If anything goes wrong, the .bak-$STAMP backups restore the previous state."
+
+exit "$failed"

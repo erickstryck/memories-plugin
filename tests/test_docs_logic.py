@@ -96,6 +96,41 @@ class TestStaleness(unittest.TestCase):
         self.assertEqual(source_changed(path, self.mtime, self.size),
                          GONE)
 
+    def test_an_mtime_preserving_same_size_edit_is_still_detected(self):
+        """What the digest buys, and what metadata alone could never see.
+
+        `cp -p`, `rsync --times`, `touch -r` and any tar or backup restore preserve the
+        mtime; an edit that swaps one character preserves the size. Together they make a
+        genuinely changed file report itself unchanged — and a stale chunk that says it is
+        current is worse than one marked stale, because nothing prompts a re-read.
+        """
+        from core.docs import content_digest
+        digest = content_digest(self.file_path.read_text())
+        st = os.stat(self.file_path)
+
+        self.file_path.write_text("original contXnt\n")   # same length, one character
+        os.utime(self.file_path, (st.st_mtime, st.st_mtime))
+        fresh = os.stat(self.file_path)
+        self.assertEqual(fresh.st_size, self.size, "the probe must preserve the size")
+        self.assertEqual(fresh.st_mtime, self.mtime, "the probe must preserve the mtime")
+
+        self.assertIsNone(source_changed(str(self.file_path), self.mtime, self.size),
+                          "metadata alone cannot see this, which is the point")
+        self.assertIsNotNone(
+            source_changed(str(self.file_path), self.mtime, self.size, digest),
+            "the digest has to catch what the metadata cannot")
+
+    def test_the_digest_agrees_when_nothing_changed(self):
+        from core.docs import content_digest
+        digest = content_digest(self.file_path.read_text())
+        self.assertIsNone(source_changed(str(self.file_path), self.mtime, self.size, digest))
+
+    def test_documents_indexed_before_the_digest_existed_still_work(self):
+        """Backward compatibility: an archive written by the previous version carries no
+        `src_digest`, and must keep falling back to the metadata comparison rather than
+        being reported as changed on every search."""
+        self.assertIsNone(source_changed(str(self.file_path), self.mtime, self.size, None))
+
     def test_missing_metadata_does_not_break(self):
         self.assertIsNone(source_changed(str(self.file_path), None, None))
 

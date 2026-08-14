@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import retrieval
+from . import ports, retrieval
 from .errors import CoreError
 from .chunk import chunk_text, is_probably_binary, mode_for_suffix
 
@@ -96,21 +96,40 @@ MTIME_TOLERANCE = 0.001
 GONE = "file no longer exists"
 
 
-def source_changed(path: str, src_mtime, src_size) -> str | None:
+def content_digest(content: str) -> str:
+    """What the file WAS when we indexed it, independent of any filesystem metadata."""
+    return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def source_changed(path: str, src_mtime, src_size, src_digest=None) -> str | None:
     """The staleness reason, or None if the file matches what was indexed.
 
-    IT COMPARES WITH A TOLERANCE, and that is not sloppiness: `st_mtime` is a float and
-    the JSON round trip loses the last bits (measured: 1786646270.9956777 written
-    against 1786646270.9956775 on disk, a 2.4e-7 difference). Exact equality produced a
-    false positive on EVERY search of EVERY document — the warning would have become
-    ignorable noise and `refresh` would have reindexed the whole archive on each run,
-    paying for embeddings for nothing. One millisecond of tolerance kills the false
-    positive and still detects any real edit, which moves the mtime by seconds.
+    The digest is the answer when we have one, because it is the only comparison that
+    cannot be fooled. Metadata can: `cp -p`, `rsync --times`, `touch -r` and any tar or
+    backup restore preserve the mtime, and an edit that swaps one character preserves the
+    size — so a genuinely changed file reports itself unchanged. The file is fully read at
+    index time anyway, so hashing it costs nothing we were not already paying.
+
+    Metadata remains the fallback for documents indexed before the digest existed, and
+    there it COMPARES WITH A TOLERANCE, which is not sloppiness: `st_mtime` is a float and
+    the JSON round trip loses the last bits (measured: 1786646270.9956777 written against
+    1786646270.9956775 on disk, a 2.4e-7 difference). Exact equality produced a false
+    positive on EVERY search of EVERY document — the warning became ignorable noise and
+    `refresh` reindexed the whole archive on each run, paying for embeddings for nothing.
     """
     try:
         st = os.stat(path)
     except FileNotFoundError:
         return GONE
+    if src_digest:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                if content_digest(fh.read()) != src_digest:
+                    return "file contents changed since indexing"
+
+                return None
+        except OSError:
+            return GONE
     if src_size is not None and st.st_size != src_size:
         return "file size changed since indexing"
     if src_mtime is not None and abs(st.st_mtime - float(src_mtime)) > MTIME_TOLERANCE:
@@ -133,7 +152,8 @@ def _read_source(path: str) -> tuple[str, os.stat_result, str]:
 
 
 class DocIndex:
-    def __init__(self, qdrant, embedder, reranker, tmp_collection: str,
+    def __init__(self, qdrant: ports.VectorStore, embedder: ports.EmbeddingModel,
+                 reranker: ports.RerankModel | None, tmp_collection: str,
                  library_collection: str, vector_size: int):
         self.q = qdrant
         self.embedder = embedder
@@ -207,11 +227,15 @@ class DocIndex:
                     "end_line": chunk.end_line,
                     "mode": mode,
                     "scope": scope,
+                    # Read by nobody in this package, kept on purpose: when a search
+                    # returns a chunk that looks wrong, "which slice of how many" is the
+                    # first question, and it is unanswerable after the fact without this.
                     "chunk_ix": ix,
                     "n_chunks": len(chunks),
                     "indexed_at": _iso(now_ts),
                     "src_mtime": round(st.st_mtime, 3),
                     "src_size": st.st_size,
+                    "src_digest": content_digest(content),
                 },
             }
             if ttl_seconds is not None:
@@ -242,7 +266,8 @@ class DocIndex:
         report = []
         for doc in self.list_docs(scope):
             path = doc["path"]
-            reason = source_changed(path, doc.get("src_mtime"), doc.get("src_size"))
+            reason = source_changed(path, doc.get("src_mtime"), doc.get("src_size"),
+                                    doc.get("src_digest"))
             if reason == GONE:
                 report.append({"doc_id": doc["doc_id"], "path": path, "action": "missing"})
                 continue
@@ -252,8 +277,10 @@ class DocIndex:
             if scope == "library":
                 res = self.keep_file(path, doc["doc_id"])
             else:
-                # Reuse the original duration. Falling back to the default here would
-                # ignore the deadline the user asked for at index time.
+                # Reuse the original DURATION, and deliberately restart it: a document
+                # that was just re-read is freshly relevant, so it earns its full window
+                # again. What must not happen is falling back to the 24h default, which
+                # would silently stretch the deadline the user chose at index time.
                 res = self.index_file(path, doc.get("ttl_seconds") or DEFAULT_TTL_SECONDS,
                                       doc["doc_id"])
             report.append({"doc_id": doc["doc_id"], "path": path,
@@ -324,7 +351,8 @@ class DocIndex:
         p = raw.get("payload", {})
         md = p.get("metadata", {})
         path = md.get("path", "?")
-        reason = source_changed(path, md.get("src_mtime"), md.get("src_size"))
+        reason = source_changed(path, md.get("src_mtime"), md.get("src_size"),
+                                md.get("src_digest"))
         stale = f"{reason} ({md.get('indexed_at')})" if reason else None
 
         return Hit(
@@ -355,6 +383,7 @@ class DocIndex:
                     "indexed_at": md.get("indexed_at", "?"),
                     "expires_at_ts": p.get("expires_at_ts"),
                     "src_mtime": md.get("src_mtime"), "src_size": md.get("src_size"),
+                    "src_digest": md.get("src_digest"),
                     "ttl_seconds": md.get("ttl_seconds"),
                 })
                 d["chunks"] += 1

@@ -88,26 +88,26 @@ class TestTolerantEnvReading(unittest.TestCase):
 
     def test_valid_number(self):
         recall, _ = load_hook()
-        os.environ["QCTX_TESTE_NUM"] = "42"
+        os.environ["QCTX_TEST_NUM"] = "42"
         try:
-            self.assertEqual(recall.env_num("QCTX_TESTE_NUM", "X", "7", int), 42)
+            self.assertEqual(recall.env_num("QCTX_TEST_NUM", "X", "7", int), 42)
         finally:
-            del os.environ["QCTX_TESTE_NUM"]
+            del os.environ["QCTX_TEST_NUM"]
 
     def test_invalid_number_falls_back_to_the_default_and_is_recorded(self):
         recall, _ = load_hook()
         recall._pending_notes.clear()
-        os.environ["QCTX_TESTE_NUM"] = "14k"
+        os.environ["QCTX_TEST_NUM"] = "14k"
         try:
-            self.assertEqual(recall.env_num("QCTX_TESTE_NUM", "X", "14000", int), 14000)
+            self.assertEqual(recall.env_num("QCTX_TEST_NUM", "X", "14000", int), 14000)
             self.assertTrue(any("14k" in p for p in recall._pending_notes),
                             "the bad value has to be recorded, not vanish")
         finally:
-            del os.environ["QCTX_TESTE_NUM"]
+            del os.environ["QCTX_TEST_NUM"]
 
     def test_absent_uses_the_default(self):
         recall, _ = load_hook()
-        self.assertAlmostEqual(recall.env_num("QCTX_NAO_EXISTE", "NEM_ESTE", "0.58"), 0.58)
+        self.assertAlmostEqual(recall.env_num("QCTX_DOES_NOT_EXIST", "NOR_THIS_ONE", "0.58"), 0.58)
 
 
 class TestTtlPreservedAcrossRefresh(unittest.TestCase):

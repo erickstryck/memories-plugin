@@ -302,7 +302,10 @@ def purge_dead_sessions(days: float = 7.0) -> int:
     return deleted
 
 
-def save_state(path: Path, state: dict) -> None:
+def save_state(path: Path | None, state: dict) -> None:
+    """No path means state was unavailable this round; that is not an error."""
+    if path is None:
+        return
     try:
         path.write_text(json.dumps(state))
     except Exception:
@@ -428,19 +431,36 @@ def _run() -> None:
     elif outcome.by_rerank:
         breaker.clear()
 
+    # State is a NICETY — it only decides pointer-vs-full reinjection. Losing it must not
+    # cost the search that already succeeded. Before this guard, an unwritable state dir
+    # made the hook throw away results it was holding and tell the model the search had not
+    # run: a safe direction with the wrong message.
     session = "".join(c if c.isalnum() or c in "-_" else "_"
                      for c in str(data.get("session_id") or "default"))
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_path = STATE_DIR / f"recall-{session}.json"
-    state = load_state(state_path)
+    state_path = None
+    state: dict = {"round": 0, "seen": {}}
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state_path = STATE_DIR / f"recall-{session}.json"
+        state = load_state(state_path)
+    except Exception as exc:
+        log(f"state unavailable ({type(exc).__name__}) — proceeding without reinjection memory")
     state["round"] = int(state.get("round", 0)) + 1
     seen_map = state.setdefault("seen", {})
     round_no = state["round"]
 
     if not hits:
         prune_state(state)
+        # The empty line used to omit CE/collapse, so an empty round could not be told
+        # apart afterwards: "the cross-encoder vetoed everything" and "there was no second
+        # stage" and "the judgement was discarded" all looked identical in the log. Those
+        # are the rounds most worth diagnosing.
+        why = (f"CE={outcome.reranked} collapsed={outcome.collapsed} "
+               f"dropped={outcome.dropped_above_floor}"
+               + (f" suppressed={outcome.suppressed!r}" if outcome.suppressed else "")
+               + (f" error={outcome.rerank_error!r}" if outcome.rerank_error else ""))
         log(f"round {round_no}: 0 above the cut (best {outcome.best_dense:.3f}) "
-            f"in {elapsed:.1f}s | {len(angles)} angles | {prompt[:60]!r}")
+            f"in {elapsed:.1f}s | {len(angles)} angles | {why} | {prompt[:60]!r}")
         save_state(state_path, state)
         emit(empty_block(outcome, len(angles)))
         return

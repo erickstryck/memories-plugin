@@ -20,7 +20,7 @@ is the opposite of the intent.
 import uuid
 from dataclasses import dataclass
 
-from . import retrieval
+from . import ports, retrieval
 from .errors import CoreError
 from datetime import datetime, timezone
 
@@ -45,7 +45,8 @@ def _now() -> str:
 
 
 class MemoryStore:
-    def __init__(self, qdrant, embedder, reranker, collection: str, vector_size: int):
+    def __init__(self, qdrant: ports.VectorStore, embedder: ports.EmbeddingModel,
+                 reranker: ports.RerankModel | None, collection: str, vector_size: int):
         self.q = qdrant
         self.embedder = embedder
         self.reranker = reranker

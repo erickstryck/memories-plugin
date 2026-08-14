@@ -67,7 +67,7 @@ language, not just semantics. Consequences in the design:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 178 collected, 161 offline; no network, no deps
+python3 -m unittest discover -s tests    # 251 collected, 234 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -137,8 +137,9 @@ Recognized variables (canonical first, legacy aliases accepted):
 | `embed_model` | `QCTX_EMBED_MODEL`, `EMBEDDING_MODEL` |
 | `rerank_model` | `QCTX_RERANK_MODEL`, `RECALL_RERANK_MODEL` |
 | `memory_collection` | `QCTX_MEMORY_COLLECTION`, `COLLECTION_NAME` |
-| `docs_collection` | `QCTX_DOCS_COLLECTION` |
-| `library_collection` | `QCTX_LIBRARY_COLLECTION` |
+| `docs_collection` | `QCTX_DOCS_COLLECTION`, `DOCS_COLLECTION` |
+| `library_collection` | `QCTX_LIBRARY_COLLECTION`, `LIBRARY_COLLECTION` |
+| `vector_size` | `QCTX_VECTOR_SIZE`, `VECTOR_SIZE` |
 
 The two API keys are the only settings that **cannot** go into the config file:
 `config set` refuses them and points at the environment variable instead. A plaintext
@@ -195,7 +196,7 @@ core/       the portable core — no reference to a host or an agent
 cli/        the command-line interface over the core
 hooks/      recall on every prompt, checkpoint every N
 skills/     memory, doc-index
-tests/      161 offline tests + 17 integration
+tests/      234 offline tests + 17 integration
 ```
 
 ## Design
@@ -237,10 +238,11 @@ context of whoever is asking — that is what makes it viable to index a
 
 ## The hooks
 
-`recall.py` runs on every user prompt, BEFORE the model sees the text: it builds three
-angles on the question in a single embeddings call, fuses the results by id keeping the
-highest score, applies both gates and injects the documents along with the rules for
-using them. A memory injected recently comes back as a one-line pointer, and the freed
+`recall.py` runs before the model sees the text, on every prompt that names a subject —
+it skips prompts under 12 characters, bare acknowledgements and bare slash commands. It
+builds up to three angles on the question in a single embeddings call, fuses the results
+by id keeping the highest score, applies both gates and injects the documents along with
+the rules for using them. A memory injected recently comes back as a one-line pointer, and the freed
 slot reveals more of the archive.
 
 It fails silently for the **user** and never for the **model**: if the search does not
@@ -269,5 +271,5 @@ on purpose, and both are data rather than prose:
 ## Status
 
 Done and tested: the core, the CLI, the three archives, the guided diagnostics, both
-hooks, both skills and the plugin manifest. 161 offline tests and 17 integration tests
+hooks, both skills and the plugin manifest. 234 offline tests and 17 integration tests
 against a real Qdrant and real models.

@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core
+from core import retrieval
 
 ENABLED = os.environ.get("QCTX_INTEGRATION") == "1"
 THROWAWAY_COLLECTION = f"qctx_test_{uuid.uuid4().hex[:8]}"
@@ -98,7 +99,15 @@ class TestReadingTheRealArchive(unittest.TestCase):
             self.assertIn(h.origin, ("CE", "dense"))
             self.assertGreaterEqual(h.dense_score, 0.0)
         if outcome.by_rerank:
-            self.assertTrue(all(h.origin == "CE" for h in hits))
+            # NOT `all(origin == "CE")`: under veto, `two_stage` keeps only `above`, which
+            # is CE by construction, so that assertion cannot fail. A tautology dressed as
+            # a live-model check is worse than no check — it reads like coverage.
+            # What IS falsifiable: the model actually separated the candidates rather than
+            # crushing everything into the collapse band.
+            self.assertGreater(outcome.best_rerank, retrieval.COLLAPSE_MAX,
+                               "every score in the collapse band means the CE told us nothing")
+            self.assertTrue(all(h.score >= 0.10 for h in hits),
+                            "the veto is supposed to have removed anything below the cutoff")
 
     def test_recall_with_several_angles_fuses_by_id(self):
         hits, _ = self.store.recall(

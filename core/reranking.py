@@ -108,7 +108,12 @@ def _pairs(rows: list, field: str) -> list[tuple[int, float]]:
         if not isinstance(row, dict):
             continue
         idx = row.get("index")
-        value = row.get(field, row.get("relevance_score", row.get("score")))
+        # ONLY the field this strategy declares. The old fallback across
+        # `relevance_score` and `score` made the two contracts interchangeable at parse
+        # time, so a server speaking one shape was silently parsed by the other — and
+        # `info["contract"]`, which the diagnostic reports to the user as fact, could name
+        # a contract the server does not speak. A mismatch should surface, not be absorbed.
+        value = row.get(field)
         if not isinstance(idx, int) or value is None:
             continue
         output.append((idx, float(value)))
