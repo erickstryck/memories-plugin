@@ -132,10 +132,16 @@ try:
         print("0")
         line(exc)
 except Exception as exc:                    # noqa: BLE001 - reported, never raised
+    # Four lines, because the reader below always reads four. Both reasons carry the real
+    # exception: this is the one path where the operator has NOTHING else to go on — the
+    # adapter did not even import, so no later check can say anything more specific. A
+    # generic second line here would throw away the only clue in a script whose whole
+    # purpose is to explain why memory is not working.
+    detail = f"the adapter did not import: {exc}"
     print("0")
-    line(f"the adapter did not import: {exc}")
+    line(detail)
     print("0")
-    line("the adapter did not import")
+    line(detail)
 PY
 )"
 probe_ok="$(printf '%s\n' "$probe_out" | sed -n 1p)"

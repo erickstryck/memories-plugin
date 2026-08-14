@@ -458,6 +458,35 @@ class TestWhereTheProviderHasToLive(CutoverCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertNoLine(out, "WORKTREE")
 
+    def test_an_adapter_that_cannot_even_import_says_WHY_twice(self):
+        """The one path where the operator has nothing else to go on.
+
+        Every other failure has a later check that narrows it down. Here the adapter did not
+        import at all, so the exception text IS the diagnosis — and the reader consumes four
+        lines, so BOTH reason lines have to carry it. An earlier version printed the real
+        message first and a generic "the adapter did not import" second, throwing the only
+        clue away in the half the file-configuration check reports.
+        """
+        root = self.tmp / "unimportable"
+        (root / "scripts").mkdir(parents=True)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(self.PASSING_TEST)
+        shutil.copy2(SCRIPT, root / "scripts" / SCRIPT.name)
+        for shared in ("cli", "core"):
+            (root / shared).symlink_to(REPO / shared)
+        (root / "hosts" / "hermes").mkdir(parents=True)
+        # Carries the discovery marker, so THAT check passes and this one fails on its own.
+        (root / "hosts" / "hermes" / "__init__.py").write_text(
+            "def register_memory_provider():\n"
+            "    pass\n"
+            "raise RuntimeError('a very specific reason nobody could guess')\n")
+        out = self.run_script(script=root / "scripts" / SCRIPT.name)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertEqual(
+            out.stdout.count("a very specific reason nobody could guess"), 2,
+            "both reason lines must carry the real exception — the availability line AND "
+            f"the file-configuration line:\n{out.stdout}")
+
     def test_the_discovery_marker_is_actually_checked(self):
         """The check whose failure mode is "the provider does not exist": without
         `register_memory_provider` or `MemoryProvider` in the first 8192 bytes,
