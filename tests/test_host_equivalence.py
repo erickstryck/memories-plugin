@@ -27,6 +27,18 @@ from core.retrieval import DENSE, Outcome
 from tests.test_blocks import FakeHit
 
 
+def hermes_adapter_source() -> str:
+    """EVERY python file of the hermes adapter, concatenated.
+
+    The knob tests below read the environment variable names out of the adapter's source.
+    Reading only `__init__.py` was enough while the adapter was one file; now that it has a
+    `tools.py`, a knob introduced there would be invisible to the comparison — which is the
+    exact failure these tests exist to prevent, one directory deeper.
+    """
+    return "\n".join(sorted(p.read_text()
+                            for p in (REPO / "hosts" / "hermes").glob("*.py")))
+
+
 class TestBothHostsRenderTheSameBlock(unittest.TestCase):
     """Same Outcome and same hits through both adapters -> byte-identical text."""
 
@@ -152,7 +164,7 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
         import re
         pattern = re.compile(r'QCTX_RECALL_[A-Z_]+')
         hook = set(pattern.findall((REPO / "hooks" / "recall.py").read_text()))
-        host = set(pattern.findall((REPO / "hosts" / "hermes" / "__init__.py").read_text()))
+        host = set(pattern.findall(hermes_adapter_source()))
         self.assertTrue(hook, "no QCTX_RECALL_* names found in the hook")
         self.assertEqual(hook, host,
                          f"only in claude-code: {hook - host}; only in hermes: {host - hook}")
@@ -166,7 +178,7 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
         import re
         pattern = re.compile(r'QCTX_CHECKPOINT_[A-Z_]+')
         hook = set(pattern.findall((REPO / "hooks" / "checkpoint.py").read_text()))
-        host = set(pattern.findall((REPO / "hosts" / "hermes" / "__init__.py").read_text()))
+        host = set(pattern.findall(hermes_adapter_source()))
         self.assertTrue(hook, "no QCTX_CHECKPOINT_* names found in the hook")
         self.assertEqual(hook, host,
                          f"only in claude-code: {hook - host}; only in hermes: {host - hook}")
