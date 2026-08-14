@@ -413,10 +413,63 @@ class MemoriesProvider(_Base):
         return self._cfg
 
     def get_config_schema(self) -> list:
-        return []          # Task 9 fills this
+        """Fields `hermes memory setup` walks. The same settings `qctx setup` collects.
+
+        Derived from core.config rather than restated, so a field added there cannot become
+        a setting the hermes wizard silently cannot reach.
+        """
+        from dataclasses import fields as dc_fields
+
+        from core.config import DEFAULTS, ENV_ALIASES, SECRET_FIELDS, Config
+
+        described = {
+            "qdrant_url": "Qdrant base URL, e.g. https://host/qdrant",
+            "qdrant_api_key": "Qdrant API key",
+            "api_base_url": "OpenAI-compatible base URL serving the models",
+            "api_key": "API key for that endpoint",
+            "embed_url": "Full /embeddings URL (optional if api_base_url is set)",
+            "rerank_url": "Full /rerank URL (optional; without it search still works)",
+            "embed_model": "Embedding model name",
+            "rerank_model": "Cross-encoder model name",
+            "memory_collection": "Collection holding curated facts. Point it at the one "
+                                 "claude-code uses to share the archive.",
+            "docs_collection": "Collection for temporary document chunks (TTL)",
+            "library_collection": "Collection for permanently kept documents",
+            "vector_size": "Embedding dimension; `qctx config detect` measures it",
+        }
+        out = []
+        for f in dc_fields(Config):
+            secret = f.name in SECRET_FIELDS
+            field = {
+                "key": f.name,
+                "description": described[f.name],
+                "secret": secret,
+                "required": f.name in ("qdrant_url", "memory_collection"),
+                "type": "integer" if f.name == "vector_size" else "text",
+            }
+            default = DEFAULTS.get(f.name)
+            if default not in ("", None):
+                field["default"] = default
+            if secret:
+                field["env_var"] = ENV_ALIASES[f.name][0]
+            out.append(field)
+
+        return out
 
     def save_config(self, values: dict, hermes_home: str) -> None:
-        pass               # Task 9 fills this
+        """Write to the plugin's native location — the SAME file claude-code reads.
+
+        That is what makes the two hosts share one configuration instead of two that drift.
+        Secrets are dropped here, not merely unsaved: `core.save` refuses them, and routing
+        around that refusal would put a key in a text file that ends up in backups and in
+        dotfile sync.
+        """
+        from core.config import SECRET_FIELDS
+
+        patch = {k: v for k, v in (values or {}).items()
+                 if k not in SECRET_FIELDS and v not in ("", None)}
+        if patch:
+            core.save(patch)
 
     # -- explicit no-ops, with the reason each one is a no-op -----------------
     #
