@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -260,3 +261,121 @@ class TestPrefetch(unittest.TestCase):
         block = MemoriesProvider().system_prompt_block()
         self.assertIn("qctx memory", block)
         self.assertNotIn("── ", block, "recalled memories go through prefetch, not here")
+
+    def test_an_unwritable_state_directory_does_not_cost_the_search(self):
+        """The third appearance of 'safe direction, wrong message' in this plan:
+        `_state_path` returns None when it cannot create the state directory, and that
+        None used to reach `Breaker(None, ...)`, which raised TypeError before
+        `store.recall` ever ran — an archive that was perfectly reachable got reported as
+        not consulted. `core.breaker.Breaker` now tolerates `path=None` the same way
+        `session_state` tolerates a missing state directory, so the search must still run
+        and a REAL block (not the unavailability one) must come back.
+        """
+        from core.retrieval import Outcome
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        calls = []
+
+        class Counting:
+            def recall(self, *a, **kw):
+                calls.append(1)
+
+                return [], Outcome(candidates=0, best_dense=0.0)
+
+        p._store = Counting()
+        # A plain FILE where a directory is expected: base.mkdir(...) fails with
+        # FileExistsError (an OSError), so _state_path degrades to None.
+        blocker = Path(tempfile.mkdtemp()) / "blocked"
+        blocker.write_text("not a directory")
+        p._state_dir = blocker
+
+        out = p.prefetch("a real question the archive should be reachable for")
+        self.assertEqual(calls, [1], "the search must run even without a state directory")
+        self.assertNotIn("UNAVAILABLE", out, "the archive was reachable; it must not be "
+                         "reported as unconsulted because a directory could not be made")
+
+    def test_recall_disabled_by_env_costs_nothing(self):
+        """The hook honours QCTX_RECALL_DISABLED / RECALL_DISABLED; the adapter must too —
+        a user who disabled recall expects it disabled in both hosts, and Task 6's
+        equivalence test extracts this exact name from both files."""
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class Counting:
+            calls = 0
+
+            def recall(self, *a, **kw):
+                Counting.calls += 1
+
+                return [], None
+
+        p._store = Counting()
+        p._state_dir = Path(tempfile.mkdtemp())
+        with unittest.mock.patch.dict(os.environ, {"QCTX_RECALL_DISABLED": "1"}):
+            self.assertEqual(p.prefetch("a real question about the archive"), "")
+        self.assertEqual(Counting.calls, 0, "prefetch reached the network while disabled")
+
+        Counting.calls = 0
+        with unittest.mock.patch.dict(os.environ, {"RECALL_DISABLED": "1"}):
+            self.assertEqual(p.prefetch("a real question about the archive"), "")
+        self.assertEqual(Counting.calls, 0, "the legacy name must disable it too")
+
+
+def _dummy_cfg():
+    """A Config that satisfies build_memory's validation without ever touching the
+    network — Qdrant/Embedder/Reranker only open connections lazily, on first use."""
+    return core.Config(
+        qdrant_url="http://localhost:1", qdrant_api_key="", api_base_url="",
+        api_key="", embed_url="http://localhost:1/embeddings", rerank_url="",
+        embed_model="m", rerank_model="", memory_collection="test-memories",
+        docs_collection="", library_collection="", vector_size=8,
+    )
+
+
+class TestEnsureStoreTimeouts(unittest.TestCase):
+    """`_ensure_store` derives the qdrant timeout from HERMES_PREFETCH_BUDGET_S and
+    QCTX_RECALL_QDRANT_BUDGET. Both must have a REAL effect: a knob that is read and then
+    ignored would still pass Task 6's name-equality check while doing nothing, which
+    converts a real divergence between the two hosts into documented assurance.
+    """
+
+    def setUp(self):
+        from hosts.hermes import HERMES_PREFETCH_BUDGET_S, MAX_ANGLES
+        self.share = HERMES_PREFETCH_BUDGET_S / 4.0
+        self.qdrant_calls = MAX_ANGLES + 1
+        self._original_budget = MemoriesProvider.QDRANT_BUDGET
+
+    def tearDown(self):
+        MemoriesProvider.QDRANT_BUDGET = self._original_budget
+
+    def test_the_default_budget_is_sized_for_the_worst_case_angle_count(self):
+        """Regression for the bug: the store used to be sized from whichever prompt's
+        angle count built it first, so a 1-angle prompt baked in a timeout a later
+        3-angle prompt would then multiply past the ceiling. `_ensure_store` no longer
+        takes an angle count at all — it must always assume MAX_ANGLES."""
+        p = MemoriesProvider()
+        p._cfg = _dummy_cfg()
+        store = p._ensure_store()
+        expected = min(self._original_budget, self.share) / self.qdrant_calls
+        self.assertAlmostEqual(store.q.timeout, expected, places=6)
+
+    def test_the_budget_knob_can_tighten_the_qdrant_timeout(self):
+        MemoriesProvider.QDRANT_BUDGET = 0.1   # far below the derived share
+        p = MemoriesProvider()
+        p._cfg = _dummy_cfg()
+        store = p._ensure_store()
+        expected = 0.1 / self.qdrant_calls
+        self.assertAlmostEqual(store.q.timeout, expected, places=6)
+
+    def test_the_budget_knob_cannot_exceed_this_hosts_own_derived_share(self):
+        """The hook's default (5.0s) was sized for its own, more generous host deadline.
+        Taking it literally here — on an 8s ceiling shared with embed and rerank — would
+        blow past it on the default alone, so the knob is a ceiling that can only
+        tighten, never loosen past what this host can afford."""
+        MemoriesProvider.QDRANT_BUDGET = 999.0  # far above the derived share
+        p = MemoriesProvider()
+        p._cfg = _dummy_cfg()
+        store = p._ensure_store()
+        expected = self.share / self.qdrant_calls
+        self.assertAlmostEqual(store.q.timeout, expected, places=6)

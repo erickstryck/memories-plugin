@@ -56,6 +56,15 @@ except ImportError:
 #: will actually be made, never repeated per call.
 HERMES_PREFETCH_BUDGET_S = 8.0
 
+#: `query.angles()` returns AT MOST 3 angles — the raw text, content words, and the
+#: longest sentence; see its own docstring, this is not a guess. `_ensure_store` builds
+#: the store's timeouts ONCE per session and reuses them for every later prefetch, so
+#: they have to be sized for the WORST angle count any prompt could ever ask for, not
+#: whatever the first prompt happened to have — a 1-angle first prompt would otherwise
+#: bake in a per-call qdrant share that a later 3-angle prompt then multiplies past the
+#: budget, landing exactly at HERMES_PREFETCH_BUDGET_S with the reserved headroom gone.
+MAX_ANGLES = 3
+
 
 def _env(name: str, legacy: str, default: str) -> str:
     return os.environ.get(name) or os.environ.get(legacy) or default
@@ -179,12 +188,21 @@ class MemoriesProvider(_Base):
                                             f"{type(exc).__name__}: {exc}"[:200])
 
     def _prefetch(self, query_text: str, session_id: str) -> str:
+        # Read fresh on every call, not cached at import time like the class-level tuning
+        # constants above: unlike a hook, this provider is one long-lived object for the
+        # whole process, so a value fixed at import would never see a later change. Same
+        # name and same silent short-circuit as the hook — a user who disabled recall
+        # expects it disabled in both hosts.
+        if (os.environ.get("QCTX_RECALL_DISABLED") == "1"
+                or os.environ.get("RECALL_DISABLED") == "1"):
+            return ""
+
         skip = query.skip_reason(query_text)
         if skip:
             return ""
 
         angles = query.angles(query_text)
-        store = self._ensure_store(len(angles))
+        store = self._ensure_store()
         breaker = Breaker(self._state_path("rerank-breaker"), self.BREAKER_SECONDS)
         idle = breaker.is_open()
         suppressed = None
@@ -249,7 +267,7 @@ class MemoriesProvider(_Base):
 
         return base / name
 
-    def _ensure_store(self, n_angles: int):
+    def _ensure_store(self):
         """Build the memory store once per session, with timeouts DERIVED from the host's
         prefetch ceiling rather than picked per call.
 
@@ -258,15 +276,30 @@ class MemoriesProvider(_Base):
         per-call timeout multiplies by the angle count — that is exactly how the
         claude-code hook's budget came to exceed its own host deadline. Dividing a total
         among the calls that will actually be made does not multiply.
+
+        Sized for MAX_ANGLES, not this call's actual angle count: the store — and the
+        timeouts baked into it — is built ONCE and reused for the rest of the session, so
+        it must be safe for whichever prompt asks the most angles, not just whichever
+        prompt happened to build the store first. Taking `n_angles` as a parameter here
+        would invite sizing it from the current call, which is exactly the mistake this
+        comment exists to head off.
+
+        `QDRANT_BUDGET` is honoured the same way the hook honours it — a ceiling the
+        deployer can TIGHTEN — but capped by this host's own derived share. The hook's
+        default (5.0s) was sized for its own multi-second host deadline; taking it
+        literally here, on an 8s ceiling shared with embed and rerank, would blow past it
+        on the default alone. min() lets the knob lower the timeout; it cannot raise it
+        past what this host can afford.
         """
         if self._store is not None:
             return self._store
-        qdrant_calls = max(1, n_angles + 1)      # one existence check, then one per angle
-        share = HERMES_PREFETCH_BUDGET_S / 4.0   # embed + qdrant total + rerank + headroom
+        qdrant_calls = MAX_ANGLES + 1              # sized for the worst case, not THIS call
+        share = HERMES_PREFETCH_BUDGET_S / 4.0     # embed + qdrant total + rerank + headroom
+        qdrant_total = min(self.QDRANT_BUDGET, share)
         self._store = core.build_memory(
             self._cfg or core.load(),
             timeouts={"embed": share,
-                      "qdrant": share / qdrant_calls,
+                      "qdrant": qdrant_total / qdrant_calls,
                       "rerank": share},
         )
 

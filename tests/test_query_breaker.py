@@ -161,6 +161,17 @@ class TestBreaker(unittest.TestCase):
     def test_arming_on_an_impossible_path_does_not_raise(self):
         Breaker("/proc/impossible/breaker", 300).arm()  # must not blow up
 
+    def test_a_none_path_is_a_valid_call_not_a_crash(self):
+        """A caller with no writable state directory has to be able to say "nowhere to
+        persist this" without Breaker raising before the search it guards ever runs —
+        the same convention session_state.load/save already use for a missing directory.
+        """
+        b = Breaker(None, 300)
+        self.assertIsNone(b.is_open(), "no persisted breaker means go ahead and try")
+        b.arm()   # must not raise
+        b.clear()  # must not raise
+        self.assertIsNone(b.is_open(), "still nothing to read back")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
