@@ -123,12 +123,10 @@ def empty_block(outcome, n_angles: int) -> str:
     # exactly while the shared GPU is struggling. `Outcome.suppressed` closes that by
     # making the caller state the decision instead of leaving it to be inferred.
     #
-    # `empty_block` has no budget to read `max_memories` from — and does not need one:
-    # this state is reached only when `hits` is empty, which (see MemoryStore.recall)
-    # happens exactly when `outcome.scored` is empty too. That makes the ceiling guard
-    # inside degradation_note (`len(outcome.scored) < max_memories`) vacuously true for
-    # any positive value, so the placeholder below changes nothing about the result.
-    note = degradation_note(outcome, max_memories=1)
+    # `empty_block` has no budget to read `max_memories` from. It does not need one: the
+    # ceiling is derived from `outcome` itself, so the guard is vacuously true and no
+    # caller can make it wrong.
+    note = degradation_note(outcome, max_memories=len(outcome.scored) + 1)
     if note:
         conclusion = ("The archive was consulted but the judgement was PARTIAL, so this is "
                      "not evidence that no precedent exists — if the subject might have "
