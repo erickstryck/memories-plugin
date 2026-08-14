@@ -375,6 +375,139 @@ class TestPrefetch(unittest.TestCase):
         self.assertEqual(Counting.calls, 0, "the legacy name must disable it too")
 
 
+class TestTheBreakerDegradesONETurnAndNotTheWholeSession(unittest.TestCase):
+    """A rerank failure must cost the turns the breaker is open for, and not one more.
+
+    This host is the only one that can get this wrong, and it did. The claude-code hook is a
+    fresh process per prompt, so writing `store.reranker = None` cannot outlive the prompt
+    that wrote it. Here the store is cached for the whole session (`_ensure_store`, for the
+    connection the 8s prefetch budget is sized around), so the suppression outlived the
+    breaker. Measured across three prefetches with the breaker armed only for the first:
+
+        turn 1 (breaker OPEN)  top_k=8  reranker=False  suppressed='circuit breaker: …'
+        turn 2 (breaker cold)  top_k=8  reranker=False  suppressed=None
+        turn 3 (breaker cold)  top_k=8  reranker=False  suppressed=None
+
+    Two failures in one, and the second is the serious one: the pipeline stayed degraded
+    for the rest of the session, AND `suppressed` went back to None, so the degradation
+    note vanished while the degradation did not — an empty result then printed "There is no
+    recorded precedent on this subject". A flat claim of absence produced by a crippled
+    search is exactly what the four block states exist to prevent.
+
+    Nothing drove a SECOND turn before this: `grep breaker tests/test_hermes_provider.py`
+    found comments only, and one-turn tests cannot see a bug whose whole shape is what the
+    first turn leaves behind.
+    """
+
+    #: Read as instance attributes rather than trusting the class defaults: `TOP_K` and
+    #: `TOP_K_STRICT` are frozen at import from `QCTX_RECALL_TOP_K`/`RECALL_TOP_K`, and this
+    #: user exports `RECALL_*` from `.bashrc` — which would pin both states to one number
+    #: and make the top_k half of every assertion below vacuous. This test is about the
+    #: breaker; the knob's own defaults are held by test_host_equivalence.py.
+    LENIENT, STRICT = 20, 8
+
+    def _provider(self, state_dir):
+        from core.retrieval import Outcome
+
+        turns = []
+
+        class Reranker:
+            """Never actually asked to rank — its PRESENCE is the whole subject."""
+
+            def rank(self, query, documents):  # pragma: no cover — see the docstring
+                return [], {"ok": False, "error": "not exercised here"}
+
+        class Store:
+            reranker = Reranker()
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                turns.append({"top_k": top_k,
+                              "reranker": getattr(self, "reranker", None) is not None,
+                              "suppressed": suppressed})
+                # What `core.retrieval.two_stage` really does with the parameter: it goes
+                # into the Outcome, which is what `blocks` reads to pick the conclusion.
+                return [], Outcome(candidates=3, best_dense=0.54, suppressed=suppressed)
+
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._state_dir = state_dir
+        p._store = Store()
+        p.TOP_K, p.TOP_K_STRICT = self.LENIENT, self.STRICT
+        p.BREAKER_SECONDS = 300.0
+
+        return p, turns
+
+    PROMPT = "how does the connector poll paginate its results?"
+    FLAT_CLAIM = "There is no recorded precedent"
+
+    def test_a_cooled_breaker_gives_the_cross_encoder_back_on_the_very_next_turn(self):
+        import time
+
+        state_dir = Path(tempfile.mkdtemp())
+        breaker_file = state_dir / "rerank-breaker"
+        p, turns = self._provider(state_dir)
+
+        breaker_file.write_text(str(time.time()))                 # failed just now
+        blocks_out = [p.prefetch(self.PROMPT)]
+        breaker_file.write_text(str(time.time() - 600))           # cooldown 300s: expired
+        blocks_out.append(p.prefetch(self.PROMPT))
+        blocks_out.append(p.prefetch(self.PROMPT))
+
+        self.assertEqual(len(turns), 3, "the store was not reached once per turn")
+
+        # Turn 1: the breaker is open, so this is what a DEGRADED turn has to look like.
+        self.assertEqual(turns[0]["top_k"], self.STRICT)
+        self.assertFalse(turns[0]["reranker"], "the open breaker must hold the re-rank back")
+        self.assertIn("circuit breaker", turns[0]["suppressed"] or "")
+        self.assertNotIn(self.FLAT_CLAIM, blocks_out[0],
+                         "a degraded search may never claim the archive holds nothing")
+
+        # Turns 2 and 3: the breaker cooled, so two-stage retrieval comes BACK — and stays
+        # back. Turn 3 is not redundant: the bug was permanent, and a fix that restored the
+        # reranker only on the first cooled turn would pass with turn 2 alone.
+        for i in (1, 2):
+            with self.subTest(turn=i + 1):
+                self.assertTrue(turns[i]["reranker"],
+                                "the cross-encoder never came back: one rerank failure "
+                                "degraded the rest of the session")
+                self.assertEqual(turns[i]["top_k"], self.LENIENT,
+                                 "top_k stayed at the strict floor with a reranker present")
+                self.assertIsNone(turns[i]["suppressed"],
+                                  "nothing was suppressed on this turn")
+
+        self.assertIsNotNone(getattr(p._store, "reranker", None),
+                             "the session's store lost its cross-encoder permanently")
+
+    def test_no_turn_may_claim_absence_while_the_pipeline_is_degraded(self):
+        """The invariant behind the numbers above, stated once over all three turns.
+
+        The old code broke it on turns 2 and 3: the reranker was gone from a store that has
+        one, `suppressed` was None so no note was rendered, and the block asserted absence
+        anyway. A turn may claim the archive holds nothing ONLY if the search behind that
+        claim was whole.
+        """
+        import time
+
+        state_dir = Path(tempfile.mkdtemp())
+        breaker_file = state_dir / "rerank-breaker"
+        p, turns = self._provider(state_dir)
+
+        breaker_file.write_text(str(time.time()))
+        out = [p.prefetch(self.PROMPT)]
+        breaker_file.write_text(str(time.time() - 600))
+        out += [p.prefetch(self.PROMPT), p.prefetch(self.PROMPT)]
+
+        for i, (turn, block) in enumerate(zip(turns, out), 1):
+            degraded = not turn["reranker"] or turn["top_k"] == self.STRICT
+            with self.subTest(turn=i):
+                if degraded:
+                    self.assertNotIn(self.FLAT_CLAIM, block,
+                                     f"turn {i} ran degraded ({turn}) and still told the "
+                                     f"model there is no precedent")
+                    self.assertIsNotNone(turn["suppressed"],
+                                         f"turn {i} ran degraded and said nothing about it")
+
+
 def _dummy_cfg():
     """A Config that satisfies build_memory's validation without ever touching the
     network — Qdrant/Embedder/Reranker only open connections lazily, on first use."""

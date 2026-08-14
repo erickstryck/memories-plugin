@@ -150,6 +150,10 @@ class MemoriesProvider(_Base):
     def __init__(self):
         self._cfg = None
         self._store = None
+        #: The store's REAL cross-encoder, remembered so a cooled breaker can hand it
+        #: back — see `_reranker_for_this_turn`. Filled on the first prefetch, not here:
+        #: the store does not exist yet.
+        self._reranker = None
         self._reason = ""
         self._session_id = ""
         self._state_dir = None
@@ -198,6 +202,10 @@ class MemoriesProvider(_Base):
 
     def shutdown(self) -> None:
         self._store = None
+        # With the store goes the cross-encoder remembered off it: the next `_ensure_store`
+        # builds a fresh one, and handing the new store the old store's reranker would keep
+        # a dependency of a connection nobody holds any more.
+        self._reranker = None
 
     def get_tool_schemas(self) -> list:
         """The 15 operations the model may invoke. See tools.py for the five left out.
@@ -253,8 +261,9 @@ class MemoriesProvider(_Base):
         idle = breaker.is_open()
         suppressed = None
         if idle is not None:
-            store.reranker = None
             suppressed = f"circuit breaker: the re-rank failed {idle:.0f}s ago"
+        # Decided per TURN and in BOTH directions — see `_reranker_for_this_turn`.
+        self._reranker_for_this_turn(store, suppressed)
 
         policy = core.Policy(dense_floor=self.DENSE_FLOOR, strict_floor=self.STRICT_FLOOR,
                              min_score=self.MIN_SCORE, max_results=self.BUDGET.max_memories,
@@ -298,6 +307,46 @@ class MemoriesProvider(_Base):
 
         return self._with_checkpoint(
             blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
+
+    def _reranker_for_this_turn(self, store, suppressed: str | None) -> None:
+        """Point the CACHED store's reranker at what the breaker says right now.
+
+        The claude-code hook can write `store.reranker = None` and forget about it: it is a
+        fresh process per prompt, so the next prompt rebuilds everything. This host is one
+        long-lived object whose store — and the connection its 8s budget depends on — is
+        built once per session, so a suppression written into that store OUTLIVES the turn
+        that wrote it. Measured, three prefetches with the breaker armed only for the first:
+
+            turn 1 (breaker OPEN)  top_k=8 reranker=False suppressed='circuit breaker: …'
+            turn 2 (breaker cold)  top_k=8 reranker=False suppressed=None
+            turn 3 (breaker cold)  top_k=8 reranker=False suppressed=None
+
+        One rerank failure — the event the breaker exists FOR, because the shared GPU
+        saturates for minutes — degraded every remaining turn of the session to a
+        single-stage pipeline at the strict floor with the stricter top_k. Worse than the
+        lost precision: `suppressed` went back to None once the cooldown passed, so the
+        degradation note disappeared while the degradation itself did not, and an empty
+        result printed "There is no recorded precedent on this subject" — a flat claim of
+        absence produced by a pipeline that was still crippled. That is the one statement
+        this whole package exists to prevent.
+
+        So the decision is re-applied every turn, in BOTH directions, from the breaker's
+        CURRENT state: the real cross-encoder is remembered here rather than thrown away,
+        and a cooled breaker restores two-stage retrieval exactly as the hook's next
+        process would. Rebuilding the store per turn would fix the symptom by discarding
+        the cached connection the budget is sized around — the wrong half to give up.
+
+        The assignment is guarded for the same reason `top_k` is read with `getattr`: a
+        store object that refuses it must cost at most a stricter top_k, never a recall
+        turned into an UNAVAILABLE block by `prefetch`'s catch-all while the archive was
+        perfectly reachable.
+        """
+        if self._reranker is None:
+            self._reranker = getattr(store, "reranker", None)
+        try:
+            store.reranker = None if suppressed else self._reranker
+        except Exception:  # noqa: BLE001 — a stricter top_k beats a lost recall
+            pass
 
     def _sweep_dead_state(self, round_no: int) -> None:
         """Delete the state of sessions that are not coming back.
