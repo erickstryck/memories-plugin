@@ -23,8 +23,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from core import blocks
-from core.retrieval import CE, DENSE, Outcome
-from tests.test_blocks import BUDGET, FakeHit
+from core.retrieval import DENSE, Outcome
+from tests.test_blocks import FakeHit
 
 
 class TestBothHostsRenderTheSameBlock(unittest.TestCase):
