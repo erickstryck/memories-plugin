@@ -290,18 +290,15 @@ def _run() -> None:
     except Exception as exc:
         log(f"state unavailable ({type(exc).__name__}) — proceeding without reinjection memory")
     round_no = st.next_round(state)
+    # A non-dict `seen` is already healed by `st.load`, so the `st.save` below persists a
+    # clean `{}` and dedup comes back next round. That guard used to live HERE, in this
+    # adapter, which is precisely why the hermes adapter never had it and its state files
+    # stayed corrupted forever — so it moved into `core.session_state.load`, the one function
+    # both hosts read state through. The other half of the pair stays where it is:
+    # `core.blocks.split_by_budget` still degrades a non-dict `seen` on its own, so no host
+    # can crash on one even if it never came through `load` (ledger F8 keeps both).
+    # `setdefault` remains for the fallback `state` built above, when the load itself failed.
     seen_map = state.setdefault("seen", {})
-    if not isinstance(seen_map, dict):
-        # core.blocks.split_by_budget already degrades a non-dict `seen` to "nothing has
-        # been seen" on its own — it will not raise or drop hits. But it does so on a
-        # LOCAL substitute, on purpose: "the caller owns persistence" (see its docstring),
-        # so it never reaches back into `state["seen"]` to fix it. Without this guard the
-        # corruption would never heal: every round from here on would silently lose the
-        # dedup memory again, forever, instead of just this one. Replacing it here means
-        # the very next `st.save` below persists a clean `{}`, and dedup comes back next
-        # round.
-        seen_map = {}
-        state["seen"] = seen_map
 
     if not hits:
         st.prune(state)

@@ -546,6 +546,81 @@ class TestTheTopKKnobMeansTheSameThingInBothHosts(unittest.TestCase):
                     self._hermes_top_k(has_reranker, self._state_dir(), override=5), 5)
 
 
+#: A prompt that survives `query.skip_reason` and produces a real recall round.
+HITS_PROMPT = "how does the connector poll paginate its results?"
+
+#: Two hits, so a state file written by either host carries more than one `seen` entry.
+_STUB_STORE = (
+    "class Stub:\n"
+    "    reranker = None\n"
+    "    def recall(self, queries, policy, top_k, suppressed=None):\n"
+    "        return ([FakeHit(id='hit-1', document='fact one', origin=CE),\n"
+    "                 FakeHit(id='hit-2', document='fact two', origin=CE)],\n"
+    "                Outcome(candidates=2, reranked=True))\n"
+)
+
+
+def drive_claude_rounds(state_dir, session: str, rounds: int = 1) -> None:
+    """Run `hooks/recall.py::_run()` for real, `rounds` times, against `state_dir`.
+
+    A subprocess and the hook's own `_run`, not a helper shared with the hermes driver
+    below: the two hosts are driven through their own entry points on purpose (see this
+    module's docstring), and the hook only reads `QCTX_STATE_DIR` at import time.
+
+    `core.load` is patched away along with `core.build_memory` so nothing here depends on
+    the operator's real configuration file.
+    """
+    script = (
+        "import sys, json, io, unittest.mock\n"
+        "sys.path.insert(0, %r)\n"
+        "sys.path.insert(0, %r)\n"
+        "import recall\n"
+        "from core.retrieval import CE, Outcome\n"
+        "from tests.test_blocks import FakeHit\n"
+        + _STUB_STORE +
+        "for _ in range(%d):\n"
+        "    payload = json.dumps({'prompt': %r, 'session_id': %r})\n"
+        "    with unittest.mock.patch.object(recall.core, 'build_memory',\n"
+        "                                    lambda cfg, **kw: Stub()), \\\n"
+        "         unittest.mock.patch.object(recall.core, 'load', lambda: object()), \\\n"
+        "         unittest.mock.patch.object(sys, 'stdin', io.StringIO(payload)), \\\n"
+        "         unittest.mock.patch.object(sys, 'stdout', io.StringIO()):\n"
+        "        recall._run()\n"
+    ) % (str(REPO), str(REPO / "hooks"), rounds, HITS_PROMPT, session)
+    env = dict(os.environ, QCTX_STATE_DIR=str(state_dir))
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                         env=env)
+    if out.returncode != 0:
+        raise AssertionError(f"the claude-code hook failed to run:\n{out.stderr}")
+
+
+def drive_hermes_rounds(state_dir, session: str, rounds: int = 1) -> None:
+    """Run `MemoriesProvider.prefetch` for real, `rounds` times, against `state_dir`."""
+    from core.retrieval import CE, Outcome
+    from hosts.hermes import MemoriesProvider
+    p = MemoriesProvider()
+    p._cfg = object()
+    p._state_dir = Path(state_dir)
+
+    class Stub:
+        reranker = None
+
+        def recall(self, queries, policy, top_k, suppressed=None):
+            return ([FakeHit(id="hit-1", document="fact one", origin=CE),
+                     FakeHit(id="hit-2", document="fact two", origin=CE)],
+                    Outcome(candidates=2, reranked=True))
+
+    p._store = Stub()
+    for _ in range(rounds):
+        p.prefetch(HITS_PROMPT, session_id=session)
+
+
+#: The session id each host writes its own state under. Different strings on purpose:
+#: nothing here may depend on the two hosts sharing a session name.
+HOSTS = (("claude", drive_claude_rounds, "claude-live"),
+         ("hermes", drive_hermes_rounds, "hermes-live"))
+
+
 class TestBothHostsSweepDeadSessionState(unittest.TestCase):
     """`core.session_state.purge_dead` exists so a state directory does not grow one file per
     session forever — verbatim what its own docstring says. Spec §4 names dead-session
@@ -560,8 +635,6 @@ class TestBothHostsSweepDeadSessionState(unittest.TestCase):
     that swept on every single prompt.
     """
 
-    HITS_PROMPT = "how does the connector poll paginate its results?"
-
     def _state_dir(self, session: str, round_no: int) -> tuple:
         """A state dir with one live session at `round_no` and one abandoned 30-day-old file."""
         d = Path(tempfile.mkdtemp())
@@ -573,66 +646,12 @@ class TestBothHostsSweepDeadSessionState(unittest.TestCase):
 
         return d, abandoned
 
-    def _claude_round(self, state_dir, session):
-        """One real `hooks/recall.py::_run()` invocation that finds a memory."""
-        script = (
-            "import sys, json, io, unittest.mock\n"
-            "sys.path.insert(0, %r)\n"
-            "sys.path.insert(0, %r)\n"
-            "import recall\n"
-            "from core.retrieval import CE, Outcome\n"
-            "from tests.test_blocks import FakeHit\n"
-            "class Stub:\n"
-            "    reranker = None\n"
-            "    def recall(self, queries, policy, top_k, suppressed=None):\n"
-            "        return ([FakeHit(id='hit-1', document='a durable fact', origin=CE)],\n"
-            "                Outcome(candidates=1, reranked=True))\n"
-            "payload = json.dumps({'prompt': %r, 'session_id': %r})\n"
-            "with unittest.mock.patch.object(recall.core, 'build_memory',\n"
-            "                                lambda cfg, **kw: Stub()), \\\n"
-            "     unittest.mock.patch.object(recall.core, 'load', lambda: object()), \\\n"
-            "     unittest.mock.patch.object(sys, 'stdin', io.StringIO(payload)), \\\n"
-            "     unittest.mock.patch.object(sys, 'stdout', io.StringIO()):\n"
-            "    recall._run()\n"
-        ) % (str(REPO), str(REPO / "hooks"), self.HITS_PROMPT, session)
-        env = dict(os.environ, QCTX_STATE_DIR=str(state_dir))
-        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                             text=True, env=env)
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def _hermes_round(self, state_dir, session):
-        """One real `MemoriesProvider.prefetch` call that finds a memory."""
-        from core.retrieval import CE, Outcome
-        from hosts.hermes import MemoriesProvider
-        p = MemoriesProvider()
-        p._cfg = object()
-        p._state_dir = Path(state_dir)
-
-        class Stub:
-            reranker = None
-
-            def recall(self, queries, policy, top_k, suppressed=None):
-                return ([FakeHit(id="hit-1", document="a durable fact", origin=CE)],
-                        Outcome(candidates=1, reranked=True))
-
-        p._store = Stub()
-        p.prefetch(self.HITS_PROMPT, session_id=session)
-
-    #: The session id each host writes its own state under. Different strings on purpose:
-    #: nothing here may depend on the two hosts sharing a session name.
-    SESSIONS = {"claude": "claude-live", "hermes": "hermes-live"}
-
-    def _round_that_is_due(self):
-        from core.session_state import PURGE_EVERY_ROUNDS
-
-        return PURGE_EVERY_ROUNDS
-
     def test_a_round_on_the_cadence_sweeps_a_dead_session_on_both_hosts(self):
-        due = self._round_that_is_due()
-        for host, drive in (("claude", self._claude_round), ("hermes", self._hermes_round)):
+        from core.session_state import PURGE_EVERY_ROUNDS
+        for host, drive, session in HOSTS:
             with self.subTest(host=host):
-                session = self.SESSIONS[host]
-                d, abandoned = self._state_dir(session, due - 1)   # next round IS the cadence
+                # next round IS the cadence
+                d, abandoned = self._state_dir(session, PURGE_EVERY_ROUNDS - 1)
                 drive(d, session)
                 self.assertFalse(abandoned.exists(),
                                  f"{host} never sweeps: the state directory grows one file "
@@ -642,15 +661,70 @@ class TestBothHostsSweepDeadSessionState(unittest.TestCase):
                                 "the live session's own state must survive the sweep")
 
     def test_a_round_off_the_cadence_does_not_pay_for_the_sweep_on_either_host(self):
-        due = self._round_that_is_due()
-        for host, drive in (("claude", self._claude_round), ("hermes", self._hermes_round)):
+        from core.session_state import PURGE_EVERY_ROUNDS
+        for host, drive, session in HOSTS:
             with self.subTest(host=host):
-                session = self.SESSIONS[host]
-                d, abandoned = self._state_dir(session, due - 3)   # next round is not due
+                # next round is not a multiple of the cadence
+                d, abandoned = self._state_dir(session, PURGE_EVERY_ROUNDS - 3)
                 drive(d, session)
                 self.assertTrue(abandoned.exists(),
                                 f"{host} swept off the shared cadence — a glob on every "
                                 f"prompt is what the cadence exists to avoid")
+
+
+class TestBothHostsHealACorruptedSeen(unittest.TestCase):
+    """A non-dict `seen` in a state file must be REPLACED on disk, on both hosts.
+
+    Two guards, and ledger ruling F8 kept both: `core.blocks.split_by_budget` degrades a
+    non-dict `seen` to "nothing has been seen" so no host can crash on it, and the persisted
+    state is HEALED so the corruption does not outlive the round. `split_by_budget` does its
+    half on a local substitute on purpose ("the caller owns persistence"), so without the
+    second half every later round silently loses dedup: every recalled memory is reinjected
+    in full every turn, burning the 14000-char budget on repeats.
+
+    Only claude-code had the healing half. Measured over 3 rounds against
+    `{"round": 3, "seen": "corrupted-not-a-dict"}`:
+
+        hermes : {"round": 6, "seen": "corrupted-not-a-dict"}   healed? False
+        claude : {"round": 6, "seen": {"hit-1": 4, "hit-2": 4}}  healed? True
+
+    And the healing on the claude side was held by NOTHING — removing the guard left the
+    whole suite green, so a future cleanup ("the core already handles this") would have
+    deleted a guard that cost F8 a fix round and two rulings to establish. These assertions
+    read the state ON DISK, which is the only place the difference between "this round
+    survived" and "the corruption is gone" is visible.
+    """
+
+    CORRUPT = {"round": 3, "seen": "corrupted-not-a-dict"}
+
+    def _corrupted_state(self, session: str) -> tuple:
+        d = Path(tempfile.mkdtemp())
+        path = d / f"recall-{session}.json"
+        path.write_text(json.dumps(self.CORRUPT))
+
+        return d, path
+
+    def test_the_state_on_disk_is_a_dict_again_after_one_round(self):
+        for host, drive, session in HOSTS:
+            with self.subTest(host=host):
+                d, path = self._corrupted_state(session)
+                drive(d, session)
+                seen = json.loads(path.read_text()).get("seen")
+                self.assertIsInstance(
+                    seen, dict,
+                    f"{host} left the corruption on disk: every later round loses dedup, so "
+                    f"every recalled memory is reinjected in full every turn")
+
+    def test_dedup_actually_comes_back_on_the_round_after_the_corruption(self):
+        """The consequence, not just the type: once healed, the ids injected in full are
+        recorded, so the next round can tell them apart from fresh ones."""
+        for host, drive, session in HOSTS:
+            with self.subTest(host=host):
+                d, path = self._corrupted_state(session)
+                drive(d, session, rounds=2)
+                state = json.loads(path.read_text())
+                self.assertEqual(sorted(state["seen"]), ["hit-1", "hit-2"],
+                                 f"{host} is not recording what it injected")
 
 
 def load_cli():

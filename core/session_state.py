@@ -22,7 +22,21 @@ REINJECT_AFTER = 8
 
 
 def load(path) -> dict:
-    """Read the state, or a fresh one. Any failure is a fresh session, never an error."""
+    """Read the state, or a fresh one. Any failure is a fresh session, never an error.
+
+    A `seen` that is not a dict — a hand-edited file, an older format, a bad write — is
+    REPLACED here, and that placement is the point. `core.blocks.split_by_budget` already
+    refuses to crash on one, but it does so on a LOCAL substitute, deliberately: "the caller
+    owns persistence", so it never reaches back into `state["seen"]`. Something therefore has
+    to heal the persisted copy, or every later round loses the dedup memory again, forever —
+    every recalled memory reinjected in full every turn, spending the whole char budget on
+    repeats.
+
+    That healing used to be a guard inside `hooks/recall.py`, which is exactly why the hermes
+    adapter never had it: measured over 3 rounds against `{"round": 3, "seen": "corrupted"}`,
+    claude-code's file came back a dict and hermes' did not. Here, it is the one function both
+    hosts read state through, so a third host inherits it instead of having to remember it.
+    """
     try:
         state = json.loads(Path(path).read_text())
     except Exception:
@@ -30,7 +44,8 @@ def load(path) -> dict:
     if not isinstance(state, dict):
         return {"round": 0, "seen": {}}
     state.setdefault("round", 0)
-    state.setdefault("seen", {})
+    if not isinstance(state.get("seen"), dict):
+        state["seen"] = {}
 
     return state
 

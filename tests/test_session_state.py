@@ -33,6 +33,29 @@ class TestLoadAndSave(unittest.TestCase):
         st.save(self.path, {"round": 3, "seen": {"a": 2}})
         self.assertEqual(st.load(self.path), {"round": 3, "seen": {"a": 2}})
 
+    def test_a_non_dict_seen_is_replaced_rather_than_carried_forward(self):
+        """The HEALING half of the pair `core.blocks.split_by_budget` keeps the other half of.
+
+        `split_by_budget` refuses to crash on a non-dict `seen`, but it substitutes a LOCAL
+        dict on purpose — "the caller owns persistence" — so nothing there fixes the file. If
+        `load` handed the corruption back, the next `save` would write it out again and every
+        round from then on would lose dedup: every recalled memory reinjected in full every
+        turn. It lives here because it is the one function both hosts read state through; it
+        used to live in `hooks/recall.py`, which is why the hermes adapter never had it.
+        """
+        for corrupt in ("corrupted-not-a-dict", ["hit-1"], 7, None):
+            self.path.write_text(json.dumps({"round": 3, "seen": corrupt}))
+            state = st.load(self.path)
+            self.assertEqual(state, {"round": 3, "seen": {}},
+                             f"{corrupt!r} survived the load")
+
+    def test_healing_seen_does_not_discard_the_round_or_anything_else(self):
+        """The corruption is worth exactly its own key: a session that has run 40 rounds must
+        not be restarted, and a key some later version added must not be dropped."""
+        self.path.write_text(json.dumps({"round": 40, "seen": "corrupted", "extra": "keep"}))
+        self.assertEqual(st.load(self.path),
+                         {"round": 40, "seen": {}, "extra": "keep"})
+
     def test_saving_to_None_is_a_no_op_not_a_crash(self):
         st.save(None, {"round": 1, "seen": {}})
 
