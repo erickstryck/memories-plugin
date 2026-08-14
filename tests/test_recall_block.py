@@ -49,15 +49,34 @@ class TestEmptyBlockClaim(unittest.TestCase):
         self.assertNotIn(HEDGE, out)
         self.assertIn("0.310", out, "the best dense score is what makes the claim checkable")
 
-    def test_unjudged_candidates_withdraw_the_claim(self):
-        """The live defect. 26 candidates, 12 judged, none passed: the other 14 were never
-        looked at, so "no precedent" is not something the data supports."""
+    def test_unjudged_candidates_ABOVE_THE_FLOOR_withdraw_the_claim(self):
+        """The live defect. 26 candidates, 12 judged, none passed, and 3 of the unjudged
+        ones would have survived on dense score alone — so "no precedent" is not something
+        the data supports."""
         out = self.recall.empty_block(
-            Outcome(candidates=26, best_dense=0.503, reranked=True, dropped=14), 2)
+            Outcome(candidates=26, best_dense=0.503, reranked=True,
+                    dropped=14, dropped_above_floor=3), 2)
         self.assertNotIn(FLAT_CLAIM, out,
                          "asserting absence while warning of unjudged candidates is self-contradictory")
         self.assertIn(HEDGE, out)
-        self.assertIn("14 candidate(s) went unjudged", out)
+        self.assertIn("3 candidate(s) that clear the dense floor", out)
+
+    def test_an_unjudged_tail_BELOW_the_floor_is_not_worth_a_word(self):
+        """The other half, and the reason the previous version was noise.
+
+        Candidates arrive dense-sorted, so the pair ceiling always cuts the tail. A tail
+        entirely below the strict floor could not have held anything the single-stage mode
+        would have returned. Measured before this discrimination existed: a real prompt with
+        27 candidates and a best dense score of 0.510 — every one below the 0.58 floor —
+        still announced "21 candidate(s) went unjudged … there may be relevant memory
+        outside". Production runs 25-40 candidates against a ceiling of 12, so it fired on
+        essentially every empty result.
+        """
+        out = self.recall.empty_block(
+            Outcome(candidates=27, best_dense=0.510, reranked=True,
+                    dropped=15, dropped_above_floor=0), 2)
+        self.assertNotIn("went unjudged", out)
+        self.assertIn(FLAT_CLAIM, out, "a complete judgement earns the plain claim")
 
     def test_a_failed_rerank_withdraws_the_claim(self):
         out = self.recall.empty_block(
@@ -83,8 +102,11 @@ class TestEmptyBlockClaim(unittest.TestCase):
         cases = [
             Outcome(candidates=3, best_dense=0.2, reranked=True),
             Outcome(candidates=26, best_dense=0.5, reranked=True, dropped=14),
+            Outcome(candidates=26, best_dense=0.5, reranked=True,
+                    dropped=14, dropped_above_floor=2),
             Outcome(candidates=5, best_dense=0.5, rerank_error="boom"),
             Outcome(candidates=5, best_dense=0.46, reranked=True, collapsed=True),
+            Outcome(candidates=27, best_dense=0.54, suppressed="circuit breaker: 12s ago"),
         ]
         for outcome in cases:
             note = self.recall._degradation_note(outcome)
@@ -117,11 +139,41 @@ class TestDegradationNote(unittest.TestCase):
         self.assertIn("strict cut was reapplied", note,
                       "the reader has to know the floor moved, not just that something failed")
 
-    def test_a_collapse_is_reported_as_a_language_problem_not_irrelevance(self):
+    def test_a_collapse_names_both_causes_because_the_scores_cannot_tell_them_apart(self):
+        """This used to assert the note blamed a language mismatch. It cannot know that.
+
+        The same server scores a plainly irrelevant document at 1.6e-05, well inside the
+        collapse band, so a crushed result is equally consistent with "different languages"
+        and with "nothing is relevant". Naming only the first sends the reader looking for a
+        translation problem that may not exist.
+        """
         note = self.recall._degradation_note(
             Outcome(candidates=5, reranked=True, collapsed=True, best_rerank=0.0004))
-        self.assertIn("collapsed", note)
+        self.assertIn("at or near zero", note)
         self.assertIn("different languages", note)
+        self.assertIn("nothing is relevant", note,
+                      "the note must not assert a cause the scores cannot establish")
+
+    def test_a_suppressed_rerank_is_reported_even_though_nothing_errored(self):
+        """The breaker case, which had no signal at all before `Outcome.suppressed`.
+
+        `_run` sets `store.reranker = None` when the breaker is open, so the pipeline sees
+        an absent reranker — indistinguishable, from inside, from a deployment that has
+        none. No error, no collapse, no note, and the block then claimed no precedent
+        exists. For 300 seconds after every rerank failure.
+        """
+        note = self.recall._degradation_note(
+            Outcome(candidates=27, best_dense=0.536,
+                    suppressed="circuit breaker: the re-rank failed 12s ago"))
+        self.assertIn("circuit breaker", note)
+        self.assertIn("strict cut was reapplied", note)
+
+    def test_the_breaker_withdraws_the_flat_claim(self):
+        out = self.recall.empty_block(
+            Outcome(candidates=27, best_dense=0.536,
+                    suppressed="circuit breaker: the re-rank failed 12s ago"), 2)
+        self.assertNotIn(FLAT_CLAIM, out)
+        self.assertIn(HEDGE, out)
 
 
 class TestBuildBlock(unittest.TestCase):
@@ -167,7 +219,8 @@ class TestBuildBlock(unittest.TestCase):
 
     def test_a_partial_judgement_is_carried_into_the_populated_block_too(self):
         out = self.recall.build_block([self._hit()], [], 2,
-                                      Outcome(candidates=30, reranked=True, dropped=18))
+                                      Outcome(candidates=30, reranked=True,
+                                              dropped=18, dropped_above_floor=4))
         self.assertIn("partial judgement", out)
 
 

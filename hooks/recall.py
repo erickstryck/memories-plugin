@@ -82,6 +82,11 @@ MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
 MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
 BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 
+#: Total seconds allowed for ALL Qdrant calls in one invocation, divided among them.
+#: A per-call timeout multiplies by the number of angles; a total does not, which is
+#: what keeps the worst case inside the host deadline in hooks.json.
+QDRANT_BUDGET = env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
+
 #: Rounds before reinjecting a memory in full instead of the one-line pointer. The
 #: context may have been compacted in the meantime.
 REINJECT_AFTER = 8
@@ -155,15 +160,22 @@ def _degradation_note(outcome) -> str:
     if outcome.rerank_error:
         parts.append(f"the re-rank did NOT run ({outcome.rerank_error[:80]}), so the order is "
                       "dense and the strict cut was reapplied")
+    elif outcome.suppressed:
+        parts.append(f"the re-rank was not used ({outcome.suppressed}), so only the dense "
+                      "stage ran and the strict cut was reapplied")
     elif outcome.collapsed:
-        parts.append(f"the re-rank collapsed (best {outcome.best_rerank:.4f}), typical of a "
-                      "question and a memory in different languages; dense order")
-    # `dropped` is only news when the slots were NOT filled: what got dropped is the
-    # tail with the lowest dense score, cut by design, and warning about it on every
+        parts.append(f"the re-rank scored everything at or near zero (best "
+                      f"{outcome.best_rerank:.4f}) and its order was discarded; that happens "
+                      "with a question and a document in different languages, and also when "
+                      "nothing is relevant — the scores cannot tell those apart")
+    # Only unjudged candidates ABOVE the strict floor are news. The pair ceiling always
+    # cuts the lowest-scoring tail, so a tail below that floor could not have held
+    # anything the single-stage mode would have returned, and announcing it on every
     # prompt is crying wolf — the warning loses its value exactly when it matters.
-    if outcome.dropped and len(outcome.scored) < MAX_MEMORIES:
-        parts.append(f"{outcome.dropped} candidate(s) went unjudged because of the pair ceiling, "
-                      f"and the slots were not filled — there may be relevant memory outside")
+    if outcome.dropped_above_floor and len(outcome.scored) < MAX_MEMORIES:
+        parts.append(f"{outcome.dropped_above_floor} candidate(s) that clear the dense floor "
+                      f"went unjudged because of the pair ceiling, and the slots were not "
+                      f"filled — there may be relevant memory outside")
     if not parts:
         return ""
 
@@ -178,9 +190,12 @@ def empty_block(outcome, n_angles: int) -> str:
     # the same block, contradicting each other — and the flat claim is the exact failure
     # this hook exists to prevent, so it is the one that has to yield.
     #
-    # It is not a rare corner: the dense stage routinely clears more candidates than the
-    # cross-encoder's pair ceiling accepts, so an empty result usually means "the top N
-    # by vector proximity failed the cutoff", not "the archive holds nothing".
+    # Deriving one from the other was necessary and not sufficient: the note itself still
+    # had to LEARN each new degradation, and it did not know about the circuit breaker.
+    # With the breaker open there was no in-process error, so no note, so the flat claim
+    # was earned by default — for the 300 seconds after every rerank failure, i.e.
+    # exactly while the shared GPU is struggling. `Outcome.suppressed` closes that by
+    # making the caller state the decision instead of leaving it to be inferred.
     note = _degradation_note(outcome)
     if note:
         conclusion = ("The archive was consulted but the judgement was PARTIAL, so this is "
@@ -327,7 +342,15 @@ def _run() -> None:
 
     prompt = extract_prompt(data)
     if not prompt:
+        # An EMPTY payload is a host that had nothing to say; a payload with keys but no
+        # recognized prompt field is a host whose field name we do not know, and that
+        # silently costs every prompt of every session. Only the second is worth alarming
+        # about, and it has to alarm — otherwise a renamed field looks exactly like an
+        # archive with no precedent.
         log(f"no prompt in the payload; keys={sorted(data.keys())}")
+        if data:
+            emit(unavailable_block("reading the prompt",
+                                   f"no known prompt field in {sorted(data.keys())}"))
         return
 
     reason = query.skip_reason(prompt)
@@ -335,38 +358,60 @@ def _run() -> None:
         log(f"skip ({reason}): {prompt[:60]!r}")
         return
 
+    angles = query.angles(prompt)
     try:
         cfg = core.load()
-        # The budget FITS inside the hook timeout (20s in hooks.json): 8+5+6 = 19s in the
-        # worst case, leaving room to emit the warning. Without this, the host killed the
-        # process before the warning got out.
-        store = core.build_memory(cfg, timeouts={"embed": 8.0, "qdrant": 5.0,
+        # The budget has to fit the hook timeout in hooks.json, and the arithmetic is not
+        # one call per dependency: `recall` issues one vector search PER ANGLE, so the
+        # Qdrant timeout is paid up to len(angles)+1 times (the existence check, then one
+        # search each). The previous comment claimed 8+5+6=19s, true only for a single
+        # angle; measured, 2 angles cost 24s and 3 cost 29s against a 20s deadline. Under a
+        # slow-but-alive Qdrant — the common shared-infrastructure failure, and the exact
+        # case the breaker exists for — the host killed the process mid-search and the
+        # model got NOTHING, not even the unavailability warning. A SIGKILL is not an
+        # exception, so the catch-all in main() cannot help.
+        #
+        # So the budget is divided, not repeated: the whole Qdrant allowance is split
+        # across the calls that will actually be made.
+        qdrant_calls = len(angles) + 1
+        store = core.build_memory(cfg, timeouts={"embed": 8.0,
+                                                 "qdrant": QDRANT_BUDGET / qdrant_calls,
                                                  "rerank": 6.0})
     except core.ConfigError as exc:
-        log(f"incomplete config ({exc}) — hook inert")
+        # NOT silent. On this path the hook does nothing at all, for every prompt of every
+        # session, while the memory skill tells the model a hook already guarantees the
+        # floor. Configuration commonly comes from the environment, so a host started
+        # without it — a desktop launcher, a systemd unit, a different shell — loses
+        # long-term memory entirely. Of every degradation here, this is the one with the
+        # largest blast radius, and it was the one that said nothing.
+        log(f"incomplete config ({exc}) — no recall on this prompt")
+        emit(unavailable_block("configuration", str(exc)))
         return
 
     # The breaker decides whether the cross-encoder takes part in this invocation.
     # Turning it off here, rather than inside the core, is what makes `recall` apply the
     # strict cut on its own: without the second gate, the permissive floor has nobody to
-    # clean up after it.
+    # clean up after it. The decision is passed DOWN as `suppressed` — inferring it from
+    # the absence of an error is what let the breaker report a degraded search as a
+    # complete one.
     breaker = Breaker(STATE_DIR / "rerank-breaker", BREAKER_SECONDS)
     idle = breaker.is_open()
+    suppressed = None
     if idle is not None:
         store.reranker = None
+        suppressed = f"circuit breaker: the re-rank failed {idle:.0f}s ago"
         log(f"re-rank in breaker: failed {idle:.0f}s ago — strict dense cut")
 
     top_k = int(env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20" if store.reranker else "8"))
     # MEMORY policy: the cross-encoder VETOES (a false positive pollutes the agent's
     # context) and the order among the approved ones is cosmetic, because all of them are
-    # injected.
+    # injected. Collapse detection is refused under a veto — see Policy.
     policy = core.Policy(dense_floor=DENSE_FLOOR, strict_floor=STRICT_FLOOR,
                            min_score=MIN_SCORE, max_results=MAX_MEMORIES,
                            veto=True, order_matters=False)
-    angles = query.angles(prompt)
     t0 = time.monotonic()
     try:
-        hits, outcome = store.recall(angles, policy, top_k)
+        hits, outcome = store.recall(angles, policy, top_k, suppressed=suppressed)
     except core.EmbeddingError as exc:
         log(f"embeddings failed ({exc}) — no recall on this prompt")
         emit(unavailable_block("embeddings", type(exc).__name__))

@@ -35,7 +35,7 @@ MEMORY_POLICY = Policy(dense_floor=0.45, strict_floor=0.58, min_score=0.10,
 # no-op — were it 0.58, a cross-lingual collapse (dense ~0.46) would return nothing,
 # which is exactly what that policy exists to prevent.
 DOCS_POLICY = Policy(dense_floor=0.30, strict_floor=0.30, min_score=0.10,
-                       max_results=5, veto=False, order_matters=True)
+                       max_results=5, veto=False, detect_collapse=True, order_matters=True)
 
 
 class TestFusion(unittest.TestCase):
@@ -65,10 +65,29 @@ class TestWhenToCallTheSecondStage(unittest.TestCase):
         self.assertTrue(needs_rerank(candidates, MEMORY_POLICY),
                         "0.50 only got in because somebody was going to judge it")
 
-    def test_does_NOT_call_when_everything_fits_and_clears_the_strict_floor(self):
+    def test_a_veto_policy_always_calls_when_there_is_anything_to_judge(self):
+        """Regression. This test previously asserted the OPPOSITE and pinned a defect.
+
+        It used to read "does NOT call when everything fits and clears the strict
+        floor", with the justification "reordering would not change what comes out".
+        That justification is only true when the second stage cannot REMOVE anything.
+        Under a veto it can remove any candidate, so "it clears the dense floor" says
+        nothing about whether it survives judgement — and the reranker was skipped
+        exactly when every candidate looked good by vector proximity, which is when a
+        false positive is hardest to spot.
+        """
         candidates = [hit("a", 0.90), hit("b", 0.70)]
-        self.assertFalse(needs_rerank(candidates, MEMORY_POLICY),
-                         "reordering would not change what comes out — the call would be wasted")
+        self.assertTrue(needs_rerank(candidates, MEMORY_POLICY))
+
+    def test_the_defect_the_veto_rule_closes(self):
+        """The measured failure, reproduced: whether a memory was judged depended on an
+        unrelated candidate."""
+        rr = FakeReranker(scores=[0.95, 0.004])
+        pair = [hit("good", 0.90), hit("bad", 0.59)]
+        out = two_stage(pair, "q", rr, MEMORY_POLICY, TEXT)
+        self.assertEqual([s.item["id"] for s in out.scored], ["good"],
+                         "the cross-encoder scores 'bad' at 0.004; it must not survive")
+        self.assertTrue(all(s.origin == CE for s in out.scored))
 
     def test_empty_list_does_not_call(self):
         self.assertFalse(needs_rerank([], MEMORY_POLICY))
@@ -78,10 +97,15 @@ class TestWhenToCallTheSecondStage(unittest.TestCase):
         self.assertFalse(needs_rerank([hit("a", 0.9)], DOCS_POLICY),
                          "there is nothing to order with a single result")
 
+    def test_without_a_veto_the_permissive_band_is_what_forces_the_call(self):
+        no_veto = Policy(0.30, 0.58, 0.10, 5, veto=False)
+        self.assertFalse(needs_rerank([hit("a", 0.90), hit("b", 0.70)], no_veto),
+                         "nothing to select, nothing to filter, and order is not the product")
+        self.assertTrue(needs_rerank([hit("a", 0.90), hit("b", 0.50)], no_veto),
+                        "0.50 only got in because somebody was going to judge it")
+
     def test_when_order_is_the_product_it_calls_even_if_everything_fits(self):
         candidates = [hit("a", 0.90), hit("b", 0.70)]
-        self.assertFalse(needs_rerank(candidates, MEMORY_POLICY),
-                         "memory injects the whole set: the order is cosmetic")
         self.assertTrue(needs_rerank(candidates, DOCS_POLICY),
                         "a document is read top to bottom: the order is the product")
 
@@ -172,18 +196,35 @@ class TestCrossLingualCollapse(unittest.TestCase):
                          "dense order, not the collapsed CE's")
         self.assertTrue(all(s.origin == DENSE for s in outcome.scored))
 
-    def test_collapse_in_memory_RESTORES_the_strict_cut(self):
-        """Regression: a collapse discards the judgement, so the permissive floor is once
-        again left with nobody to clean up after it. Without this, the mode WITH re-ranking
-        returned candidates the mode WITHOUT re-ranking would never return — the defect the
-        pipeline exists to prevent. It only shows up under the MEMORY policy, where the two
-        floors differ."""
-        candidates = [hit("clears", 0.90), hit("permissive", 0.50), hit("permissive2", 0.46)]
-        rr = FakeReranker(scores=[0.0004, 0.0009, 0.0002])
+    def test_a_veto_policy_may_not_enable_collapse_detection(self):
+        """This replaces a test that pinned the defect.
+
+        The old test asserted that memory detects a collapse and restores the strict
+        cut. The premise was that a crushed score means the judgement is untrustworthy.
+        It is not decidable: this server scores a plainly irrelevant document at
+        1.6e-05, three orders of magnitude below COLLAPSE_MAX, so "everything is
+        crushed" is also exactly what a correct rejection looks like. Measured, 4 of 12
+        off-topic same-language prompts were classified as collapsed.
+
+        Under a veto the misdiagnosis is not neutral: it puts back precisely the
+        candidates the cross-encoder rejected. The combination is now refused.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            Policy(0.45, 0.58, 0.10, 6, veto=True, detect_collapse=True)
+        self.assertIn("incoherent", str(ctx.exception))
+
+    def test_a_crushed_judgement_under_a_veto_returns_nothing_and_says_so(self):
+        """What memory does now instead: the rejection stands, and the trail records
+        that the cross-encoder judged and found nothing — not that the archive is empty.
+        Distinguishing those two is the caller's job, and `Outcome` carries what it
+        needs to do it."""
+        candidates = [hit("clears", 0.90), hit("permissive", 0.50)]
+        rr = FakeReranker(scores=[0.0004, 0.0009])
         outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
-        self.assertTrue(outcome.collapsed)
-        self.assertEqual([s.item["id"] for s in outcome.scored], ["clears"],
-                         "0.50 and 0.46 were only acceptable with the cross-encoder to judge")
+        self.assertFalse(outcome.collapsed)
+        self.assertTrue(outcome.reranked, "the judgement happened; it just rejected everything")
+        self.assertEqual(outcome.scored, [])
+        self.assertLess(outcome.best_rerank, 0.01)
 
     def test_collapse_in_docs_does_NOT_return_silence(self):
         """The other half of the pair: with the floors equal, restoring the strict cut

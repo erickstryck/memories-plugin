@@ -172,8 +172,8 @@ class MemoryStore:
 
         return output
 
-    def recall(self, queries: list[str], policy: retrieval.Policy,
-               top_k: int) -> tuple[list[Recalled], retrieval.Outcome]:
+    def recall(self, queries: list[str], policy: retrieval.Policy, top_k: int,
+               suppressed: str | None = None) -> tuple[list[Recalled], retrieval.Outcome]:
         """Retrieves memories for several ANGLES on the same question.
 
         This class handles the FIRST stage — embeddings, vector search and fusion. The
@@ -195,7 +195,7 @@ class MemoryStore:
         floor = policy.floor_for(self.reranker is not None)
         candidates = [h for h in fused if h["score"] >= floor]
         outcome = retrieval.two_stage(candidates, queries[0], self.reranker, policy,
-                                   text_of=lambda h: h["document"])
+                                   text_of=lambda h: h["document"], suppressed=suppressed)
         # The pipeline's `best_dense` only sees the candidates; to say "nothing cleared
         # the cut, the best was X" the useful number is the best of ALL the hits.
         if fused:
