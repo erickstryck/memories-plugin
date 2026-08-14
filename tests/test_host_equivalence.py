@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -387,6 +388,162 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
         self.assertAlmostEqual(hook_qdrant_timeout(high), hook_share / hook_calls, places=6)
         self.assertAlmostEqual(hermes_qdrant_timeout(high), hermes_share / hermes_calls,
                                places=6)
+
+
+#: A prompt `query.angles()` turns into exactly ONE angle, reused by the top_k test below
+#: for the same reason the qdrant-budget test uses it: it keeps the arithmetic of the number
+#: of store calls out of the assertions.
+ONE_ANGLE_PROMPT = "pagination cursor logic details"
+
+
+class TestTheTopKKnobMeansTheSameThingInBothHosts(unittest.TestCase):
+    """`QCTX_RECALL_TOP_K` is CONDITIONAL on the second stage being available, on both hosts.
+
+    The hook computes it after breaker suppression (`hooks/recall.py`: `"20" if
+    store.reranker else "8"`), because with no cross-encoder to filter the candidates there
+    is no reason to pull 2.5x the Qdrant payload — and the states where it is absent are
+    exactly the degraded ones the breaker exists to shed load in. The hermes adapter used the
+    unconditional literal 20, so with no cross-encoder configured, or for the 300s after any
+    rerank failure, the two hosts pulled different amounts from the same archive and returned
+    DIFFERENT memory sets for the same prompt. Measured before the fix:
+
+        cross-encoder PRESENT   claude top_k=20  hermes top_k=20   same
+        cross-encoder ABSENT    claude top_k=8   hermes top_k=20   *** DIVERGE ***
+
+    Both sides are read at the store boundary — the `top_k` each host actually hands to
+    `MemoryStore.recall` — never from a restatement of the arithmetic. Name equality passed
+    over this divergence, and over the two before it; this is the third.
+
+    Both hosts run in SUBPROCESSES with `QCTX_RECALL_TOP_K`/`RECALL_TOP_K` cleared from the
+    environment, and that is load-bearing twice over: the hermes values are class attributes
+    frozen at import time, and this user exports `RECALL_*` from their `.bashrc`, which would
+    otherwise pin both states to one number and make every assertion below vacuous.
+    """
+
+    PROMPT = ONE_ANGLE_PROMPT
+
+    def _env(self, state_dir, override=None):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("QCTX_RECALL_TOP_K", "RECALL_TOP_K")}
+        env["QCTX_STATE_DIR"] = str(state_dir)
+        if override is not None:
+            env["QCTX_RECALL_TOP_K"] = str(override)
+
+        return env
+
+    def _stub(self, has_reranker: bool) -> str:
+        return (
+            "class Stub:\n"
+            "    reranker = object() if %r else None\n"
+            "    def recall(self, queries, policy, top_k, suppressed=None):\n"
+            "        captured.append(top_k)\n"
+            "        return [], Outcome(candidates=0)\n"
+        ) % has_reranker
+
+    def _run(self, script, env):
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        captured = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual(len(captured), 1, "the host did not reach the store exactly once")
+
+        return captured[0]
+
+    def _claude_top_k(self, has_reranker, state_dir, override=None):
+        """What `hooks/recall.py::_run()` hands to `store.recall`, for one real run.
+
+        `core.load` is patched away as well as `core.build_memory`: the cfg is never used
+        once the store is a stub, and depending on the operator's real configuration file
+        would make this test pass or fail for a reason that has nothing to do with top_k.
+        """
+        script = (
+            "import sys, json, io, unittest.mock\n"
+            "sys.path.insert(0, %r)\n"
+            "sys.path.insert(0, %r)\n"
+            "import recall\n"
+            "from core.retrieval import Outcome\n"
+            "captured = []\n"
+            + self._stub(has_reranker) +
+            "with unittest.mock.patch.object(recall.core, 'build_memory',\n"
+            "                                lambda cfg, **kw: Stub()), \\\n"
+            "     unittest.mock.patch.object(recall.core, 'load', lambda: object()), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdin',\n"
+            "                                io.StringIO(json.dumps({'prompt': %r}))), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdout', io.StringIO()):\n"
+            "    recall._run()\n"
+            "print(json.dumps(captured))\n"
+        ) % (str(REPO), str(REPO / "hooks"), self.PROMPT)
+
+        return self._run(script, self._env(state_dir, override))
+
+    def _hermes_top_k(self, has_reranker, state_dir, override=None):
+        """What `MemoriesProvider.prefetch` hands to `store.recall`, for one real call."""
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "from pathlib import Path\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "from core.retrieval import Outcome\n"
+            "captured = []\n"
+            + self._stub(has_reranker) +
+            "p = MemoriesProvider()\n"
+            "p._cfg = object()\n"
+            "p._state_dir = Path(%r)\n"
+            "p._store = Stub()\n"
+            "p.prefetch(%r)\n"
+            "print(json.dumps(captured))\n"
+        ) % (str(REPO), str(state_dir), self.PROMPT)
+
+        return self._run(script, self._env(state_dir, override))
+
+    def _state_dir(self, armed_breaker=False) -> Path:
+        """A fresh state directory, with the rerank breaker already armed when asked.
+
+        Armed by writing the file the shared `core.breaker.Breaker` reads, so the
+        suppression below is the real one both hosts consult rather than a patched flag.
+        """
+        d = Path(tempfile.mkdtemp())
+        if armed_breaker:
+            (d / "rerank-breaker").write_text(str(time.time()))
+
+        return d
+
+    def test_with_a_cross_encoder_both_hosts_ask_for_the_same_top_k(self):
+        lenient = self._claude_top_k(True, self._state_dir())
+        self.assertEqual(lenient, self._hermes_top_k(True, self._state_dir()),
+                         "the two hosts pull different amounts from the same archive")
+        self.lenient = lenient
+
+    def test_without_a_cross_encoder_both_hosts_fall_to_the_SAME_stricter_top_k(self):
+        claude = self._claude_top_k(False, self._state_dir())
+        hermes = self._hermes_top_k(False, self._state_dir())
+        self.assertEqual(claude, hermes,
+                         "with no second stage the two hosts ask Qdrant for different "
+                         "amounts, so they return different memory sets for one prompt")
+        with_ce = self._claude_top_k(True, self._state_dir())
+        self.assertLess(claude, with_ce,
+                        "the strict value has to be strictly smaller, or this test is "
+                        "comparing one unconditional number with itself")
+
+    def test_a_suppressed_cross_encoder_falls_to_the_strict_top_k_on_both_hosts(self):
+        """The breaker case: a reranker IS configured, and both hosts have just turned it off
+        for this invocation. That is the state the breaker exists to shed load in, and it is
+        where asking for 2.5x the payload on the tighter deadline is worst."""
+        claude = self._claude_top_k(True, self._state_dir(armed_breaker=True))
+        hermes = self._hermes_top_k(True, self._state_dir(armed_breaker=True))
+        self.assertEqual(claude, hermes)
+        self.assertEqual(claude, self._claude_top_k(False, self._state_dir()),
+                         "a suppressed cross-encoder must count as an absent one")
+
+    def test_an_explicit_value_overrides_both_defaults_on_both_hosts(self):
+        """The knob still means "this many, whatever the state" when the deployer sets it —
+        the same on both hosts, and in both states."""
+        for has_reranker in (True, False):
+            with self.subTest(cross_encoder=has_reranker):
+                self.assertEqual(
+                    self._claude_top_k(has_reranker, self._state_dir(), override=5), 5)
+                self.assertEqual(
+                    self._hermes_top_k(has_reranker, self._state_dir(), override=5), 5)
 
 
 def load_cli():

@@ -112,6 +112,15 @@ class MemoriesProvider(_Base):
     MAX_PER_MEM = _env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
     BREAKER_SECONDS = _env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
     QDRANT_BUDGET = _env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
+    #: Hits per angle asked of Qdrant. TWO defaults for ONE knob, and the pair is not a
+    #: hermes invention: `hooks/recall.py` reads the same variable with the default
+    #: `"20" if store.reranker else "8"`, chosen AFTER breaker suppression. With no second
+    #: stage to filter the candidates there is no reason to pull 2.5x the payload from the
+    #: same archive — least of all in the degraded states the breaker exists to shed load
+    #: in, and on this host's tighter 8s ceiling. `_prefetch` picks between them from the
+    #: store's reranker, exactly as the hook does; a value the deployer sets explicitly wins
+    #: in both states, because both read the same variable.
+    #:
     #: Read through `_env_num` like every other numeric knob above, and NOT with a bare
     #: `int(_env(...))` — measured: `QCTX_RECALL_TOP_K=8x` raised ValueError while this class
     #: body was executing, hermes' loader swallowed it at `logger.debug`, and because the
@@ -119,6 +128,7 @@ class MemoriesProvider(_Base):
     #: lost recall, the checkpoint and all 15 tools, silently. The same value on claude-code
     #: imports fine and degrades to a visible unavailability block.
     TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int)
+    TOP_K_STRICT = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int)
 
     #: Turns between checkpoint nudges. Same env var as the claude-code hook
     #: (QCTX_CHECKPOINT_INTERVAL, legacy REMEMBER_INTERVAL) — the equivalence test in
@@ -249,7 +259,19 @@ class MemoriesProvider(_Base):
         policy = core.Policy(dense_floor=self.DENSE_FLOOR, strict_floor=self.STRICT_FLOOR,
                              min_score=self.MIN_SCORE, max_results=self.BUDGET.max_memories,
                              veto=True, order_matters=False)
-        hits, outcome = store.recall(angles, policy, self.TOP_K, suppressed=suppressed)
+        # Conditional on the second stage, and read AFTER the suppression above so a
+        # breaker-disabled reranker counts as an absent one — the same order, from the same
+        # source of truth, as hooks/recall.py. tests/test_host_equivalence.py compares the
+        # number that arrives HERE against the number that arrives at the hook's own
+        # `store.recall`, in both states.
+        # `getattr` and not `store.reranker`: a store object that does not declare the
+        # attribute at all must cost at most a stricter top_k, never the whole recall — the
+        # same rule the rest of this file follows, since an AttributeError here would be
+        # caught by `prefetch` and turned into an UNAVAILABLE block for an archive that was
+        # perfectly reachable. `core.build_memory` always sets it (to None when no
+        # cross-encoder is configured), so in production this reads the real value.
+        top_k = self.TOP_K if getattr(store, "reranker", None) else self.TOP_K_STRICT
+        hits, outcome = store.recall(angles, policy, top_k, suppressed=suppressed)
 
         if outcome is not None and outcome.rerank_error:
             breaker.arm()
