@@ -162,3 +162,66 @@ class TestBudgetWithACorruptedSeen(unittest.TestCase):
     def test_a_None_seen_treats_everything_as_unseen(self):
         full, _ = blocks.split_by_budget([FakeHit(id="a")], None, round_no=5, budget=BUDGET)
         self.assertEqual([h.id for h in full], ["a"])
+
+
+class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
+    """The four states exist to make three distinctions. These hold the distinctions.
+
+    Everything else in this suite checks which BLOCK is emitted. That is not the same as
+    checking that the block still tells the model what to DO — measured, five of the
+    load-bearing instructions could be rewritten into their opposites with the whole suite
+    green, including turning "the archive was not consulted" into "the archive is empty".
+    A block that names itself UNAVAILABLE and then invites the reader to assume absence is
+    worse than no block, because it carries the authority of having searched.
+
+    Deliberately NOT word-for-word. This prose was reworded several times while the plugin
+    was being built, and a test that fails on a comma makes it unmaintainable. Each assertion
+    below names the CONCLUSION the model must be prevented from reaching, or the action it
+    must be told to take, and matches only the fragment carrying it.
+    """
+
+    def test_the_unavailable_block_forbids_concluding_absence(self):
+        """The whole point of this state. The search did not run, so silence carries no
+        information — and the model must be told so in the imperative, not merely hinted at."""
+        out = blocks.unavailable_block("embedding", "connection refused")
+        self.assertIn("Do not claim", out, "the prohibition has to be an instruction")
+        self.assertIn("unprecedented", out, "and it has to name what must not be claimed")
+        self.assertNotIn(FLAT_CLAIM, out, "an unavailable search cannot assert absence")
+
+    def test_the_unavailable_block_says_NOT_CONSULTED_and_never_EMPTY(self):
+        """"Not consulted" and "empty" are opposite facts that read almost the same. The
+        first is an outage; the second is evidence. Only one of them is true here."""
+        out = blocks.unavailable_block("qdrant", "timeout")
+        self.assertIn("was not consulted", out)
+        self.assertNotIn("archive is empty", out)
+
+    def test_the_unavailable_block_tells_the_model_to_say_it_is_without_memory(self):
+        """Without this the model answers normally and the user never learns that the turn
+        had no archive behind it. The failure becomes invisible exactly when it matters."""
+        out = blocks.unavailable_block("rerank", "boom")
+        self.assertIn("without memory", out)
+        self.assertIn("tell the user", out.lower())
+
+    def test_a_partial_judgement_demands_a_targeted_search(self):
+        """Partial means candidates went unjudged. Saying so and stopping would leave the
+        model with a shrug; the instruction is what converts the caution into an action."""
+        outcome = Outcome(candidates=40, best_dense=0.5, reranked=True,
+                          scored=[0.2] * 3, dropped_above_floor=14)
+        out = blocks.empty_block(outcome, n_angles=3)
+        self.assertIn(HEDGE, out)
+        self.assertIn("targeted search", out)
+        self.assertNotIn(FLAT_CLAIM, out)
+        # The CONDITION, not just the instruction. Measured: asserting only "targeted search"
+        # let the trigger be rewritten from "if the subject might have history" to "if you
+        # feel like it" with this test still green — which turns an obligation the model owes
+        # the archive into a preference it can decline. The instruction and the circumstance
+        # that fires it are one requirement, so they get asserted together.
+        self.assertIn("might have", out,
+                      "the search has to be owed to the SUBJECT, not left to inclination")
+
+    def test_a_clean_empty_search_is_the_ONLY_state_that_asserts_absence(self):
+        """The counterpart. If this one hedged too, the four states would collapse into one
+        undifferentiated shrug and the model could never conclude anything."""
+        out = blocks.empty_block(Outcome(candidates=0, best_dense=0.1), n_angles=3)
+        self.assertIn(FLAT_CLAIM, out)
+        self.assertNotIn(HEDGE, out)

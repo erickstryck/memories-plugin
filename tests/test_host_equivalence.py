@@ -998,3 +998,33 @@ def core_module():
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestBothHostsDegradeInTheSameWORDS(unittest.TestCase):
+    """The suppression reason is not a log line — it reaches the model.
+
+    `Outcome.suppressed` is what the caller uses to TELL the core that the second stage was
+    turned off, and the degradation note renders it into the block the model reads. So the
+    two hosts describing the same degradation differently is the "same name, different
+    meaning" family again, one level down: identical behaviour, divergent explanation.
+
+    Measured while writing this: the string could be changed in the hook alone — from the
+    re-rank having FAILED to it merely having been skipped — with the whole suite green.
+    That distinction is the one the breaker exists to communicate; a skipped re-rank sounds
+    like a choice, a failed one is a degradation the model should weigh.
+    """
+
+    REASON = "circuit breaker: the re-rank failed "
+
+    def test_the_breaker_reason_is_identical_in_both_adapters(self):
+        hook = (REPO / "hooks" / "recall.py").read_text()
+        host = hermes_adapter_source()
+        self.assertIn(self.REASON, hook, "the hook stopped naming the breaker as a FAILURE")
+        self.assertIn(self.REASON, host, "the hermes adapter no longer matches the hook")
+
+    def test_neither_host_calls_it_merely_skipped(self):
+        """A degradation described as a choice invites the model to discount it."""
+        for label, text in (("hook", (REPO / "hooks" / "recall.py").read_text()),
+                            ("hermes", hermes_adapter_source())):
+            self.assertNotIn("the re-rank was skipped", text,
+                             f"{label}: 'skipped' hides that the re-rank FAILED")
