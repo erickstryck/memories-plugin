@@ -24,6 +24,7 @@ upgraded. `RecallStatus` is imported lazily inside `recall_status()`, with its o
 `except ImportError: return None`, because importing it at module load would make the
 adapter fail to import at all against the installed v0.20.0.
 """
+import copy
 import os
 import sys
 from pathlib import Path
@@ -177,7 +178,13 @@ class MemoriesProvider(_Base):
         self._store = None
 
     def get_tool_schemas(self) -> list:
-        return []          # Task 8 fills this
+        """The 15 operations the model may invoke. See tools.py for the five left out.
+
+        A deep copy, not the module constant: hermes normalizes and wraps what it gets
+        here, and an edit to a shared nested dict would outlive the call and reach the next
+        session with it.
+        """
+        return copy.deepcopy(tools.SCHEMAS)
 
     def system_prompt_block(self) -> str:
         """STATIC provider info. Recall goes through prefetch, never here."""
@@ -378,7 +385,32 @@ class MemoriesProvider(_Base):
             self._turn = 0
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
-        return "{}"        # Task 8 fills this
+        """Run one of this provider's tools. Returns a JSON STRING, always.
+
+        The dispatcher is what guarantees that: an unknown name, a missing argument or a
+        wrong-typed one comes back as a JSON error the model can read and retry from, not
+        as an exception, which the host would surface as a crashed turn.
+        """
+        return tools.dispatch(tool_name, args, cfg=self._config())
+
+    def _config(self):
+        """The configuration a tool call runs against.
+
+        `is_available()` caches it, and hermes calls that before initializing. Falling back
+        to a fresh `core.load()` covers a host that dispatches a tool without having asked
+        — better than handing `None` to a handler and answering with an AttributeError,
+        which tells the model nothing it can act on. An unconfigured install returns None,
+        and the dispatcher turns that into a message naming what the operator has to do.
+        """
+        if self._cfg is None:
+            try:
+                self._cfg = core.load()
+            except core.CoreError as exc:
+                self._reason = str(exc)
+
+                return None
+
+        return self._cfg
 
     def get_config_schema(self) -> list:
         return []          # Task 9 fills this
@@ -440,6 +472,51 @@ class MemoriesProvider(_Base):
         """Nothing to declare: Qdrant is a remote service, not a local path under
         HERMES_HOME that `hermes backup` would otherwise miss."""
         return []
+
+
+def _load_tools():
+    """Import the sibling `tools` module, in either of the two load modes.
+
+    `from . import tools` is the normal path and the one hermes' own loader supports: it
+    creates a synthetic namespace parent and registers the plugin module in `sys.modules`
+    BEFORE exec (hermes_cli/plugins.py::_load_local_module, v0.20.0, measured), which is
+    what makes a relative import inside the plugin resolvable at all.
+
+    A host that instead execs this file by path WITHOUT registering it cannot resolve one —
+    measured: `ModuleNotFoundError: No module named '<synthetic parent>'`, and this repo's
+    own symlink-install test loads the adapter exactly that way. So the fallback loads the
+    sibling by path, under a name of its own.
+
+    What it must NOT fall back to is a bare `import tools`: hermes ships a top-level
+    `tools` package, so that would import the HOST's module and leave the model with no
+    memory tools while everything appeared to load.
+    """
+    try:
+        from . import tools as module
+
+        return module
+    except ImportError:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tools.py")
+        spec = importlib.util.spec_from_file_location("memories_plugin_hermes_tools", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        return module
+
+
+#: The tool surface, wired in rather than merely present: `get_tool_schemas` and
+#: `handle_tool_call` above route through this module, so a schema that is not declared
+#: here is not offered and a tool that is not routed here cannot be called.
+tools = _load_tools()
+
+#: `memory_recall` as a tool runs with the same floors automatic recall uses on this host.
+#: The QCTX_RECALL_* reads have to stay in THIS file — test_host_equivalence.py extracts
+#: those names from here and requires them to match the claude-code hook's — so the
+#: provider hands its class to the tools module instead of the tools module reading the
+#: environment a second time.
+tools.bind_tuning(MemoriesProvider)
 
 
 def register(ctx) -> None:
