@@ -27,7 +27,7 @@ from core import session_state as st  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE as PROCEDURE  # noqa: E402
 
 
-def _interval(default: str = "5") -> int:
+def env_num(name: str, legacy: str, default: str, kind=int):
     """Read at module load, i.e. BEFORE main's guard — so it must not be able to raise.
 
     Its sibling `recall.py` learned this the hard way and wrote it down: a malformed
@@ -35,17 +35,24 @@ def _interval(default: str = "5") -> int:
     traceback instead of the feature. This file had neither the tolerant read nor a
     top-level guard, so `QCTX_CHECKPOINT_INTERVAL=5x` produced a traceback and a non-zero
     exit on EVERY interaction of every session.
+
+    Shaped like `recall.py`'s `env_num` and `hosts/hermes/__init__.py`'s `_env_num` — the
+    same call, the same argument order — because the tolerance test DERIVES the knob list
+    from the source of all three files. A knob written in a shape the derivation cannot see
+    is a knob nobody checks, and that blind spot is exactly how `int(env(...))` survived in
+    `recall.py` through three reviews.
     """
-    raw = os.environ.get("QCTX_CHECKPOINT_INTERVAL") or os.environ.get("REMEMBER_INTERVAL") or default
+    raw = os.environ.get(name) or os.environ.get(legacy) or default
     try:
-        return int(raw)
+        return kind(raw)
     except (TypeError, ValueError):
-        print(f"checkpoint: {raw!r} is not a number — using {default}", file=sys.stderr)
+        print(f"checkpoint: {name}={raw!r} is not a number — using {default}",
+              file=sys.stderr)
 
-        return int(default)
+        return kind(default)
 
 
-INTERVAL = _interval()
+INTERVAL = env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
 

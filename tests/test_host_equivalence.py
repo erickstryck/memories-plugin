@@ -535,6 +535,80 @@ class TestTheTopKKnobMeansTheSameThingInBothHosts(unittest.TestCase):
         self.assertEqual(claude, self._claude_top_k(False, self._state_dir()),
                          "a suppressed cross-encoder must count as an absent one")
 
+    def test_a_malformed_value_costs_neither_host_its_recall(self):
+        """`QCTX_RECALL_TOP_K=8x` must fall back on BOTH hosts, and cost neither its search.
+
+        The tolerance itself is held per host (tests/test_hermes_provider.py derives every
+        numeric knob from all three source files and imports each with garbage in the
+        environment); what is asserted HERE is the half that only a comparison can state: the
+        two hosts respond to the same bad value the same way.
+
+        They did not. Measured, with the archive perfectly reachable: hermes fell back and
+        kept working, while the hook — the only knob in `hooks/recall.py` read with a bare
+        `int(env(...))` — raised ValueError inside `_run`, and `main`'s catch-all turned that
+        into "[automatic recall — UNAVAILABLE for this prompt] … the hook failed
+        (ValueError)" on every prompt of every session. That block tells the model the archive
+        was not consulted, which the model then has to believe, and `env_num`'s explanatory
+        note never ran because the value never went through it.
+
+        So this asserts the emitted BLOCK too, not just the number: the number alone would
+        pass on a host that fell back and then reported unavailability anyway.
+        """
+        state_dir = self._state_dir()
+        claude = (
+            "import sys, json, io, unittest.mock\n"
+            "sys.path.insert(0, %r)\n"
+            "sys.path.insert(0, %r)\n"
+            "import recall\n"
+            "from core.retrieval import Outcome\n"
+            "captured = []\n"
+            + self._stub(True) +
+            "buf = io.StringIO()\n"
+            "with unittest.mock.patch.object(recall.core, 'build_memory',\n"
+            "                                lambda cfg, **kw: Stub()), \\\n"
+            "     unittest.mock.patch.object(recall.core, 'load', lambda: object()), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdin',\n"
+            "                                io.StringIO(json.dumps({'prompt': %r}))), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdout', buf):\n"
+            "    recall._run()\n"
+            "print(json.dumps([captured, buf.getvalue()]))\n"
+        ) % (str(REPO), str(REPO / "hooks"), self.PROMPT)
+        hermes = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "from pathlib import Path\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "from core.retrieval import Outcome\n"
+            "captured = []\n"
+            + self._stub(True) +
+            "p = MemoriesProvider()\n"
+            "p._cfg = object()\n"
+            "p._state_dir = Path(%r)\n"
+            "p._store = Stub()\n"
+            "block = p.prefetch(%r)\n"
+            "print(json.dumps([captured, block]))\n"
+        ) % (str(REPO), str(state_dir), self.PROMPT)
+
+        env = self._env(state_dir, override="8x")
+        results = {}
+        for label, script in (("claude-code", claude), ("hermes", hermes)):
+            out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                 text=True, env=env)
+            self.assertEqual(out.returncode, 0,
+                             f"{label} died on a malformed knob:\n{out.stderr}")
+            captured, block = json.loads(out.stdout.strip().splitlines()[-1])
+            self.assertEqual(len(captured), 1,
+                             f"{label} did not reach the archive exactly once")
+            self.assertNotIn("UNAVAILABLE", block,
+                             f"{label} reported the archive as not consulted because a "
+                             f"KNOB was malformed, while the archive was reachable")
+            results[label] = captured[0]
+
+        self.assertEqual(results["claude-code"], results["hermes"],
+                         "the two hosts disagree about what a malformed knob falls back to")
+        self.assertEqual(results["claude-code"], self._claude_top_k(True, self._state_dir()),
+                         "the fallback is not the coded default the knob would have had")
+
     def test_an_explicit_value_overrides_both_defaults_on_both_hosts(self):
         """The knob still means "this many, whatever the state" when the deployer sets it —
         the same on both hosts, and in both states."""

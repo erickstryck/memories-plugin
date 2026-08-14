@@ -83,6 +83,24 @@ MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
 MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
 BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 
+#: Hits per angle asked of Qdrant. TWO defaults for ONE knob: with no second stage to
+#: filter the candidates there is no reason to pull 2.5x the payload from the same archive,
+#: least of all in the degraded states the breaker exists to shed load in. `_run` picks
+#: between them from `store.reranker`, read AFTER breaker suppression, and a value the
+#: deployer sets explicitly wins in both states because both read the same variable.
+#: `hosts/hermes/__init__.py` carries the same pair under the same two names.
+#:
+#: Read HERE, at module level and through `env_num`, and not as `int(env(...))` inside
+#: `_run` where it lived: that was the only knob in this file bypassing the tolerant read,
+#: and measured, `QCTX_RECALL_TOP_K=8x` made every prompt of every session emit
+#: "[automatic recall — UNAVAILABLE for this prompt] … the hook failed (ValueError)" while
+#: the archive was perfectly reachable — an unavailability the model then has to believe —
+#: and `env_num`'s explanatory log note never ran, because the value never went through it.
+#: The same typo on hermes only cost the tolerant fallback. This user exports `RECALL_*`
+#: from `.bashrc`, so it was one keystroke away.
+TOP_K = env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int)
+TOP_K_STRICT = env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int)
+
 #: The UserPromptSubmit hook timeout in hooks.json — the deadline the whole invocation
 #: must fit inside. Named here, beside the shares carved out of it, so the relationship
 #: stays visible if any of the three changes; plays the same role `HERMES_PREFETCH_BUDGET_S`
@@ -249,7 +267,10 @@ def _run() -> None:
         suppressed = f"circuit breaker: the re-rank failed {idle:.0f}s ago"
         log(f"re-rank in breaker: failed {idle:.0f}s ago — strict dense cut")
 
-    top_k = int(env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20" if store.reranker else "8"))
+    # Conditional on the second stage, and chosen AFTER the suppression above so a
+    # breaker-disabled reranker counts as an absent one. Both values were read at module
+    # load, tolerantly — see TOP_K/TOP_K_STRICT.
+    top_k = TOP_K if store.reranker else TOP_K_STRICT
     # MEMORY policy: the cross-encoder VETOES (a false positive pollutes the agent's
     # context) and the order among the approved ones is cosmetic, because all of them are
     # injected. Collapse detection is refused under a veto — see Policy.

@@ -15,6 +15,7 @@ because it asks the installed ABC instead of comparing against a list someone ty
 `on_delegation`, `on_memory_write`, `backup_paths` — are NOT new in v0.20.1; they were in the
 pre-upgrade ABC too, which is what the comment at hosts/hermes/__init__.py:505 says.)
 """
+import ast
 import json
 import os
 import re
@@ -675,28 +676,43 @@ class TestCheckpointIntervalIsRobust(unittest.TestCase):
         self.assertEqual(self._read_it(env), "9")
 
 
-#: Every numeric knob the adapter reads at import time, DERIVED FROM ITS SOURCE rather than
-#: listed here: `ATTR = _env_num("QCTX_...", "LEGACY", "<default>"[, kind])`, and the bare
-#: `ATTR = _env("QCTX_...", "LEGACY", "<numeric default>")` form too — which is exactly the
-#: form that has to be caught, because `int(_env(...))` in the class body is how a knob
-#: skips the tolerant helper.
+#: Every numeric knob a host reads at import time, DERIVED FROM ITS SOURCE rather than
+#: listed here: `ATTR = env_num("QCTX_...", "LEGACY", "<default>"[, kind][, …])`, with or
+#: without the leading underscore, and the bare `ATTR = int(env("QCTX_...", "LEGACY",
+#: "<numeric default>"))` form too — which is exactly the form that has to be caught,
+#: because that is how a knob skips the tolerant helper.
+#:
+#: `^\s*` and not `^\s{4}`: the hermes knobs sit in a class body and the two hooks' sit at
+#: module level, and the whole point of scanning all three is that indentation must not
+#: decide what gets checked.
 _KNOB = re.compile(
-    r'^\s{4}(?P<attr>[A-Z][A-Z0-9_]*)\s*=\s*(?:(?P<cast>int|float)\()?'
-    r'_env(?:_num)?\(\s*"(?P<name>[A-Z][A-Z0-9_]*)"\s*,\s*"(?P<legacy>[A-Z][A-Z0-9_]*)"\s*,'
-    r'\s*"(?P<default>[^"]*)"(?:\s*,\s*(?P<kind>int|float))?\s*\)',
+    r'^\s*(?P<attr>[A-Z][A-Z0-9_]*)\s*=\s*(?:(?P<cast>int|float)\()?'
+    r'_?env(?:_num)?\(\s*"(?P<name>[A-Z][A-Z0-9_]*)"\s*,\s*"(?P<legacy>[A-Z][A-Z0-9_]*)"\s*,'
+    r'\s*"(?P<default>[^"]*)"(?:\s*,\s*(?P<kind>int|float))?[^)\n]*\)',
     re.M)
 
+#: The files that read numeric knobs at import time, and the statement that imports each so
+#: its values can be read back. All THREE hosts' files, not just the hermes adapter: while
+#: this scan covered `hosts/hermes/__init__.py` alone, `hooks/recall.py` kept the one bare
+#: `int(env(...))` in the repo for three reviews — the ledger named the blind spot and the
+#: scan still could not see into it. A knob is checked because a test reads the FILE it
+#: lives in, so the list of files is the coverage.
+KNOB_SOURCES = {
+    "hosts/hermes/__init__.py": "from hosts.hermes import MemoriesProvider as M\n",
+    "hooks/recall.py": "import recall as M\n",
+    "hooks/checkpoint.py": "import checkpoint as M\n",
+}
 
-def numeric_knobs() -> list:
-    """(attribute, canonical env name, legacy env name, coded default) for each numeric knob.
 
-    Read out of `hosts/hermes/__init__.py` so a knob added later is covered without anyone
-    remembering to add it here — which is the whole point: the knob that broke was the one
-    nobody thought to list.
+def numeric_knobs(rel_path: str) -> list:
+    """(attribute, canonical env name, legacy env name, coded default) for one file's knobs.
+
+    Read out of the source so a knob added later is covered without anyone remembering to
+    add it here — which is the whole point twice over: the knob that broke was the one
+    nobody thought to list, and the one that stayed broken was in a file nobody scanned.
     """
-    source = (REPO / "hosts" / "hermes" / "__init__.py").read_text()
     found = []
-    for m in _KNOB.finditer(source):
+    for m in _KNOB.finditer((REPO / rel_path).read_text()):
         try:
             float(m.group("default"))
         except ValueError:
@@ -707,53 +723,126 @@ def numeric_knobs() -> list:
     return found
 
 
+def bare_env_casts(rel_path: str) -> list:
+    """`int(env(...))`-shaped reads — a raw environment value cast where it is read.
+
+    An AST walk and not a regex, because this file, `hooks/recall.py`, `hooks/checkpoint.py`
+    and `hosts/hermes/__init__.py` all QUOTE the offending shape in prose to explain why it
+    is forbidden — a text scan reports every one of those comments and nothing else.
+    """
+    tree = ast.parse((REPO / rel_path).read_text())
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in ("int", "float") and node.args):
+            continue
+        inner = node.args[0]
+        if not isinstance(inner, ast.Call):
+            continue
+        read = inner.func
+        # `env("NAME", ...)` / `_env(...)` — the tolerant helpers are `env_num`/`_env_num`,
+        # which cast on their own and are never wrapped — or `os.environ.get(...)` direct.
+        raw = (isinstance(read, ast.Name) and read.id in ("env", "_env")) or (
+            isinstance(read, ast.Attribute) and read.attr == "get"
+            and isinstance(read.value, ast.Attribute) and read.value.attr == "environ")
+        if raw:
+            found.append(f"{rel_path}:{node.lineno}")
+
+    return found
+
+
 class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
-    """No numeric knob may take the whole provider down at import time.
+    """No numeric knob may take a host down at import time, on EITHER host.
 
-    The measured failure: `TOP_K = int(_env("QCTX_RECALL_TOP_K", ...))` — the one numeric
-    knob that skipped `_env_num` — turned `QCTX_RECALL_TOP_K=8x` into a ValueError while the
-    class body was executing. hermes' loader swallows that at `logger.debug`, and
+    The measured failure on hermes: `TOP_K = int(_env("QCTX_RECALL_TOP_K", ...))` — the one
+    numeric knob that skipped `_env_num` — turned `QCTX_RECALL_TOP_K=8x` into a ValueError
+    while the class body was executing. hermes' loader swallows that at `logger.debug`, and
     `agent/agent_init.py` only warns when the provider is NOT None, so a None provider says
-    NOTHING: no recall, no checkpoint, no tools, no message. The same value on claude-code
-    imports fine and degrades to a visible unavailability block.
+    NOTHING: no recall, no checkpoint, no tools, no message.
 
-    Not hypothetical either: `QCTX_RECALL_MAX_CHARS=14k` is the mistake that made `_env_num`
-    exist in the first place, and `RECALL_*` variables are exported from this user's
-    `.bashrc`.
+    The measured failure on claude-code, found later and by the same knob: `hooks/recall.py`
+    read it with a bare `int(env(...))` too, so `QCTX_RECALL_TOP_K=8x` made the hook emit
+    "[automatic recall — UNAVAILABLE for this prompt] … the hook failed (ValueError)" on
+    every prompt of every session while the archive was perfectly reachable — and `env_num`'s
+    explanatory note never ran, because the value never went through it.
 
-    The knob list is DERIVED from the adapter's source, so a future knob written with a bare
+    Not hypothetical either: `QCTX_RECALL_MAX_CHARS=14k` is the mistake that made the
+    tolerant read exist in the first place, and `RECALL_*` variables are exported from this
+    user's `.bashrc`.
+
+    The knob list is DERIVED from each file's source, so a future knob written with a bare
     `int(...)` fails this test instead of waiting for a typo in production.
     """
 
-    def test_the_derivation_found_the_knobs(self):
-        """A guard on the guard: if the regex stopped matching, everything below would pass
-        over an empty list."""
-        knobs = numeric_knobs()
-        attrs = {attr for attr, *_ in knobs}
-        self.assertGreaterEqual(len(knobs), 9, f"only found {attrs}")
+    def test_the_derivation_found_knobs_in_every_file_it_scans(self):
+        """A guard on the guard, per file: if the regex stopped matching one of them,
+        everything below would pass over an empty list for that file and prove nothing."""
+        per_file = {rel: {attr for attr, *_ in numeric_knobs(rel)} for rel in KNOB_SOURCES}
+        for rel, attrs in per_file.items():
+            self.assertTrue(attrs, f"no numeric knob derived from {rel}: the scan went "
+                                   f"blind on that file")
+        self.assertGreaterEqual(len(per_file["hosts/hermes/__init__.py"]), 9,
+                                f"only found {per_file['hosts/hermes/__init__.py']}")
         for expected in ("TOP_K", "MAX_CHARS", "STRICT_FLOOR", "CHECKPOINT_INTERVAL"):
-            self.assertIn(expected, attrs)
+            self.assertIn(expected, per_file["hosts/hermes/__init__.py"])
+        # The hook's own knobs, TOP_K above all: it is the knob this scan was extended for.
+        for expected in ("TOP_K", "TOP_K_STRICT", "MAX_CHARS", "BREAKER_SECONDS"):
+            self.assertIn(expected, per_file["hooks/recall.py"],
+                          "the hook's numeric knobs are not being scanned")
+        self.assertIn("INTERVAL", per_file["hooks/checkpoint.py"])
+
+    def test_no_knob_reads_the_environment_without_the_tolerant_helper(self):
+        """The complement of the derivation: a knob the scan cannot SEE is not covered by it.
+
+        The derivation above only looks at assignments, so a cast written inside a function —
+        which is precisely where the hook's `int(env("QCTX_RECALL_TOP_K", ...))` hid for three
+        reviews — would be invisible to it while still killing the host. This forbids the
+        shape itself, anywhere in the file.
+        """
+        for rel in KNOB_SOURCES:
+            with self.subTest(source=rel):
+                self.assertEqual(bare_env_casts(rel), [],
+                                 f"{rel} casts a raw environment read instead of going "
+                                 f"through the tolerant helper")
+
+    def _malformed_env(self):
+        """Every knob of every scanned file set to garbage, at once.
+
+        All of them together rather than one file at a time: the three files share knob
+        names (QCTX_RECALL_TOP_K is read by two of them), and a deployer's environment is
+        not scoped per file either.
+        """
+        env = dict(os.environ)
+        env["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        for rel in KNOB_SOURCES:
+            for _, name, legacy, _ in numeric_knobs(rel):
+                env[name] = "not-a-number"
+                env.pop(legacy, None)
+
+        return env
 
     def test_a_malformed_value_falls_back_instead_of_killing_the_import(self):
-        knobs = numeric_knobs()
-        env = dict(os.environ)
-        for _, name, legacy, _ in knobs:
-            env[name] = "not-a-number"
-            env.pop(legacy, None)
-        script = (
-            "import sys, json; sys.path.insert(0, %r)\n"
-            "from hosts.hermes import MemoriesProvider as P\n"
-            "print(json.dumps({a: getattr(P, a) for a in %r}))\n"
-        ) % (str(REPO), [attr for attr, *_ in knobs])
-        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                             text=True, env=env)
-        self.assertEqual(out.returncode, 0,
-                         "a malformed knob took the whole provider down at import time, "
-                         "where hermes reports nothing at all:\n" + out.stderr)
-        values = json.loads(out.stdout.strip().splitlines()[-1])
-        for attr, _, _, default in knobs:
-            self.assertAlmostEqual(float(values[attr]), float(default), places=6,
-                                   msg=f"{attr} did not fall back to its coded default")
+        env = self._malformed_env()
+        for rel, importer in KNOB_SOURCES.items():
+            knobs = numeric_knobs(rel)
+            with self.subTest(source=rel):
+                script = (
+                    "import sys, json\n"
+                    "sys.path.insert(0, %r)\n"
+                    "sys.path.insert(0, %r)\n"
+                    + importer +
+                    "print(json.dumps({a: getattr(M, a) for a in %r}))\n"
+                ) % (str(REPO), str(REPO / "hooks"), [attr for attr, *_ in knobs])
+                out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                     text=True, env=env)
+                self.assertEqual(out.returncode, 0,
+                                 f"a malformed knob took {rel} down at import time, before "
+                                 f"any guard could report it:\n" + out.stderr)
+                values = json.loads(out.stdout.strip().splitlines()[-1])
+                for attr, _, _, default in knobs:
+                    self.assertAlmostEqual(float(values[attr]), float(default), places=6,
+                                           msg=f"{rel}: {attr} did not fall back to its "
+                                               f"coded default")
 
 
 class TestCheckpointFailureDoesNotCostRecall(unittest.TestCase):
