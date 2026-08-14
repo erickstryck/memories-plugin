@@ -102,6 +102,69 @@ class TestBinary(unittest.TestCase):
         self.assertFalse(is_probably_binary("ordinary text with an accent é"))
 
 
+class TestLineNumbersMatchAReader(unittest.TestCase):
+    """The locator contract, checked against the primitive a READER uses.
+
+    `docs search` returns `file:start-end` and the skill tells the agent to read exactly
+    those lines and work on what it finds there. So the only meaningful test is whether
+    the numbers agree with `open(path).readlines()` — never with `str.splitlines()`,
+    which is what the code under test used to call and would therefore agree with by
+    construction. That is the same "fixture renamed alongside its reader" failure the CLI
+    render tests were written to avoid, and it hid this bug from two existing tests.
+
+    `str.splitlines()` also breaks on \x0b \x0c \x1c \x1d \x1e \x85 \u2028 \u2029.
+    None of them end a line for any file reader, editor, `sed` or `wc -l`. A form feed is
+    the conventional page break in C and Emacs-formatted sources; \x1c and \x1d are the
+    ASCII File and Group Separators that legacy exports use as delimiters — and `.py`,
+    `.csv`, `.log` are all in LOCATABLE_SUFFIXES.
+    """
+
+    def _check(self, content: str, **kw):
+        """Every chunk's text must equal the disk lines it claims, read as a reader reads."""
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "doc.txt")
+        with open(path, "w", newline="") as fh:
+            fh.write(content)
+        with open(path, newline="") as fh:
+            disk = fh.readlines()          # the reader's notion of a line, not Python's
+        chunks = chunk_text(content, **kw)
+        self.assertTrue(chunks)
+        for c in chunks:
+            self.assertLessEqual(c.end_line, len(disk),
+                                 f"claims line {c.end_line} of a {len(disk)}-line file")
+            expected = "".join(disk[c.start_line - 1:c.end_line]).strip("\n")
+            self.assertEqual(c.text, expected,
+                             f"lines {c.start_line}-{c.end_line} do not reproduce the chunk")
+
+        return chunks
+
+    def test_plain_newlines(self):
+        self._check("".join(f"line {i}\n" for i in range(1, 40)), target=200, hard_max=400)
+
+    def test_a_form_feed_does_not_shift_the_numbering(self):
+        body = "".join(f"line {i}\n" for i in range(1, 40))
+        self._check(body.replace("line 5\n", "line 5\n\x0c"), target=200, hard_max=400)
+
+    def test_the_ascii_separators_a_legacy_csv_export_uses(self):
+        body = "".join(f"col{i}\x1cvalue{i}\x1drest\n" for i in range(1, 30))
+        self._check(body, target=200, hard_max=400)
+
+    def test_unicode_line_and_paragraph_separators(self):
+        body = "".join(f"line {i}\n" for i in range(1, 30))
+        self._check(body.replace("line 7\n", "line 7\u2028continued\u2029more\n"),
+                    target=200, hard_max=400)
+
+    def test_a_file_with_no_trailing_newline(self):
+        self._check("".join(f"line {i}\n" for i in range(1, 30)) + "last line no newline",
+                    target=200, hard_max=400)
+
+    def test_crlf_is_one_line_not_two(self):
+        self._check("".join(f"line {i}\r\n" for i in range(1, 30)), target=200, hard_max=400)
+
+    def test_an_oversized_block_falling_back_to_the_fixed_window(self):
+        self._check("".join("x" * 300 + "\n" for _ in range(40)), target=1500, hard_max=2000)
+
+
 class TestChunkText(unittest.TestCase):
     def test_realistic_markdown_document(self):
         doc = "\n".join(

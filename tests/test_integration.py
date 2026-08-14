@@ -247,7 +247,10 @@ class TestDocsIntegration(unittest.TestCase):
     def test_line_range_points_at_the_real_content(self):
         self.idx.index_file(str(self.file_path), ttl_seconds=600)
         hits, _ = self.idx.search("how do I paginate?", scope="tmp", limit=1)
-        lines = self.file_path.read_text().splitlines()
+        # `readlines`, not `splitlines`: the promise is about what a READER sees, and
+        # asserting it with the same primitive the code uses proves only self-consistency.
+        with open(self.file_path, newline="") as fh:
+            lines = [ln.rstrip("\n") for ln in fh.readlines()]
         slice_text = "\n".join(lines[hits[0].start_line - 1:hits[0].end_line])
         self.assertEqual(slice_text.strip("\n"), hits[0].text,
                          "the contract of locator mode is that these lines reproduce "

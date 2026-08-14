@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -222,6 +223,35 @@ class TestDocsOffline(unittest.TestCase):
         idx.keep_file(path)
         self.assertEqual(len(q.collections["lib"]["points"]), before)
 
+    def test_reindexing_a_SHRUNK_file_leaves_no_orphan_chunks(self):
+        """The version above cannot fail, and that is why this one exists.
+
+        Reindexing the same content overwrites in place, because the point ids are
+        derived deterministically from (doc_id, index) — so deleting the `drop` call in
+        `_write` left the whole suite green, offline AND integration. The guarantee only
+        has teeth when the new version has FEWER chunks than the old one: the surplus
+        chunks of the previous version survive with stale metadata and compete as equals
+        in every later search, which is the "two states of the same file" the code exists
+        to prevent.
+        """
+        idx, q = self._index()
+        # Each section has to clear TARGET_CHARS on its own, otherwise the packer merges
+        # them into one chunk and the test has nothing to observe.
+        long_body = "\n\n".join(f"# Section {i}\n\nbody of section {i} " + ("word " * 700)
+                                 for i in range(6))
+        path = self._write_file(long_body)
+        idx.keep_file(path)
+        many = len(q.collections["lib"]["points"])
+        self.assertGreater(many, 2, "the fixture has to produce several chunks to be a test")
+
+        Path(path).write_text("# Section 0\n\nall that is left\n")
+        idx.keep_file(path)
+        few = len(q.collections["lib"]["points"])
+        self.assertLess(few, many, "chunks from the previous, longer version survived")
+        texts = " ".join(p["payload"]["document"]
+                         for p in q.collections["lib"]["points"].values())
+        self.assertNotIn("body of section 5", texts, "an orphan chunk is still searchable")
+
     def test_sweep_removes_only_what_expired(self):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=-1)
@@ -248,11 +278,18 @@ class TestDocsOffline(unittest.TestCase):
             idx.index_file(self._write_file("text\x00binary"))
 
     def test_line_range_reproduces_the_chunk(self):
+        """Read back with the READER's primitive, never with `str.splitlines()`.
+
+        This test used `.splitlines()` — the same call the code under test used to make —
+        so it agreed with the code even when both were wrong about what a line is. It
+        passed happily while a single form feed shifted every line number in the file.
+        """
         content = "\n".join(f"line {i}" for i in range(1, 21)) + "\n"
         path = self._write_file(content)
         idx, q = self._index()
         idx.keep_file(path)
-        lines = content.splitlines()
+        with open(path, newline="") as fh:
+            lines = [ln.rstrip("\n") for ln in fh.readlines()]
         for p in q.collections["lib"]["points"].values():
             md, doc = p["payload"]["metadata"], p["payload"]["document"]
             slice_text = "\n".join(lines[md["start_line"] - 1:md["end_line"]])

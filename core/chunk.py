@@ -141,6 +141,31 @@ def pack_chunks(lines: list[str], target: int = TARGET_CHARS,
     return chunks
 
 
+#: Splits on "\n" and NOTHING else, which is what every reader of a file means by a line.
+#:
+#: `str.splitlines()` is the obvious call and it is wrong here. It also breaks on \x0b
+#: \x0c \x1c \x1d \x1e \x85     — and no file reader, editor, `sed` or `wc -l`
+#: treats any of those as ending a line. Every one of them therefore shifted our line
+#: numbers by one relative to the file on disk, silently and cumulatively.
+#:
+#: That matters because the whole point of locator mode is the promise that
+#: `path:start-end` reproduces the chunk: the search returns a location, and the reader
+#: goes and reads THOSE lines to work on the current content. A form feed is the
+#: conventional page break in C and Emacs-formatted sources, and \x1c/\x1d are the ASCII
+#: File and Group Separators legacy exports use as delimiters — with `.py`, `.csv` and
+#: `.log` all in LOCATABLE_SUFFIXES. Measured on a 39-line file with one form feed: half
+#: the chunks reported the wrong first line, and the last one claimed line 40.
+#:
+#: The two tests that were supposed to guard the promise both sliced with `.splitlines()`
+#: themselves, so they agreed with the bug by construction.
+_LINE = re.compile(r"[^\n]*\n|[^\n]+")
+
+
+def split_lines(content: str) -> list[str]:
+    """Lines with their terminators, joinable back into the original text."""
+    return _LINE.findall(content)
+
+
 def chunk_text(content: str, target: int = TARGET_CHARS,
                hard_max: int = HARD_MAX_CHARS) -> list[Chunk]:
-    return pack_chunks(content.splitlines(keepends=True), target, hard_max)
+    return pack_chunks(split_lines(content), target, hard_max)
