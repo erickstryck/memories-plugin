@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core  # noqa: E402
 from core import query  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
+from core.prompts import INSTRUCTIONS  # noqa: E402
 
 
 def env(name: str, legacy: str, default: str) -> str:
@@ -90,15 +91,6 @@ QDRANT_BUDGET = env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.
 #: Rounds before reinjecting a memory in full instead of the one-line pointer. The
 #: context may have been compacted in the meantime.
 REINJECT_AFTER = 8
-
-INSTRUCTIONS = """How to use this, without exception:
-- A precedent or a veto from the user PREVAILS. Do not re-derive, do not re-propose \
-what was vetoed; if you think it should change, say explicitly that it is a reversal.
-- A memory that cites a file, a line, a flag or a version: VERIFY it against the \
-current tree before acting. It reflects what was true when it was written.
-- A memory that contradicts what you just measured: the measurement wins — and then \
-FIX the memory, do not let the two coexist.
-- A facet of the subject not covered below: run an explicit search from another angle."""
 
 
 def log(msg: str) -> None:
