@@ -80,6 +80,60 @@ class TestPayloadShape(unittest.TestCase):
         self.assertEqual(len(q.collections["mem"]["points"]), 0)
 
 
+class TestUpdateWillNotBLANKAFact(unittest.TestCase):
+    """`store` refuses empty content; `update` did not, and that is worse than it sounds.
+
+    `memory_update(information="   ")` returned `{"status": "updated", "reembedded": true}`
+    and the document BECAME `"   "`. Then `_flatten_hit` returns None for a blank document —
+    so the record went permanently invisible to recall while still occupying a point. Content
+    destroyed, success reported, and this is reachable by the model through the
+    `memory_update` tool.
+    """
+
+    def test_a_blank_replacement_is_refused_the_way_store_refuses_one(self):
+        s, q, _ = store()
+        mid = s.store("a durable fact about pagination", {"type": "reference"})["id"]
+        for blank in ("   ", "", "\n\t "):
+            with self.subTest(replacement=repr(blank)):
+                with self.assertRaises(MemoryStoreError):
+                    s.update(mid, information=blank)
+
+    def test_the_record_survives_the_refusal_intact(self):
+        """A refusal that had already overwritten the document would be no better than the
+        bug: the point is that the fact is still there afterwards, still findable."""
+        s, q, emb = store()
+        mid = s.store("a durable fact about pagination", {"type": "reference"})["id"]
+        vector = list(q.get_point("mem", mid)["vector"])
+        with self.assertRaises(MemoryStoreError):
+            s.update(mid, information="   ")
+        payload = q.get_point("mem", mid)["payload"]
+        self.assertEqual(payload["document"], "a durable fact about pagination")
+        self.assertEqual(payload["metadata"], {"type": "reference"})
+        self.assertEqual(q.get_point("mem", mid)["vector"], vector,
+                         "the vector must not have been replaced either")
+        self.assertIsNotNone(
+            MemoryStore._flatten_hit({"id": mid, "score": 0.9, "payload": payload}),
+            "a blanked document is invisible to recall while still occupying a point")
+
+    def test_a_legitimate_update_still_works(self):
+        s, q, _ = store()
+        mid = s.store("original")["id"]
+        result = s.update(mid, information="corrected and still a real fact")
+        self.assertEqual(result["status"], "updated")
+        self.assertTrue(result["reembedded"])
+        self.assertEqual(q.get_point("mem", mid)["payload"]["document"],
+                         "corrected and still a real fact")
+
+    def test_a_metadata_only_update_is_untouched_by_the_guard(self):
+        """`information=None` means "keep the text" and must not be read as "blank it"."""
+        s, q, _ = store()
+        mid = s.store("original", {"type": "reference"})["id"]
+        result = s.update(mid, metadata={"type": "decision"})
+        self.assertEqual(result["status"], "updated")
+        self.assertFalse(result["reembedded"])
+        self.assertEqual(q.get_point("mem", mid)["payload"]["document"], "original")
+
+
 class TestMetadataAssembly(unittest.TestCase):
     """`core.metadata_from` — ONE definition of "base object plus the named shortcuts".
 

@@ -489,6 +489,19 @@ class TestMemoryTools(unittest.TestCase):
         self.assertEqual(self.q.get_point("mem", mid)["payload"]["metadata"],
                          {"type": "reference", "project": "p"})
 
+    def test_update_cannot_blank_a_fact_and_report_success(self):
+        """The model-reachable half of the blanking bug: `information="   "` came back
+        `{"status": "updated", "reembedded": true}` while the document became `"   "` — and a
+        blank document is dropped by `_flatten_hit`, so the record went invisible to recall
+        while still occupying a point. The model has to be told it failed, and the fact has to
+        still be there."""
+        mid = self.call("memory_store", information="a fact worth keeping")["id"]
+        res = self.call("memory_update", id=mid, information="   ")
+        self.assertIn("error", res, "the model was told a destructive no-op succeeded")
+        self.assertNotIn("status", res)
+        self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
+                         "a fact worth keeping")
+
     def test_update_can_fix_a_label_without_touching_the_text(self):
         mid = self.call("memory_store", information="text that must survive",
                         metadata={"type": "wrong"})["id"]

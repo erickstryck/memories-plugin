@@ -184,6 +184,22 @@ class MemoryStore:
 
     def update(self, mid: str, information: str | None = None,
                metadata: dict | None = None) -> dict:
+        # The same refusal `store` makes, for a worse case. `store` rejects empty content
+        # because an empty memory is not writable; here the content already EXISTS, so
+        # accepting a blank replacement destroys a fact and reports success:
+        # `update(mid, information="   ")` answered `{"status": "updated", "reembedded":
+        # true}` and left the document as `"   "`. `_flatten_hit` then returns None for a
+        # blank document, so the record became permanently invisible to recall while still
+        # occupying a point — and this is reachable by the model, through `memory_update`.
+        #
+        # BEFORE the read, so a refusal cannot have written anything. `None` is untouched:
+        # it means "keep the current text", which is a different request entirely.
+        if information is not None and not information.strip():
+            raise MemoryStoreError(
+                "an empty memory is not writable, and blanking one is worse: it would "
+                "destroy the fact and leave a record no search can find. Omit "
+                "'information' to keep the current text, or delete the memory."
+            )
         point = self.q.get_point(self.collection, mid)
         if point is None:
             return {"status": "not_found", "id": mid}
