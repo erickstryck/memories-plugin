@@ -93,6 +93,13 @@ Reindexing the same file **replaces** the previous index — it does not duplica
 When finishing a task that used a temporary index, a `drop <doc-id>` is a courtesy but
 not required: the TTL cleans up on its own.
 
+## The same operations, whatever the host gives you
+
+The commands above are the CLI surface. Where the host exposes document **tools**
+(`docs_index`, `docs_keep`, `docs_search`, `docs_list`, `docs_refresh`, `docs_drop`, as
+hermes-agent does), they are the same operations over the same two archives — the choice of
+surface changes nothing in this skill, including which archive a command writes to.
+
 ## Limits
 
 - A binary file is refused. Convert it to text first.

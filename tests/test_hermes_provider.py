@@ -2,8 +2,13 @@
 
 It is verified WITHOUT hermes importable, because this repo's suite has to run offline and
 hermes lives in its own venv. What the adapter promises is therefore checked structurally:
-the method set hermes v0.20.0 actually calls, measured from the install rather than assumed
-from the published source — the two differ, and the installed one is what runs.
+the method set hermes actually calls, measured from the install rather than assumed from the
+published source — the two differ, and the installed one is what runs.
+
+That measurement is taken at RUN time, not written down here, and the plan proved why: the
+install moved from v0.20.0 to v0.20.1 mid-task, growing `unavailable_reason`, `RecallStatus`
+and five optional hooks. The test below read the new surface and still passed, because it
+asks the installed ABC instead of comparing against a list someone typed.
 """
 import json
 import os
@@ -20,9 +25,9 @@ sys.path.insert(0, str(REPO))
 import core
 from hosts.hermes import MemoriesProvider, register
 
-#: Where hermes is installed on this machine. The ABC IS importable from there (measured);
-#: only `RecallStatus` is absent in v0.20.0. Used by the test below, skipped elsewhere so
-#: the suite stays portable.
+#: Where hermes is installed on this machine. The ABC IS importable from there (measured):
+#: `RecallStatus` was absent in v0.20.0 and is present in v0.20.1. Used by the tests below,
+#: skipped elsewhere so the suite stays portable.
 HERMES_INSTALL = Path.home() / ".hermes" / "hermes-agent"
 
 #: What the adapter implements EXPLICITLY — no reliance on the ABC's defaults, because the
@@ -151,6 +156,48 @@ class TestSymlinkInstall(unittest.TestCase):
         root, name = out.stdout.strip().splitlines()[:2]
         self.assertEqual(Path(root).resolve(), REPO.resolve())
         self.assertEqual(name, "memories")
+
+
+class TestTheInstallPathTheLoaderActuallyReads(unittest.TestCase):
+    """Where the symlink has to go, asked of the INSTALLED loader rather than assumed.
+
+    `scripts/hermes_cutover.sh` installs into `$HERMES_HOME/plugins/memories`, and the
+    claude-code cutover's own comments record what it costs to guess a path: it checked
+    `~/.mcp.json` while the live configuration was in `~/.claude.json` and printed "ok" for
+    a state it had never verified. So this drives `plugins/memory/__init__.py` itself,
+    against a temp HERMES_HOME, and requires it to find the provider at that path and NOT
+    at the one-level-deeper layout the third-party provider on this machine uses.
+    """
+
+    @unittest.skipUnless(HERMES_INSTALL.exists(), "hermes-agent not installed here")
+    def test_the_loader_finds_the_provider_at_hermes_home_plugins_name(self):
+        import shutil
+
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / "plugins" / "memory").mkdir(parents=True)
+        (home / "plugins" / "memories").symlink_to(REPO / "hosts" / "hermes")
+        # The same adapter, one level deeper — the layout `$HERMES_HOME/plugins/memory/
+        # <name>/` that the qdrant provider uses on this machine.
+        (home / "plugins" / "memory" / "deeper").symlink_to(REPO / "hosts" / "hermes")
+
+        script = (
+            "import json, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from plugins.memory import find_provider_dir, load_memory_provider\n"
+            "flat = find_provider_dir('memories')\n"
+            "deep = find_provider_dir('deeper')\n"
+            "p = load_memory_provider('memories')\n"
+            "print(json.dumps([str(flat), str(deep), getattr(p, 'name', None)]))\n"
+        ) % str(HERMES_INSTALL)
+        env = dict(os.environ, HERMES_HOME=str(home))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        flat, deep, name = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual(Path(flat), home / "plugins" / "memories")
+        self.assertEqual(deep, "None", "the one-level-deeper layout is discovered after all")
+        self.assertEqual(name, "memories", "the loader did not instantiate the provider")
 
 
 class TestManifest(unittest.TestCase):

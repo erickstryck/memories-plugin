@@ -67,7 +67,7 @@ language, not just semantics. Consequences in the design:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 251 collected, 234 offline; no network, no deps
+python3 -m unittest discover -s tests    # 493 collected, 476 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -92,6 +92,64 @@ prompt, checkpoint every N) and **two skills** (`memory`, `doc-index`). The hook
 them in the SAME pass.** Both sets fire together and recall gets injected twice into
 the same prompt — which is worse than having none, because it doubles the context cost
 without adding information. Check the log: one round per prompt, not two.
+
+## Hosts
+
+The same core serves two hosts, with the same operations and the same configuration.
+
+| | claude-code | hermes-agent |
+|---|---|---|
+| adapter | `hooks/` | `hosts/hermes/` |
+| install | `claude plugin marketplace add .` | a symlink into `$HERMES_HOME/plugins/memories` |
+| recall | `UserPromptSubmit` hook | `prefetch()` |
+| checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
+| operations | `qctx` CLI + two skills | 15 model-invokable tools + the same CLI |
+| what the model is told | the two skills | `system_prompt_block()`, from the same `core/prompts.py` |
+| configuration | `~/.config/memories-plugin/config.json` | the same file |
+| credentials | the environment | the environment, or `$HERMES_HOME/.env` |
+
+Equivalence is not a claim in this table — `tests/test_host_equivalence.py` renders every
+block state through both adapters and requires byte-identical output.
+
+```bash
+./scripts/hermes_cutover.sh            # check the install and report; writes nothing
+./scripts/hermes_cutover.sh --apply    # install as the hermes memory provider
+```
+
+The install is a **symlink** into `$HERMES_HOME/plugins/memories`, one level deep and no
+deeper: hermes' loader (`plugins/memory/__init__.py`) scans `$HERMES_HOME/plugins/<name>/`,
+and a provider one directory further down is not discovered at all. That is measured
+against the installed loader, not read off the documentation — `tests/test_hermes_provider.py`
+drives it with a temp `HERMES_HOME` and requires the deeper layout to come back unfound.
+
+hermes activates exactly ONE external memory provider, so installing this one **replaces**
+whatever `memory.provider` names. The provider it replaces is disabled by configuration,
+never deleted, and its own collection stays reachable read-only, outside automatic recall:
+
+```bash
+qctx memory search-collections "<topic>" --collections hermes_memory
+```
+
+### What the cutover script checks, and why
+
+`is_available()` gates initialization, so a provider that reports unavailable is never
+initialized and any diagnostic it might log from `initialize()` is unreachable. hermes
+0.20.1 warns and appends the provider's `unavailable_reason()`
+(`agent/agent_init.py`), but the failure it cannot describe at all is the one that matters
+most here: **the two API keys live only in the environment.** `config set` refuses to write
+a secret to `config.json`, and `is_available()` does not look at the keys — it checks the
+Qdrant URL, the embedding endpoint and the collection. So a hermes started from a shell
+without them reports a perfectly healthy provider and then fails every single search.
+
+The script therefore checks the environment, not only the files: both accepted spellings of
+each key, in this shell **and** in `$HERMES_HOME/.env` — which hermes loads itself
+(`hermes_cli/env_loader.py`, from `run_agent.py` and `cli.py`) and which is the only one of
+the two a systemd/gateway hermes has. It prints the variable names and never their values.
+
+It also reports where the provider being replaced actually lives, whether the plugins
+directory it is about to write to is the one the loader reads, and whether it is being run
+from a git worktree — a symlink into a temporary checkout dies with it, leaving hermes with
+a dangling directory that discovery silently skips.
 
 ## Configuration
 
@@ -158,6 +216,8 @@ qctx memory store "connector X's poll truncates at 100 items" --type reference
 qctx memory find "poll pagination"            # dense, cheap
 qctx memory recall "poll pagination"          # two stages, with re-rank
 qctx memory update <id> --text "..." ; qctx memory delete <id>
+qctx memory search-collections "poll pagination" --collections hermes_memory
+                                              # read-only, in someone else's archive
 
 # documents
 qctx docs index ./huge-report.md --ttl 24h          # temporary
@@ -193,10 +253,16 @@ core/       the portable core — no reference to a host or an agent
   memory.py     memory CRUD + two-stage recall
   docs.py       document index, TTL, staleness
   setup.py      diagnostics and suggestions
+  blocks.py     the injected block, in all four of its states — one renderer, both hosts
+  session_state.py  what was already injected, and when the checkpoint is due
+  prompts.py    the instructions and the checkpoint procedure, shared by both hosts
 cli/        the command-line interface over the core
-hooks/      recall on every prompt, checkpoint every N
+hooks/      the claude-code adapter: recall on every prompt, checkpoint every N
+hosts/
+  hermes/       the hermes-agent adapter: the provider object and its 15 tools
 skills/     memory, doc-index
-tests/      234 offline tests + 17 integration
+scripts/    cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
+tests/      476 offline tests + 17 integration
 ```
 
 ## Design
@@ -236,7 +302,7 @@ The slicing happens **inside** this process, so the document never passes throug
 context of whoever is asking — that is what makes it viable to index a
 30,000-character file in order to answer with three chunks.
 
-## The hooks
+## The hooks, and the same thing on the other host
 
 `recall.py` runs before the model sees the text, on every prompt that names a subject —
 it skips prompts under 12 characters, bare acknowledgements and bare slash commands. It
@@ -255,6 +321,11 @@ unprecedented without anyone having looked.
 is self-sufficient on purpose: a one-line reminder produces vague, duplicated,
 metadata-less memory, and the cost shows up months later.
 
+On hermes there is no hook to register: `prefetch()` is called with the upcoming turn's
+text and returns the same block, from the same `core/blocks.py`, and the checkpoint rides
+along in that same return value on the Nth turn rather than in a second call. Two hosts,
+one renderer — which is what `tests/test_host_equivalence.py` is there to keep true.
+
 ## Language
 
 Code, comments and user-facing messages are in English. Two things stay in Portuguese
@@ -271,5 +342,11 @@ on purpose, and both are data rather than prose:
 ## Status
 
 Done and tested: the core, the CLI, the three archives, the guided diagnostics, both
-hooks, both skills and the plugin manifest. 234 offline tests and 17 integration tests
-against a real Qdrant and real models.
+hooks, both skills and the plugin manifest for claude-code; the provider, its 15 tools,
+the shared configuration wizard and the install script for hermes-agent. 476 offline tests
+and 17 integration tests against a real Qdrant and real models.
+
+Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the
+two differ and the install is what runs. The adapter implements every method that version
+declares, and the test that says so reads the surface off the install instead of a list
+someone typed.

@@ -284,9 +284,9 @@ class TestDispatch(unittest.TestCase):
         self.assertIn("error", json.loads(out))
 
     def test_handle_tool_call_returns_a_STRING(self):
-        """The ABC's contract (agent/memory_provider.py:182, v0.20.0 as installed): "Must
-        return a JSON string". A dict here fails at the host boundary, past every test of
-        the handler's own logic."""
+        """The ABC's contract (agent/memory_provider.py, :182 in v0.20.0 and :232 in the
+        v0.20.1 now installed): "Must return a JSON string". A dict here fails at the host
+        boundary, past every test of the handler's own logic."""
         p = MemoriesProvider()
         p._cfg = a_config()
         out = p.handle_tool_call("memory_teleport", {})
@@ -704,10 +704,12 @@ class TestTheWiringFromOutside(unittest.TestCase):
 
     WHICH LOADER, because getting this wrong is how a broken production load passed here
     once already. `plugin.yaml` declares `kind: exclusive`, and
-    `hermes_cli/plugins.py:1415-1428` explicitly SKIPS exclusive plugins ("handled by
-    category discovery"), so `_load_local_module` — which an earlier version of this test
-    emulated — never loads a memory provider. The real path is
-    `plugins/memory/__init__.py::_load_provider_from_dir` (v0.20.0, lines 218-327), and it
+    `hermes_cli/plugins.py` explicitly SKIPS exclusive plugins ("handled by category
+    discovery" — :1415-1428 in v0.20.0, :3907-3917 in the v0.20.1 now installed), so
+    `_load_local_module` — which an earlier version of this test emulated — never loads a
+    memory provider. The real path is
+    `plugins/memory/__init__.py::_load_provider_from_dir` (v0.20.0 lines 218-327, v0.20.1
+    lines 419-542), and it
     does one thing the other does not: it PRE-EXECS every sibling `*.py` before
     `__init__.py`, registering each in `sys.modules` first and swallowing failures at
     `logger.debug`. Measured consequence when `tools.py` could not import `core` on its own:

@@ -17,12 +17,15 @@ WHY realpath AND NOT abspath. The plugin is installed as a symlink into
 `$HERMES_HOME/plugins/memories/__init__.py`, so walking up gives `$HERMES_HOME/plugins`
 and `core` is never found. Only `realpath` resolves to the repo.
 
-VERSION REALITY. Written against hermes v0.20.0 as INSTALLED, not as published: the
-install has no `RecallStatus`, no `recall_status()` and no `unavailable_reason()`. Both
-methods are implemented anyway — inert where nothing calls them, working if hermes is
-upgraded. `RecallStatus` is imported lazily inside `recall_status()`, with its own
-`except ImportError: return None`, because importing it at module load would make the
-adapter fail to import at all against the installed v0.20.0.
+VERSION REALITY. Written against hermes as INSTALLED, not as published, because the two
+differ and the install is what runs. v0.20.0 had no `RecallStatus`, no `recall_status()`
+and no `unavailable_reason()`; both methods were implemented anyway, inert there and
+working if hermes was upgraded — and v0.20.1, measured on this machine, does declare all
+three and does call `unavailable_reason()` when a selected provider reports unavailable
+(`agent/agent_init.py::_warn_memory_provider_unavailable`). That is exactly the payoff for
+writing them while nothing called them. `RecallStatus` is still imported lazily inside
+`recall_status()`, with its own `except ImportError: return None`: a hermes old enough to
+lack it must not make this adapter fail to import at all.
 """
 import copy
 import os
@@ -161,7 +164,10 @@ class MemoriesProvider(_Base):
     def unavailable_reason(self) -> str:
         """Actionable reason, since `initialize` is never reached when unavailable.
 
-        Not called by v0.20.0; kept so an upgraded hermes surfaces it for free.
+        Not called by v0.20.0; v0.20.1 appends it to its "provider unavailable" warning at
+        session start. It is a log line either way, so `scripts/hermes_cutover.sh` asks the
+        provider the same question before the switch is flipped, where the operator is
+        looking.
         """
         return self._reason
 
@@ -296,7 +302,8 @@ class MemoriesProvider(_Base):
             return block
 
     def recall_status(self):
-        """Deterministic "recalled N" indicator. Absent from v0.20.0; free if upgraded."""
+        """Deterministic "recalled N" indicator. Absent from v0.20.0, present in v0.20.1 —
+        which is the upgrade this was written for, and it cost nothing to be ready."""
         if not getattr(self, "_last_count", 0):
             return None
         try:

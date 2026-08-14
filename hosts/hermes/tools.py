@@ -8,9 +8,9 @@ on its own.
 
 Every handler returns a JSON STRING, and no handler raises. hermes surfaces a raise as a
 crashed turn; a JSON error is something the model can read and react to. The string part is
-not a detail either: the ABC says "Must return a JSON string"
-(agent/memory_provider.py:182, v0.20.0 as installed), and a dict there fails at the host
-boundary, past every test of a handler's own logic.
+not a detail either: the ABC says "Must return a JSON string" (agent/memory_provider.py,
+:182 in v0.20.0 and :232 in the v0.20.1 now installed — same sentence, moved), and a dict
+there fails at the host boundary, past every test of a handler's own logic.
 
 Each handler routes to the SAME core function the CLI's matching `cmd_*` handler calls, so
 the two hosts cannot drift on what an operation does. Where a `cmd_*` handler carried logic
@@ -25,7 +25,8 @@ import sys
 #: module can be the first file of the package to run.
 #:
 #: Measured against the loader that actually loads memory providers
-#: (`plugins/memory/__init__.py::_load_provider_from_dir`, v0.20.0 lines 282-297, NOT
+#: (`plugins/memory/__init__.py::_load_provider_from_dir`, lines 282-297 in v0.20.0 and
+#: 486-501 in the v0.20.1 now installed — unchanged code, moved down the file; NOT
 #: `hermes_cli/plugins.py::_load_local_module`, which skips `kind: exclusive` plugins):
 #: before exec'ing `__init__.py` it pre-execs every sibling `*.py`, registering each in
 #: `sys.modules` FIRST and swallowing any failure at `logger.debug`. Without these three

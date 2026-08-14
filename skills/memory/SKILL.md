@@ -14,11 +14,12 @@ directions, and reading is the one that gets forgotten:
 
 **Principle:** *search before asserting, save only what will still matter later.*
 
-## A hook already guarantees the floor — the depth is yours
+## Automatic recall already guarantees the floor — the depth is yours
 
-A `UserPromptSubmit` hook runs a search before you see the text and injects the relevant
-memories. It runs on most prompts, not all: it deliberately skips prompts under 12
-characters, bare acknowledgements ("ok, pode continuar") and bare slash commands, because
+The host runs a search before you see the text and injects the relevant memories — a
+`UserPromptSubmit` hook in claude-code, `prefetch()` in hermes-agent, the same search and
+the same block either way. It runs on most turns, not all: it deliberately skips text under
+12 characters, bare acknowledgements ("ok, pode continuar") and bare slash commands, because
 none of them names a subject. When it does run, you do not need to repeat that same
 generic search.
 
@@ -30,19 +31,21 @@ forget because it looks like nothing:
 | memories listed | the archive was consulted; treat each one by the table below |
 | "no memory above the relevance cutoff" | the archive **was** consulted. If the same block also says the judgement was PARTIAL, that is not evidence of absence — search again with a different angle. Without that caveat, the search was complete: do not repeat it. |
 | "automatic recall — UNAVAILABLE" | the search **did not run** (infra down, or the plugin is not configured). This is NOT evidence that no precedent exists. Never claim something is unprecedented on the strength of that turn; try `qctx memory recall` yourself. |
-| **no block at all** | the hook did not fire: a short or trivial prompt, or the hook is disabled. Nothing was searched, and nothing claims otherwise. If the subject could have precedent, this is on you. |
+| **no block at all** | recall did not run: a short or trivial prompt, or it is disabled. Nothing was searched, and nothing claims otherwise. If the subject could have precedent, this is on you. |
 
-**What the hook does not cover, and stays entirely yours:**
+**What automatic recall does not cover, and stays entirely yours:**
 
 - **Mid-turn.** No new prompt arrives when you close out a step, open a sub-subject or
   reach a design decision 20 minutes into the task. Search again at each step. Memory
   written by a parallel session only appears to whoever re-reads.
-- **Opening pointers.** The hook delivers the hit; opening the ids it cites is on you.
+- **Opening pointers.** Recall delivers the hit; opening the ids it cites is on you.
   An index is a pointer, not an answer.
-- **Angles the prompt text does not contain.** The hook builds its queries from the
-  prompt's words. A facet the user did not name was not searched.
+- **Angles the prompt text does not contain.** The queries are built from the prompt's
+  words. A facet the user did not name was not searched.
 - **All of the writing.**
-- **Other archives.** Collections belonging to other systems, only on request.
+- **Other archives.** Collections belonging to other systems are never in automatic
+  recall. Read one on request with `qctx memory search-collections "<topic>" --collections
+  <name>`; it never writes.
 
 ## 1. SEARCH — before answering
 
@@ -151,9 +154,14 @@ language.
 | update | `qctx memory update <id> --text "..."` |
 | delete | `qctx memory delete <id>` |
 | list | `qctx memory list --limit N` |
+| read another system's archive | `qctx memory search-collections "<topic>" --collections <name>` |
 | see config | `qctx config show` · `qctx collections list` |
 
 `--json` on any command returns structured output.
+
+Where the host exposes memory **tools** (`memory_recall`, `memory_find`, `memory_store`,
+…, as hermes-agent does), they are the same operations over the same archive as the
+commands above — use whichever the host gives you. Nothing in this skill changes.
 
 ## Common mistakes
 
