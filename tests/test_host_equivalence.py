@@ -546,6 +546,113 @@ class TestTheTopKKnobMeansTheSameThingInBothHosts(unittest.TestCase):
                     self._hermes_top_k(has_reranker, self._state_dir(), override=5), 5)
 
 
+class TestBothHostsSweepDeadSessionState(unittest.TestCase):
+    """`core.session_state.purge_dead` exists so a state directory does not grow one file per
+    session forever — verbatim what its own docstring says. Spec §4 names dead-session
+    purging as content that moved into `core/` SO BOTH HOSTS SHARE IT, and then only the
+    claude-code hook ever called it: measured, 60 hermes prefetch rounds against a state dir
+    holding a 30-day-old abandoned file left the file exactly where it was.
+
+    The cadence is read from the hook rather than invented (`PURGE_EVERY_ROUNDS`, after the
+    state save on a round that found memories), and it is asserted in BOTH directions on both
+    hosts: a round that is not a multiple must NOT pay for a glob, and a round that is must
+    sweep. A test that only checked "the file eventually disappears" would pass over a host
+    that swept on every single prompt.
+    """
+
+    HITS_PROMPT = "how does the connector poll paginate its results?"
+
+    def _state_dir(self, session: str, round_no: int) -> tuple:
+        """A state dir with one live session at `round_no` and one abandoned 30-day-old file."""
+        d = Path(tempfile.mkdtemp())
+        (d / f"recall-{session}.json").write_text(json.dumps({"round": round_no, "seen": {}}))
+        abandoned = d / "recall-an_abandoned_session.json"
+        abandoned.write_text(json.dumps({"round": 3, "seen": {}}))
+        stamp = time.time() - 30 * 86400
+        os.utime(abandoned, (stamp, stamp))
+
+        return d, abandoned
+
+    def _claude_round(self, state_dir, session):
+        """One real `hooks/recall.py::_run()` invocation that finds a memory."""
+        script = (
+            "import sys, json, io, unittest.mock\n"
+            "sys.path.insert(0, %r)\n"
+            "sys.path.insert(0, %r)\n"
+            "import recall\n"
+            "from core.retrieval import CE, Outcome\n"
+            "from tests.test_blocks import FakeHit\n"
+            "class Stub:\n"
+            "    reranker = None\n"
+            "    def recall(self, queries, policy, top_k, suppressed=None):\n"
+            "        return ([FakeHit(id='hit-1', document='a durable fact', origin=CE)],\n"
+            "                Outcome(candidates=1, reranked=True))\n"
+            "payload = json.dumps({'prompt': %r, 'session_id': %r})\n"
+            "with unittest.mock.patch.object(recall.core, 'build_memory',\n"
+            "                                lambda cfg, **kw: Stub()), \\\n"
+            "     unittest.mock.patch.object(recall.core, 'load', lambda: object()), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdin', io.StringIO(payload)), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdout', io.StringIO()):\n"
+            "    recall._run()\n"
+        ) % (str(REPO), str(REPO / "hooks"), self.HITS_PROMPT, session)
+        env = dict(os.environ, QCTX_STATE_DIR=str(state_dir))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def _hermes_round(self, state_dir, session):
+        """One real `MemoriesProvider.prefetch` call that finds a memory."""
+        from core.retrieval import CE, Outcome
+        from hosts.hermes import MemoriesProvider
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._state_dir = Path(state_dir)
+
+        class Stub:
+            reranker = None
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return ([FakeHit(id="hit-1", document="a durable fact", origin=CE)],
+                        Outcome(candidates=1, reranked=True))
+
+        p._store = Stub()
+        p.prefetch(self.HITS_PROMPT, session_id=session)
+
+    #: The session id each host writes its own state under. Different strings on purpose:
+    #: nothing here may depend on the two hosts sharing a session name.
+    SESSIONS = {"claude": "claude-live", "hermes": "hermes-live"}
+
+    def _round_that_is_due(self):
+        from core.session_state import PURGE_EVERY_ROUNDS
+
+        return PURGE_EVERY_ROUNDS
+
+    def test_a_round_on_the_cadence_sweeps_a_dead_session_on_both_hosts(self):
+        due = self._round_that_is_due()
+        for host, drive in (("claude", self._claude_round), ("hermes", self._hermes_round)):
+            with self.subTest(host=host):
+                session = self.SESSIONS[host]
+                d, abandoned = self._state_dir(session, due - 1)   # next round IS the cadence
+                drive(d, session)
+                self.assertFalse(abandoned.exists(),
+                                 f"{host} never sweeps: the state directory grows one file "
+                                 f"per session forever, which is what purge_dead exists to "
+                                 f"prevent")
+                self.assertTrue((d / f"recall-{session}.json").exists(),
+                                "the live session's own state must survive the sweep")
+
+    def test_a_round_off_the_cadence_does_not_pay_for_the_sweep_on_either_host(self):
+        due = self._round_that_is_due()
+        for host, drive in (("claude", self._claude_round), ("hermes", self._hermes_round)):
+            with self.subTest(host=host):
+                session = self.SESSIONS[host]
+                d, abandoned = self._state_dir(session, due - 3)   # next round is not due
+                drive(d, session)
+                self.assertTrue(abandoned.exists(),
+                                f"{host} swept off the shared cadence — a glob on every "
+                                f"prompt is what the cadence exists to avoid")
+
+
 def load_cli():
     """Imports cli/qctx.py as a module. It is a script, not a package member."""
     import importlib.util

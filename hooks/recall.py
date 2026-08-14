@@ -323,12 +323,13 @@ def _run() -> None:
 
     pruned = st.prune(state)
     st.save(state_path, state)
-    if round_no % 20 == 0:
-        # A cheap, occasional sweep: once every 20 rounds is enough to keep the directory
-        # from growing, and it does not pay for a `glob` on every prompt.
-        dead = st.purge_dead(STATE_DIR)
-        if dead:
-            log(f"cleanup: {dead} dead session state(s) removed")
+    # A cheap, occasional sweep. The cadence itself lives in core.session_state
+    # (PURGE_EVERY_ROUNDS) rather than as `round_no % 20` here, so the hermes adapter runs
+    # the same one: while the arithmetic sat in this file, the purging had "moved into core
+    # so both hosts share it" and only this host ever called it.
+    dead = st.sweep_if_due(STATE_DIR, round_no)
+    if dead:
+        log(f"cleanup: {dead} dead session state(s) removed")
     scale = " (scale converted)" if outcome.scale_converted else ""
     log(f"round {round_no}: {len(full_hits)} injected + {len(pointers)} pointers "
         f"(out of {len(hits)} relevant / {outcome.candidates} candidates) in {elapsed:.1f}s | "

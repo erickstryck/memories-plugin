@@ -104,6 +104,51 @@ class TestPurgeDead(unittest.TestCase):
         self.assertEqual(st.purge_dead(Path("/proc/impossible"), days=1.0), 0)
 
 
+class TestSweepIfDue(unittest.TestCase):
+    """The sweep CADENCE, in core because both hosts have to run the same one.
+
+    While `round_no % 20` was inline in `hooks/recall.py`, `purge_dead` had "moved into core
+    so both hosts share it" and the hermes adapter called it from nowhere — 60 measured
+    prefetch rounds left a 30-day-old abandoned file exactly where it was.
+    """
+
+    def _dir(self):
+        d = Path(tempfile.mkdtemp())
+        dead = d / "recall-dead.json"
+        dead.write_text(json.dumps({"round": 1, "seen": {}}))
+        stamp = time.time() - 30 * 86400
+        os.utime(dead, (stamp, stamp))
+
+        return d, dead
+
+    def test_it_sweeps_on_the_cadence(self):
+        d, dead = self._dir()
+        self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS), 1)
+        self.assertFalse(dead.exists())
+
+    def test_it_does_nothing_off_the_cadence(self):
+        d, dead = self._dir()
+        for round_no in range(1, st.PURGE_EVERY_ROUNDS):
+            self.assertEqual(st.sweep_if_due(d, round_no), 0)
+        self.assertTrue(dead.exists(), "a glob on every prompt is what the cadence avoids")
+
+    def test_round_zero_is_never_due(self):
+        """Round 0 means no round has happened; `0 % anything == 0` would make it due."""
+        d, dead = self._dir()
+        self.assertEqual(st.sweep_if_due(d, 0), 0)
+        self.assertTrue(dead.exists())
+
+    def test_a_corrupted_round_or_cadence_is_not_due_rather_than_an_error(self):
+        d, _ = self._dir()
+        for bad in ("abc", None, [1, 2]):
+            self.assertEqual(st.sweep_if_due(d, bad), 0)
+        self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS, every=0), 0)
+
+    def test_an_impossible_directory_does_not_raise(self):
+        self.assertEqual(st.sweep_if_due(Path("/proc/impossible"),
+                                        st.PURGE_EVERY_ROUNDS), 0)
+
+
 class TestCadence(unittest.TestCase):
     def test_it_is_due_on_the_multiple_and_only_there(self):
         self.assertEqual([t for t in range(1, 13) if st.due(t, 5)], [5, 10])

@@ -293,10 +293,33 @@ class MemoriesProvider(_Base):
         full, pointers = blocks.split_by_budget(hits, seen, round_no, self.BUDGET)
         session_state.prune(state)
         session_state.save(path, state)
+        self._sweep_dead_state(round_no)
         self._last_count = len(full)
 
         return self._with_checkpoint(
             blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
+
+    def _sweep_dead_state(self, round_no: int) -> None:
+        """Delete the state of sessions that are not coming back.
+
+        The cadence is the claude-code hook's, read from it and not invented here: the same
+        `core.session_state.sweep_if_due`, called at the same point — after the state save,
+        on a round that found memories. Without this call the directory grew one file per
+        session forever, which is verbatim what `purge_dead`'s own docstring says it exists
+        to prevent; the purging had already moved into `core` so both hosts would share it,
+        and only one host called it.
+
+        It must never cost a recall. `sweep_if_due` already swallows everything, and this
+        second guard is here because the alternative — a housekeeping failure turning a
+        successful search into an UNAVAILABLE block via `prefetch`'s catch-all — is worth
+        strictly less than one unswept file.
+        """
+        try:
+            base = getattr(self, "_state_dir", None)
+            if base is not None:
+                session_state.sweep_if_due(base, round_no)
+        except BaseException:  # noqa: BLE001 — an unswept file beats a lost recall
+            pass
 
     def _with_checkpoint(self, block: str) -> str:
         """Append the write procedure when the cadence says so.

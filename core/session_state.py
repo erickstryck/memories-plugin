@@ -98,6 +98,37 @@ def purge_dead(state_dir, days: float = 7.0, pattern: str = "recall-*.json") -> 
     return removed
 
 
+#: Rounds between dead-session sweeps. A cheap, occasional glob: once every 20 rounds is
+#: enough to keep the directory from growing, and it does not pay for a `glob` on every
+#: prompt. The number lives HERE, next to `purge_dead`, and not in an adapter: the cadence is
+#: part of the job, and two hosts that each picked their own would be one more setting that
+#: only looks shared.
+PURGE_EVERY_ROUNDS = 20
+
+
+def sweep_if_due(state_dir, round_no, days: float = 7.0,
+                 every: int = PURGE_EVERY_ROUNDS) -> int:
+    """`purge_dead` on the shared cadence. Returns how many files went; 0 when not due.
+
+    Both hosts call this instead of testing `round_no % 20` themselves. The sweep used to be
+    the claude-code hook's inline arithmetic, so when the purging moved into `core` for both
+    hosts to share (spec §4) the hermes adapter inherited nothing and its state directory
+    grew one file per session forever.
+
+    Nothing here raises, like everything else in this module: an unswept file is a
+    housekeeping cost, and it must never become the reason a recall failed.
+    """
+    try:
+        round_no = int(round_no)
+        every = int(every)
+    except (TypeError, ValueError):
+        return 0
+    if every <= 0 or round_no <= 0 or round_no % every:
+        return 0
+
+    return purge_dead(state_dir, days=days)
+
+
 def due(turn: int, interval: int) -> bool:
     """Whether the checkpoint is due on this turn. A non-positive interval disables it.
 
