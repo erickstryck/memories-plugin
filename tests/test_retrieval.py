@@ -320,6 +320,28 @@ class TestFakeContract(unittest.TestCase):
             self.assertEqual(extra, set(),
                              f"the {label} fake invents {extra}, which no consumer can rely on")
 
+    def test_outcome_payload_carries_the_whole_trail_minus_the_items(self):
+        """`retrieval.outcome_payload` — the JSON form of an Outcome, defined once.
+
+        Three callers now serialize the trail for a consumer to read: the CLI's `memory
+        recall --json` and `docs search --json`, and the hermes `memory_recall` /
+        `docs_search` tools. The `scored` items are dropped (set to None, not deleted, so
+        the key stays present for a reader that looks for it) because they are the RESULT,
+        delivered separately and in presentation shape. Restating this expression per
+        caller is how the two hosts' JSON would come to disagree about what a recall
+        reports.
+        """
+        outcome = retrieval.two_stage([hit("a", 0.9)], "q", FakeReranker([0.8]),
+                                      MEMORY_POLICY, TEXT)
+        self.assertTrue(outcome.scored, "the fixture has to produce a result to be a test")
+        payload = retrieval.outcome_payload(outcome)
+        self.assertEqual(set(payload), set(vars(outcome)),
+                         "every field of the trail has to survive the round trip")
+        self.assertIsNone(payload["scored"], "the items are the result, not the trail")
+        self.assertTrue(outcome.scored, "serializing must not empty the Outcome itself")
+        import json
+        json.dumps(payload)          # the point of the helper: it is JSON-serializable
+
     def test_every_key_the_pipeline_reads_is_one_the_reranker_produces(self):
         """Reads the keys out of `two_stage`'s source instead of restating them.
 

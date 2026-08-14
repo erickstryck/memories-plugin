@@ -197,6 +197,76 @@ class TestRenderDocs(unittest.TestCase):
         self.assertEqual([r["action"] for r in self.idx.refresh(scope="library")], ["missing"])
 
 
+class TestRenderDrop(unittest.TestCase):
+    """`cmd_docs_drop` renders what `DocIndex.drop_request` decided.
+
+    The decision moved into the core so the hermes `docs_drop` tool could route through
+    the same one. What has to stay true here is that each action the core can return still
+    renders as text a person can read — an unmapped action would print nothing and look
+    like a no-op that removed something.
+    """
+
+    def setUp(self):
+        self.cli = load_cli()
+        q, emb = FakeVectorStore(), FakeEmbedder()
+        self.idx = DocIndex(q, emb, None, "tmp", "lib", emb.dim)
+        self.path = os.path.join(tempfile.mkdtemp(), "doc.md")
+        Path(self.path).write_text("# Title\n\nbody of the document here\n")
+
+    class Args:
+        def __init__(self, **kw):
+            self.doc_id = None
+            self.scope = "all"
+            self.purge_tmp = False
+            self.expired = False
+            self.json = False
+            self.__dict__.update(kw)
+
+    def _run(self, args):
+        import unittest.mock
+        with unittest.mock.patch.object(self.cli.core, "build_docs", lambda cfg: self.idx):
+            return rendered(self.cli.cmd_docs_drop, args, None)
+
+    def test_a_doc_id_renders_the_removal(self):
+        res = self.idx.keep_file(self.path)
+        out = self._run(self.Args(doc_id=res["doc_id"], scope="library"))
+        self.assertIn(res["doc_id"], out)
+        self.assertIn("removed", out)
+
+    def test_purge_says_the_library_was_left_alone(self):
+        self.idx.index_file(self.path, ttl_seconds=60)
+        out = self._run(self.Args(purge_tmp=True))
+        self.assertIn("library untouched", out,
+                      "the one thing a person needs told when a collection is deleted")
+
+    def test_expired_renders_the_sweep(self):
+        self.idx.index_file(self.path, ttl_seconds=60)
+        out = self._run(self.Args(expired=True))
+        self.assertIn("expired entries removed", out)
+
+    def test_every_action_the_core_can_return_renders_something(self):
+        """A branch the renderer does not know prints an empty line, which reads as
+        success. Read the actions out of `drop_request`'s source so a fourth one added
+        later shows up here."""
+        import inspect
+        import re
+        actions = set(re.findall(r'"action": "(\w+)"',
+                                 inspect.getsource(self.idx.drop_request)))
+        self.assertTrue(actions, "drop_request stopped declaring its actions inline")
+        rendered_actions = set(re.findall(r'"action"\] == "(\w+)"',
+                                         inspect.getsource(self.cli.cmd_docs_drop)))
+        unhandled = actions - rendered_actions - {"removed"}   # `removed` is the else
+        self.assertEqual(unhandled, set(),
+                         f"cmd_docs_drop renders nothing for {unhandled}")
+
+    def test_no_target_exits_2_rather_than_reporting_success(self):
+        from contextlib import redirect_stderr
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(io.StringIO()):
+            self._run(self.Args())
+        self.assertEqual(caught.exception.code, 2,
+                         "2 means 'you called it wrong', distinct from a core failure")
+
+
 class TestParser(unittest.TestCase):
     def setUp(self):
         self.cli = load_cli()

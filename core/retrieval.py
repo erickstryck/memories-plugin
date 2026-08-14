@@ -193,6 +193,21 @@ class Outcome:
                     or self.dropped_above_floor)
 
 
+def outcome_payload(outcome: "Outcome") -> dict:
+    """The Outcome as JSON-serializable data: the whole trail, without the items.
+
+    Defined once because four callers serialize it for a consumer to read — `memory
+    recall --json` and `docs search --json` in the CLI, and the `memory_recall` /
+    `docs_search` hermes tools. Restating the expression per caller is exactly how the
+    two hosts' JSON would come to disagree about what a search reports.
+
+    `scored` is set to None rather than removed: the key stays present for a reader that
+    looks for it, and the items themselves travel separately, already translated into the
+    consumer's presentation shape (`Recalled`, `Hit`).
+    """
+    return dict(vars(outcome)) | {"scored": None}
+
+
 def fuse_by_id(batches: list[list[Any]], id_of: Callable[[Any], str],
                score_of: Callable[[Any], float] = default_score) -> list[Any]:
     """Fuses results from several vectors, keeping the HIGHEST score for each id.

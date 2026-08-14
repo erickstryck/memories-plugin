@@ -13,20 +13,23 @@ back the day it needed to rerank.
 from .config import Config, ConfigError, load, save, redacted
 from .errors import CoreError
 from .docs import DocIndex, DocsError, parse_ttl, doc_id_for
-from .memory import MemoryStore, Recalled, search_collections
+from .memory import (METADATA_FIELDS, MemoryStore, Recalled, metadata_from,
+                     search_collections)
 from .embedding import Embedder, EmbeddingError
 from .reranking import Reranker, RerankError, normalize_scores, sigmoid
 from .qdrant import Qdrant, QdrantError
 from .retrieval import (CE, CE_WEAK, DENSE, Outcome, Policy, Scored,
-                        fuse_by_id, needs_rerank, two_stage)
+                        fuse_by_id, needs_rerank, outcome_payload, two_stage)
 
 __all__ = [
     "CoreError",
     "Config", "ConfigError", "load", "save", "redacted",
     "DocIndex", "DocsError", "parse_ttl", "doc_id_for",
     "MemoryStore", "Recalled", "search_collections",
+    "METADATA_FIELDS", "metadata_from",
     "Embedder", "EmbeddingError", "Reranker", "RerankError",
     "normalize_scores", "sigmoid", "Policy", "two_stage", "fuse_by_id",
+    "outcome_payload",
     "Qdrant", "QdrantError",
     "build_qdrant", "build_embedder", "build_reranker", "build_memory", "build_docs",
 ]

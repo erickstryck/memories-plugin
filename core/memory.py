@@ -49,6 +49,53 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: The metadata shortcuts every host offers by name, declared once so no caller retypes
+#: them. They are conventions, not a schema — `metadata` accepts any keys.
+METADATA_FIELDS = ("type", "project", "area")
+
+
+def metadata_from(meta=None, **fields) -> dict:
+    """Assemble a memory's metadata from a base object plus the named shortcuts.
+
+    One definition because there are two callers with the same rule: the CLI's
+    `--json-meta` with `--type/--project/--area`, and the hermes `memory_store` /
+    `memory_update` tools' `metadata` object with the same three. The precedence is that
+    an explicit FIELD WINS over the base, so `--type reference` fixes one label without
+    the caller having to rewrite the whole object.
+
+    A `None` field is absent, not empty: writing `{"project": None}` reads back later as
+    a project named nothing rather than as no project at all.
+
+    `meta` may be a dict or a JSON object STRING, because the CLI passes a string and a
+    model asked for an object emits one often enough that refusing it would spend a tool
+    call on syntax. Anything else raises — including a JSON scalar or array, since
+    silently dropping metadata the caller believes it wrote is the worse failure: the
+    record lands unlabelled and nothing says so.
+    """
+    if meta is None or meta == "":
+        base = {}
+    elif isinstance(meta, dict):
+        base = dict(meta)
+    elif isinstance(meta, str):
+        import json
+        try:
+            parsed = json.loads(meta)
+        except ValueError as exc:
+            raise MemoryStoreError(f"metadata is not valid JSON: {exc}")
+        if not isinstance(parsed, dict):
+            raise MemoryStoreError(
+                f"metadata must be a JSON object, got {type(parsed).__name__}")
+        base = parsed
+    else:
+        raise MemoryStoreError(
+            f"metadata must be an object or a JSON object string, got {type(meta).__name__}")
+    for key, value in fields.items():
+        if value is not None:
+            base[key] = value
+
+    return base
+
+
 class MemoryStore:
     def __init__(self, qdrant: ports.VectorStore, embedder: ports.EmbeddingModel,
                  reranker: ports.RerankModel | None, collection: str, vector_size: int):

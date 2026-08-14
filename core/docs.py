@@ -399,6 +399,32 @@ class DocIndex:
             self.q.delete_by_filter(self._collection(sc),
                                     {"must": [{"key": "doc_id", "match": {"value": doc_id}}]})
 
+    def drop_request(self, doc_id: str | None = None, scope: str = "all", *,
+                     purge_tmp: bool = False, expired: bool = False) -> dict:
+        """The three-way removal DECISION every host offers, resolved in one place.
+
+        `docs drop` in the CLI and `docs_drop` as a hermes tool accept the same three
+        shapes — one document by id, the whole temporary collection, or just what expired
+        — and must refuse the same way when given none of them. That refusal is the point:
+        a drop with no target answering "done" having removed nothing is the failure this
+        guard exists for.
+
+        The precedence is pinned here rather than settled twice: `purge_tmp` first,
+        `expired` second, a `doc_id` last. Returning the action taken (instead of printing
+        it) is what lets a CLI render text and a tool return JSON over the same decision.
+        """
+        if purge_tmp:
+            return {"action": "purged", "scope": "tmp", "collection": self.drop_all_tmp()}
+        if expired:
+            self.sweep()
+
+            return {"action": "swept", "scope": "tmp"}
+        if not doc_id:
+            raise DocsError("nothing to drop: give a doc_id, purge_tmp or expired")
+        self.drop(doc_id, scope)
+
+        return {"action": "removed", "doc_id": doc_id, "scope": scope}
+
     def drop_all_tmp(self) -> str:
         """Deletes the entire TEMPORARY collection.
 

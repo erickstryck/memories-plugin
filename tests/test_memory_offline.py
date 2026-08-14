@@ -80,6 +80,55 @@ class TestPayloadShape(unittest.TestCase):
         self.assertEqual(len(q.collections["mem"]["points"]), 0)
 
 
+class TestMetadataAssembly(unittest.TestCase):
+    """`core.metadata_from` — ONE definition of "base object plus the named shortcuts".
+
+    It exists because two callers now assemble a memory's metadata the same way: the CLI's
+    `--json-meta` with `--type/--project/--area`, and the hermes `memory_store` tool's
+    `metadata` object with the same three. While the rule lived in `cli/qctx.py` only, the
+    second caller had nothing to call and would have carried a second copy of the
+    precedence — the duplication this repo has already paid for elsewhere.
+    """
+
+    def test_a_dict_base_survives_untouched(self):
+        self.assertEqual(core.metadata_from({"type": "reference", "x": 1}),
+                         {"type": "reference", "x": 1})
+
+    def test_the_named_fields_win_over_the_base(self):
+        """`--type` has to be able to fix a label without rewriting the whole object."""
+        self.assertEqual(core.metadata_from({"type": "old", "project": "p"}, type="new"),
+                         {"type": "new", "project": "p"})
+
+    def test_a_none_field_is_not_written(self):
+        """An absent argument must not land as `{"project": None}`, which reads back as a
+        project called nothing rather than as no project at all."""
+        self.assertEqual(core.metadata_from(None, type="reference", project=None, area=None),
+                         {"type": "reference"})
+
+    def test_nothing_at_all_is_an_empty_dict(self):
+        self.assertEqual(core.metadata_from(), {})
+
+    def test_a_json_string_base_is_accepted(self):
+        """The CLI hands a string (`--json-meta '{...}'`) and a model asked for an object
+        emits one often enough that rejecting it would waste a tool call on syntax."""
+        self.assertEqual(core.metadata_from('{"type": "reference"}'), {"type": "reference"})
+
+    def test_broken_json_is_refused_rather_than_dropped(self):
+        with self.assertRaises(core.CoreError):
+            core.metadata_from("{not json")
+
+    def test_a_json_scalar_is_refused_rather_than_dropped(self):
+        """Silently discarding metadata the caller believes it wrote is the worse failure:
+        the record lands with no labels and nothing says so."""
+        for bad in ("42", '"a string"', "[1, 2]", 7, ["a"]):
+            with self.assertRaises(core.CoreError):
+                core.metadata_from(bad)
+
+    def test_the_field_names_are_declared_once(self):
+        """Both callers iterate this tuple instead of retyping the three names."""
+        self.assertEqual(core.METADATA_FIELDS, ("type", "project", "area"))
+
+
 class TestRefusedWrites(unittest.TestCase):
     def test_empty_memory(self):
         s, _, _ = store()
@@ -295,6 +344,74 @@ class TestDocsOffline(unittest.TestCase):
             slice_text = "\n".join(lines[md["start_line"] - 1:md["end_line"]])
             self.assertEqual(slice_text.strip("\n"), doc,
                              "this is the contract of locator mode")
+
+
+class TestDropRequest(unittest.TestCase):
+    """`DocIndex.drop_request` — the three-way removal DECISION, in one place.
+
+    The CLI's `docs drop` and the hermes `docs_drop` tool both offer the same three
+    shapes (a doc id, `--purge-tmp`, `--expired`) and the same refusal when none is
+    given. That decision is the only piece of the CLI's docs handlers that is logic
+    rather than rendering, so it lives in the core and both hosts route through it —
+    otherwise the precedence (does `purge_tmp` beat `expired`?) would be settled twice
+    and could be settled differently.
+    """
+
+    def _index(self):
+        q, emb = FakeVectorStore(), FakeEmbedder()
+
+        return DocIndex(q, emb, None, "tmp", "lib", emb.dim), q
+
+    def _write_file(self, content="# Title\n\nbody of the document here\n"):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "doc.md")
+        with open(path, "w") as fh:
+            fh.write(content)
+
+        return path
+
+    def test_a_doc_id_removes_that_document(self):
+        idx, q = self._index()
+        res = idx.keep_file(self._write_file())
+        out = idx.drop_request(res["doc_id"], "library")
+        self.assertEqual(out["action"], "removed")
+        self.assertEqual(out["doc_id"], res["doc_id"])
+        self.assertEqual(len(q.collections["lib"]["points"]), 0)
+
+    def test_purge_tmp_destroys_the_temporary_collection_and_says_which(self):
+        idx, q = self._index()
+        idx.index_file(self._write_file(), ttl_seconds=60)
+        out = idx.drop_request(purge_tmp=True)
+        self.assertEqual(out["action"], "purged")
+        self.assertEqual(out["collection"], "tmp")
+        self.assertNotIn("tmp", q.collections)
+
+    def test_purge_tmp_never_touches_the_library(self):
+        """The library lives in its own collection precisely so the temporary archive's
+        destroyability cannot reach it."""
+        idx, q = self._index()
+        idx.keep_file(self._write_file())
+        kept = len(q.collections["lib"]["points"])
+        idx.drop_request(purge_tmp=True)
+        self.assertEqual(len(q.collections["lib"]["points"]), kept)
+
+    def test_expired_sweeps_and_reports_it(self):
+        idx, q = self._index()
+        idx.index_file(self._write_file(), ttl_seconds=-1)   # already expired
+        out = idx.drop_request(expired=True)
+        self.assertEqual(out["action"], "swept")
+        self.assertEqual(len(q.collections["tmp"]["points"]), 0)
+
+    def test_nothing_specified_is_refused_and_not_a_silent_no_op(self):
+        """A `docs drop` with no target must not answer "done" having removed nothing."""
+        idx, _ = self._index()
+        with self.assertRaises(core.DocsError):
+            idx.drop_request()
+
+    def test_purge_wins_over_expired_so_the_precedence_is_pinned(self):
+        idx, q = self._index()
+        idx.index_file(self._write_file(), ttl_seconds=3600)
+        self.assertEqual(idx.drop_request(purge_tmp=True, expired=True)["action"], "purged")
 
 
 if __name__ == "__main__":

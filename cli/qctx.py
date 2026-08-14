@@ -215,15 +215,16 @@ def cmd_setup(args, cfg):
 # ---- memory ----------------------------------------------------------------
 
 def _metadata_from_args(args) -> dict:
-    meta = {}
-    if getattr(args, "json_meta", None):
-        meta.update(json.loads(args.json_meta))
-    for field in ("type", "project", "area"):
-        value = getattr(args, field, None)
-        if value:
-            meta[field] = value
+    """Translates argparse into `core.metadata_from`, which owns the rule.
 
-    return meta
+    The assembly itself — base object, then the named fields winning over it — lives in
+    the core because the hermes `memory_store` tool assembles metadata the same way from
+    a `metadata` object plus the same three names. While the rule lived here, the second
+    host had nothing to call and would have carried its own copy of the precedence.
+    """
+    return core.metadata_from(
+        getattr(args, "json_meta", None),
+        **{field: getattr(args, field, None) for field in core.METADATA_FIELDS})
 
 
 def cmd_memory_store(args, cfg):
@@ -253,7 +254,8 @@ def cmd_memory_recall(args, cfg):
                            veto=True, order_matters=False)
     hits, outcome = store.recall([args.query], policy, args.top_k)
     if args.json:
-        output({"info": outcome.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
+        output({"info": core.outcome_payload(outcome),
+                "hits": [h.__dict__ for h in hits]}, True)
 
         return
     if outcome.scale_converted:
@@ -366,7 +368,8 @@ def cmd_docs_refresh(args, cfg):
 def cmd_docs_search(args, cfg):
     hits, outcome = core.build_docs(cfg).search(args.query, args.scope, args.doc_id, args.limit)
     if args.json:
-        output({"info": outcome.__dict__ | {"scored": None}, "hits": [h.__dict__ for h in hits]}, True)
+        output({"info": core.outcome_payload(outcome),
+                "hits": [h.__dict__ for h in hits]}, True)
 
         return
     if not hits:
@@ -424,26 +427,32 @@ def cmd_docs_list(args, cfg):
 
 
 def cmd_docs_drop(args, cfg):
-    idx = core.build_docs(cfg)
-    if args.purge_tmp:
-        name = idx.drop_all_tmp()
-        print(f"temporary collection {name} removed (recreated on next use); "
-              f"library untouched")
+    """Renders `DocIndex.drop_request`, which owns the decision.
 
-        return
-    if args.expired:
-        idx.sweep()
-        print("expired entries removed from the temporary archive")
-
-        return
-    if not args.doc_id:
-        print("give a doc-id, --purge-tmp or --expired", file=sys.stderr)
+    The three-way choice and the refusal when given none of the three live in the core,
+    because the hermes `docs_drop` tool offers the same three and must refuse identically.
+    """
+    try:
+        res = core.build_docs(cfg).drop_request(args.doc_id, args.scope,
+                                               purge_tmp=args.purge_tmp,
+                                               expired=args.expired)
+    except core.DocsError as exc:
+        # Exit 2 — "you called it wrong" — the same code the hand-written branch used, and
+        # distinct from the 1 `main()` gives a genuine core failure. Only the no-target
+        # refusal can land here: argparse's `choices` already rejects a bad `--scope`.
+        print(f"{exc}", file=sys.stderr)
         raise SystemExit(2)
-    idx.drop(args.doc_id, args.scope)
     if args.json:
-        output({"doc_id": args.doc_id, "scope": args.scope, "status": "removed"}, True)
+        output(res, True)
+
+        return
+    if res["action"] == "purged":
+        print(f"temporary collection {res['collection']} removed (recreated on next use); "
+              f"library untouched")
+    elif res["action"] == "swept":
+        print("expired entries removed from the temporary archive")
     else:
-        print(f"doc_id {args.doc_id} removed from {args.scope}")
+        print(f"doc_id {res['doc_id']} removed from {res['scope']}")
 
 
 # ---- parser ----------------------------------------------------------------
