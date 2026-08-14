@@ -40,7 +40,7 @@ if REPO_ROOT not in sys.path:
 import core  # noqa: E402
 from core import blocks, query, session_state  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
-from core.prompts import INSTRUCTIONS  # noqa: E402
+from core.prompts import CHECKPOINT_PROCEDURE, INSTRUCTIONS  # noqa: E402
 
 try:  # hermes is present in production and absent in this repo's test run
     from agent.memory_provider import MemoryProvider as _Base
@@ -110,6 +110,19 @@ class MemoriesProvider(_Base):
     QDRANT_BUDGET = _env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
     TOP_K = int(_env("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20"))
 
+    #: Turns between checkpoint nudges. Same env var as the claude-code hook
+    #: (QCTX_CHECKPOINT_INTERVAL, legacy REMEMBER_INTERVAL) — the equivalence test in
+    #: test_host_equivalence.py extracts both names from this file and requires them to
+    #: match hooks/checkpoint.py, because a setting that moves one host and not the other
+    #: is a configuration that only looks shared.
+    #:
+    #: Read tolerantly, through the same `_env_num` every other numeric knob above uses:
+    #: this is a class attribute computed at IMPORT time, before any guard runs, and on
+    #: this host it feeds `prefetch` — the same call that produces the recall block. A
+    #: bad value here is worse than in the hook, where it can only cost itself; here it
+    #: would take recall down with it if it raised.
+    CHECKPOINT_INTERVAL = _env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)
+
     BUDGET = blocks.Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
                            max_per_mem=MAX_PER_MEM,
                            reinject_after=session_state.REINJECT_AFTER)
@@ -121,6 +134,10 @@ class MemoriesProvider(_Base):
         self._session_id = ""
         self._state_dir = None
         self._last_count = 0
+        #: 0 means "on_turn_start was never called" — see `_with_checkpoint`, which
+        #: treats that as never due rather than asking `session_state.due(0, ...)`,
+        #: which would say yes for any positive interval.
+        self._turn = 0
 
     # -- availability ---------------------------------------------------------
 
@@ -195,11 +212,11 @@ class MemoriesProvider(_Base):
         # expects it disabled in both hosts.
         if (os.environ.get("QCTX_RECALL_DISABLED") == "1"
                 or os.environ.get("RECALL_DISABLED") == "1"):
-            return ""
+            return self._with_checkpoint("")
 
         skip = query.skip_reason(query_text)
         if skip:
-            return ""
+            return self._with_checkpoint("")
 
         angles = query.angles(query_text)
         store = self._ensure_store()
@@ -230,14 +247,46 @@ class MemoriesProvider(_Base):
             session_state.save(path, state)
             self._last_count = 0
 
-            return blocks.empty_block(outcome, len(angles))
+            return self._with_checkpoint(blocks.empty_block(outcome, len(angles)))
 
         full, pointers = blocks.split_by_budget(hits, seen, round_no, self.BUDGET)
         session_state.prune(state)
         session_state.save(path, state)
         self._last_count = len(full)
 
-        return blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET)
+        return self._with_checkpoint(
+            blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
+
+    def _with_checkpoint(self, block: str) -> str:
+        """Append the write procedure when the cadence says so.
+
+        The recall comes first and the nudge second: the memories and their rules of use
+        are what the turn needs to answer, the nudge is what the session needs to
+        remember.
+
+        Two things must never happen here:
+        - A provider nobody has told a turn number about (`_turn` still 0 — true of every
+          `prefetch` call driven directly in a test, and of the very first read of a real
+          session before `on_turn_start` runs first) must not be "due". `session_state.due`
+          treats 0 as divisible by anything, so without this guard a caller who never
+          calls `on_turn_start` would get a checkpoint the claude-code side never renders,
+          which is exactly what test_host_equivalence.py exists to catch.
+        - Any failure in composing the nudge must cost at most the nudge, never the
+          `block` already built by `_prefetch`. The checkpoint and the recall now share
+          one return value; a raise here must not turn a successful search into an
+          UNAVAILABLE block.
+        """
+        try:
+            if os.environ.get("QCTX_CHECKPOINT_DISABLED") == "1":
+                return block
+            turn = getattr(self, "_turn", 0)
+            if not turn or not session_state.due(turn, self.CHECKPOINT_INTERVAL):
+                return block
+            nudge = CHECKPOINT_PROCEDURE.format(count=turn, interval=self.CHECKPOINT_INTERVAL)
+
+            return f"{block}\n\n{nudge}" if block else nudge
+        except BaseException:  # noqa: BLE001 — a skipped checkpoint beats a lost recall
+            return block
 
     def recall_status(self):
         """Deterministic "recalled N" indicator. Absent from v0.20.0; free if upgraded."""
@@ -306,7 +355,17 @@ class MemoriesProvider(_Base):
         return self._store
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        pass               # Task 7 fills this
+        """Record the turn. It cannot inject — it returns None, by contract — so
+        `prefetch` carries the checkpoint when this number says it is due.
+
+        Tolerant like everything else here: a malformed `turn_number` degrades to "no
+        turn recorded" (0, never due) rather than raising out of a method the host does
+        not expect a return value from in the first place.
+        """
+        try:
+            self._turn = int(turn_number or 0)
+        except (TypeError, ValueError):
+            self._turn = 0
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         return "{}"        # Task 8 fills this

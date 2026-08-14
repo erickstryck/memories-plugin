@@ -379,3 +379,142 @@ class TestEnsureStoreTimeouts(unittest.TestCase):
         store = p._ensure_store()
         expected = self.share / self.qdrant_calls
         self.assertAlmostEqual(store.q.timeout, expected, places=6)
+
+
+class TestCheckpointCadence(unittest.TestCase):
+    """The write nudge. It rides along in prefetch, and the reason is structural:
+    on_turn_start runs every turn and CARRIES the number, but returns None — so it cannot
+    inject. The only injection points hermes offers are prefetch and system_prompt_block.
+    """
+
+    def _provider(self, interval):
+        from core.retrieval import Outcome
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._state_dir = Path(tempfile.mkdtemp())
+        p.CHECKPOINT_INTERVAL = interval
+
+        class FakeStore:
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return [], Outcome(candidates=1, best_dense=0.2, reranked=True)
+
+        p._store = FakeStore()
+
+        return p
+
+    def test_the_procedure_appears_on_the_interval_and_only_there(self):
+        p = self._provider(3)
+        seen = []
+        for turn in range(1, 8):
+            p.on_turn_start(turn, "a real question about the archive")
+            out = p.prefetch("a real question about the archive")
+            if "memory checkpoint" in out:
+                seen.append(turn)
+        self.assertEqual(seen, [3, 6])
+
+    def test_the_procedure_renders_with_the_turn_number(self):
+        p = self._provider(1)
+        p.on_turn_start(1, "a real question about the archive")
+        out = p.prefetch("a real question about the archive")
+        self.assertIn("Interaction 1 of this conversation (every 1)", out)
+        self.assertNotIn("{count}", out)
+
+    def test_an_interval_of_zero_disables_it(self):
+        p = self._provider(0)
+        for turn in range(1, 6):
+            p.on_turn_start(turn, "a real question about the archive")
+            self.assertNotIn("memory checkpoint", p.prefetch("a real question about the archive"))
+
+    def test_the_recall_block_still_comes_first(self):
+        """Order matters: the memories and their rules, then the write nudge."""
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        p = self._provider(1)
+        p._store = type("S", (), {"recall": lambda self, *a, **kw: (
+            [FakeHit(id="m1", document="a durable fact", origin=CE)],
+            Outcome(candidates=1, reranked=True))})()
+        p.on_turn_start(1, "a real question about the archive")
+        out = p.prefetch("a real question about the archive")
+        self.assertLess(out.index("a durable fact"), out.index("memory checkpoint"))
+
+    def test_a_provider_never_told_a_turn_number_is_never_due(self):
+        """The equivalence test and several TestPrefetch cases drive `prefetch` directly,
+        without ever calling `on_turn_start` first — exactly what a provider looks like on
+        its very first read. `0 % interval == 0` for any positive interval, so without a
+        guard against turn 0 every one of those callers would get a spurious checkpoint
+        the claude-code side never renders, breaking host equivalence. `on_turn_start`
+        hands out turns starting at 1 in production; turn 0 only ever means "never told."
+        """
+        p = self._provider(1)
+        out = p.prefetch("a real question about the archive")
+        self.assertNotIn("memory checkpoint", out)
+
+    def test_the_env_switch_disables_it_even_when_due(self):
+        """Same name and meaning as the claude-code hook's QCTX_CHECKPOINT_DISABLED — a
+        user who turned checkpointing off expects it off on both hosts."""
+        p = self._provider(1)
+        p.on_turn_start(1, "a real question about the archive")
+        with unittest.mock.patch.dict(os.environ, {"QCTX_CHECKPOINT_DISABLED": "1"}):
+            out = p.prefetch("a real question about the archive")
+        self.assertNotIn("memory checkpoint", out)
+
+
+class TestCheckpointIntervalIsRobust(unittest.TestCase):
+    """`CHECKPOINT_INTERVAL` is read at import time, before any per-call guard runs, and it
+    now feeds the SAME call that produces the recall block. A malformed value here is
+    worse than in the claude-code hook: it would take recall down with it instead of just
+    itself.
+    """
+
+    def _read_it(self, env):
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "print(MemoriesProvider().CHECKPOINT_INTERVAL)\n"
+        ) % str(REPO)
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+        return out.stdout.strip()
+
+    def test_a_malformed_interval_falls_back_to_the_default_instead_of_raising(self):
+        env = dict(os.environ, QCTX_CHECKPOINT_INTERVAL="5x")
+        env.pop("REMEMBER_INTERVAL", None)
+        self.assertEqual(self._read_it(env), "5")
+
+    def test_the_legacy_alias_still_works(self):
+        env = dict(os.environ, REMEMBER_INTERVAL="9")
+        env.pop("QCTX_CHECKPOINT_INTERVAL", None)
+        self.assertEqual(self._read_it(env), "9")
+
+
+class TestCheckpointFailureDoesNotCostRecall(unittest.TestCase):
+    """The checkpoint and the recall now share one return value. A failure inside the
+    checkpoint half must be worth at most one skipped nudge — never the loss of a recall
+    block that had already been built successfully.
+    """
+
+    def test_a_broken_cadence_check_still_returns_the_recall_block(self):
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._state_dir = Path(tempfile.mkdtemp())
+        p.CHECKPOINT_INTERVAL = 1
+
+        class FakeStore:
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return ([FakeHit(id="m1", document="a durable fact", origin=CE)],
+                       Outcome(candidates=1, reranked=True))
+
+        p._store = FakeStore()
+        p.on_turn_start(1, "a real question about the archive")
+
+        with unittest.mock.patch("hosts.hermes.session_state.due",
+                                 side_effect=RuntimeError("boom")):
+            out = p.prefetch("a real question about the archive")
+
+        self.assertIn("a durable fact", out, "the recall must survive a broken checkpoint")
+        self.assertNotIn("UNAVAILABLE", out, "a checkpoint failure is not a recall failure")
+        self.assertNotIn("memory checkpoint", out)

@@ -157,6 +157,20 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
         self.assertEqual(hook, host,
                          f"only in claude-code: {hook - host}; only in hermes: {host - hook}")
 
+    def test_the_checkpoint_knobs_have_the_same_names_in_both_hosts(self):
+        """The write side of the same claim: the cadence rides inside `prefetch` on
+        hermes and inside its own hook on claude-code, but the knob names and meanings —
+        QCTX_CHECKPOINT_INTERVAL, QCTX_CHECKPOINT_DISABLED — must be the ones a deployer
+        already knows from the claude-code side, not a second vocabulary for the same
+        setting."""
+        import re
+        pattern = re.compile(r'QCTX_CHECKPOINT_[A-Z_]+')
+        hook = set(pattern.findall((REPO / "hooks" / "checkpoint.py").read_text()))
+        host = set(pattern.findall((REPO / "hosts" / "hermes" / "__init__.py").read_text()))
+        self.assertTrue(hook, "no QCTX_CHECKPOINT_* names found in the hook")
+        self.assertEqual(hook, host,
+                         f"only in claude-code: {hook - host}; only in hermes: {host - hook}")
+
     def test_the_qdrant_budget_knob_has_the_same_semantics_in_both_hosts(self):
         """QCTX_RECALL_QDRANT_BUDGET must mean the same thing on both hosts: a ceiling the
         deployer may TIGHTEN, never raise past what the host's own deadline can afford.
