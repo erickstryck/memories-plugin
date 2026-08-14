@@ -63,8 +63,12 @@ def prune(state: dict, reinject_after: int = REINJECT_AFTER) -> int:
     back in full anyway, so keeping it just occupies space. Without pruning, a long session
     accumulates one entry per memory per round forever.
     """
-    round_no = int(state.get("round", 0) or 0)
-    seen = state.get("seen", {})
+    try:
+        round_no = int(state.get("round", 0) or 0)
+    except (TypeError, ValueError):
+        round_no = 0
+    seen = state.get("seen")
+    seen = seen if isinstance(seen, dict) else {}
     stale = [mid for mid, r in seen.items()
              if not isinstance(r, int) or (round_no - r) >= reinject_after]
     for mid in stale:
@@ -95,7 +99,17 @@ def purge_dead(state_dir, days: float = 7.0, pattern: str = "recall-*.json") -> 
 
 
 def due(turn: int, interval: int) -> bool:
-    """Whether the checkpoint is due on this turn. A non-positive interval disables it."""
+    """Whether the checkpoint is due on this turn. A non-positive interval disables it.
+
+    `turn` and `interval` are coerced the same way `next_round` coerces `round`: a
+    numeric string is usable, anything that is not never fires rather than raising —
+    hermes hands this function a number we do not control.
+    """
+    try:
+        turn = int(turn)
+        interval = int(interval)
+    except (TypeError, ValueError):
+        return False
     if interval <= 0:
         return False
 

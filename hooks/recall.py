@@ -265,6 +265,14 @@ def _run() -> None:
         log(f"state unavailable ({type(exc).__name__}) — proceeding without reinjection memory")
     round_no = st.next_round(state)
     seen_map = state.setdefault("seen", {})
+    if not isinstance(seen_map, dict):
+        # A state file can hold valid JSON with a wrong-typed `seen` (a hand-edited file,
+        # a future format change). `split_by_budget` below calls `seen.get(...)` and
+        # `seen[...] = ...` on this value; without the guard, a search that had already
+        # succeeded got its hits thrown away and the model was told the archive had not
+        # been consulted — the exact failure this module exists to prevent.
+        seen_map = {}
+        state["seen"] = seen_map
 
     if not hits:
         st.prune(state)

@@ -59,6 +59,25 @@ class TestPrune(unittest.TestCase):
     def test_empty_state_does_not_break(self):
         self.assertEqual(st.prune({}), 0)
 
+    def test_a_corrupted_round_does_not_raise(self):
+        state = {"round": "abc", "seen": {"a": 1}}
+        self.assertEqual(st.prune(state), 0)
+
+    def test_a_non_dict_seen_does_not_raise(self):
+        for bad_seen in ("not a dict", ["a", "b"]):
+            state = {"round": 5, "seen": bad_seen}
+            self.assertEqual(st.prune(state), 0)
+
+    def test_a_corrupted_round_container_does_not_raise(self):
+        state = {"round": [1, 2], "seen": {"a": 1}}
+        self.assertEqual(st.prune(state), 0)
+
+    def test_the_corrupted_state_from_a_bad_write_does_not_stop_pruning(self):
+        """Pins the end-to-end consequence: a state file saved with a wrong-typed `seen`
+        must not make `prune` raise and take the whole hook down with it."""
+        state = {"round": 3, "seen": "corrupted"}
+        self.assertEqual(st.prune(state), 0)
+
 
 class TestPurgeDead(unittest.TestCase):
     def test_it_removes_the_old_and_keeps_the_recent(self):
@@ -95,6 +114,17 @@ class TestCadence(unittest.TestCase):
 
     def test_an_interval_of_one_fires_every_turn(self):
         self.assertEqual([t for t in range(1, 5) if st.due(t, 1)], [1, 2, 3, 4])
+
+    def test_a_numeric_string_is_coerced_not_rejected(self):
+        self.assertTrue(st.due("5", 5))
+        self.assertTrue(st.due(5, "5"))
+
+    def test_a_non_numeric_turn_or_interval_is_never_due_not_an_error(self):
+        self.assertFalse(st.due("abc", 5))
+        self.assertFalse(st.due(5, "abc"))
+        self.assertFalse(st.due(None, 5))
+        self.assertFalse(st.due(5, None))
+        self.assertFalse(st.due([1, 2], 5))
 
 
 class TestNextRound(unittest.TestCase):
