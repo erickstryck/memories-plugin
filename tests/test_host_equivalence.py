@@ -620,6 +620,179 @@ class TestTheTopKKnobMeansTheSameThingInBothHosts(unittest.TestCase):
                     self._hermes_top_k(has_reranker, self._state_dir(), override=5), 5)
 
 
+#: A REAL `core.MemoryStore` over the in-memory fakes, holding three memories that all match
+#: the prompt below. Built inside each host's own process, as the store `core.build_memory`
+#: would have returned, so what the ceilings below cut is a real retrieval and not a stub's
+#: hard-coded answer — the whole point is that `max_memories` is applied as a SLICE.
+_REAL_STORE_OVER_FAKES = (
+    "from core.memory import MemoryStore\n"
+    "from tests.fakes import FakeEmbedder, FakeVectorStore\n"
+    "FACTS = [\n"
+    "    'the connector poll paginates with a cursor kept in the checkpoint',\n"
+    "    'the connector poll retries a paginate cursor failure three times',\n"
+    "    'the paginate cursor of the connector poll is opaque and must not be parsed',\n"
+    "]\n"
+    "def build_store(cfg=None, **kw):\n"
+    "    q, emb = FakeVectorStore(), FakeEmbedder()\n"
+    "    q.ensure_collection('mem', 8)\n"
+    "    store = MemoryStore(q, emb, None, 'mem', 8)\n"
+    "    for fact in FACTS:\n"
+    "        store.store(fact)\n"
+    "    return store\n"
+)
+
+
+class TestAZeroedKnobCannotMakeEitherHostCLAIMAbsence(unittest.TestCase):
+    """A knob set to 0 must cost reach, never turn into a claim that the archive is empty.
+
+    The tolerant readers accept `0` and negatives for every integer knob, and `0` meaning
+    "unlimited" is a common deployer convention — so this was one plausible typo from a
+    permanent, silent lie on every prompt. Measured against three stored memories that all
+    match, before the floors: `QCTX_RECALL_MAX_MEMORIES=6` gave 3 hits, `=1` gave 1, `=0`
+    gave 0 hits and a block reading "There is no recorded precedent on this subject", and
+    `=-1` silently dropped the lowest hit. `QCTX_RECALL_TOP_K=0` asked Qdrant for nothing.
+
+    The ruling is CLAMP, not refuse: a knob that produces a false claim of absence is worse
+    than a knob that ignores an absurd value, and refusing to start would trade a silent lie
+    for a dead host on a path that fires at every user interaction.
+
+    Asserted on the BLOCK, not on a hit count, and structurally rather than by prose: the
+    populated block is the only one carrying the rules of use (`PREVAILS`), and neither the
+    empty nor the unavailable block may appear while the archive is answering.
+    """
+
+    PROMPT = "how does the connector poll paginate its cursor?"
+    FLAT_CLAIM = "There is no recorded precedent"
+    EMPTY_MARKER = "no memory above the relevance cutoff"
+
+    #: The floors are neutralised on purpose. They are thresholds, not ceilings — the subject
+    #: here is what the CEILINGS do when zeroed — and leaving them at their production values
+    #: would make the assertions depend on the fake embedder's cosine scores instead of on
+    #: the knob under test.
+    def _env(self, state_dir, knob, value):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("QCTX_RECALL_", "RECALL_"))}
+        env["QCTX_STATE_DIR"] = str(state_dir)
+        env["QCTX_RECALL_STRICT_FLOOR"] = "0.0"
+        env["QCTX_RECALL_DENSE_FLOOR"] = "0.0"
+        env[knob] = str(value)
+
+        return env
+
+    def _claude_block(self, env) -> str:
+        """The context `hooks/recall.py` actually emits, for one real run."""
+        script = (
+            "import sys, json, io, unittest.mock\n"
+            "sys.path.insert(0, %r)\n"
+            "sys.path.insert(0, %r)\n"
+            "import recall\n"
+            + _REAL_STORE_OVER_FAKES +
+            "with unittest.mock.patch.object(recall.core, 'build_memory', build_store), \\\n"
+            "     unittest.mock.patch.object(recall.core, 'load', lambda: object()), \\\n"
+            "     unittest.mock.patch.object(sys, 'stdin',\n"
+            "                                io.StringIO(json.dumps({'prompt': %r}))):\n"
+            "    recall._run()\n"
+        ) % (str(REPO), str(REPO / "hooks"), self.PROMPT)
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        emitted = out.stdout.strip().splitlines()
+        self.assertTrue(emitted, f"the hook emitted NOTHING at all:\n{out.stderr}")
+
+        return json.loads(emitted[-1])["hookSpecificOutput"]["additionalContext"]
+
+    def _hermes_block(self, env, state_dir) -> str:
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "from pathlib import Path\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            + _REAL_STORE_OVER_FAKES +
+            "p = MemoriesProvider()\n"
+            "p._cfg = object()\n"
+            "p._state_dir = Path(%r)\n"
+            "p._store = build_store()\n"
+            "print(json.dumps(p.prefetch(%r)))\n"
+        ) % (str(REPO), str(state_dir), self.PROMPT)
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    def test_a_zeroed_ceiling_still_delivers_memories_on_both_hosts(self):
+        for knob, value in (("QCTX_RECALL_MAX_MEMORIES", 0),
+                            ("QCTX_RECALL_MAX_MEMORIES", -1),
+                            ("QCTX_RECALL_TOP_K", 0),
+                            ("QCTX_RECALL_MAX_CHARS", 0),
+                            ("QCTX_RECALL_MAX_PER_MEM", 0)):
+            for host in ("claude-code", "hermes"):
+                with self.subTest(knob=knob, value=value, host=host):
+                    state_dir = Path(tempfile.mkdtemp())
+                    env = self._env(state_dir, knob, value)
+                    block = (self._claude_block(env) if host == "claude-code"
+                             else self._hermes_block(env, state_dir))
+                    self.assertNotIn(self.FLAT_CLAIM, block,
+                                     f"{knob}={value} turned an archive that answered into "
+                                     f"a claim that nothing is stored")
+                    self.assertNotIn(self.EMPTY_MARKER, block,
+                                     f"{knob}={value} emptied the result set")
+                    self.assertNotIn("UNAVAILABLE", block)
+                    self.assertIn("PREVAILS", block,
+                                  "the rules of use travel with delivered memories, so "
+                                  "their absence means nothing was delivered")
+
+    #: Every knob that can zero the result set, and the attribute each host holds it in. The
+    #: two `TOP_K` attributes are one knob with two defaults (lenient with a cross-encoder,
+    #: strict without) and BOTH need the floor: the block-level test above runs against a
+    #: store with no reranker, so it can only ever witness the strict one.
+    CLAMPED = ("QCTX_RECALL_MAX_MEMORIES", "QCTX_RECALL_MAX_CHARS",
+               "QCTX_RECALL_MAX_PER_MEM", "QCTX_RECALL_TOP_K")
+    CLAMPED_ATTRS = ("MAX_MEMORIES", "MAX_CHARS", "MAX_PER_MEM", "TOP_K", "TOP_K_STRICT")
+
+    def test_every_zeroable_ceiling_is_clamped_on_both_hosts_and_says_so(self):
+        """The value-level half, because a block-level test can only witness the ceilings a
+        given store's shape actually reaches. Both hosts are read in ONE process with all four
+        knobs zeroed at once: the two adapters read the same variable names, and a deployer's
+        environment is not scoped per host either.
+
+        The note is required as well as the value. Silence would leave the deployer with a
+        knob that does not do what it says — and stderr is the one channel neither host reads
+        as data: stdout carries the hook protocol on claude-code and the injected block itself
+        on hermes.
+        """
+        state_dir = Path(tempfile.mkdtemp())
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("QCTX_RECALL_", "RECALL_"))}
+        env["QCTX_STATE_DIR"] = str(state_dir)
+        for knob in self.CLAMPED:
+            env[knob] = "0"
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "sys.path.insert(0, %r)\n"
+            "import recall\n"
+            "from hosts.hermes import MemoriesProvider as P\n"
+            "attrs = %r\n"
+            "print(json.dumps({'claude-code': {a: getattr(recall, a) for a in attrs},\n"
+            "                  'hermes': {a: getattr(P, a) for a in attrs}}))\n"
+        ) % (str(REPO), str(REPO / "hooks"), list(self.CLAMPED_ATTRS))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        values = json.loads(out.stdout.strip().splitlines()[-1])
+        for host, attrs in values.items():
+            for attr, value in attrs.items():
+                with self.subTest(host=host, knob=attr):
+                    self.assertEqual(value, 1,
+                                     f"{host}: {attr}={value} leaves nothing to return")
+        for knob in self.CLAMPED:
+            with self.subTest(knob=knob):
+                self.assertGreaterEqual(out.stderr.lower().count(knob.lower()), 2,
+                                        f"each host has to say it clamped {knob}:\n"
+                                        f"{out.stderr}")
+
+
 #: A prompt that survives `query.skip_reason` and produces a real recall round.
 HITS_PROMPT = "how does the connector poll paginate its results?"
 

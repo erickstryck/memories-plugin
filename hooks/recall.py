@@ -29,6 +29,12 @@ compatibility with the previous version):
     QCTX_RECALL_MAX_PER_MEM    ceiling per memory                  (4500)
     QCTX_RECALL_BREAKER        breaker cooldown in seconds         (300)
     QCTX_STATE_DIR             where to keep state and the log
+
+The four CEILINGS above — TOP_K, MAX_MEMORIES, MAX_CHARS, MAX_PER_MEM — are clamped to a
+minimum of 1, because a value that empties the result set makes this hook report an archive
+that answered as an archive with no precedent. The floors and the breaker cooldown are not
+clamped: a 0 there means "let everything through" and "no breaker", both deliberate. See
+`env_num`.
 """
 import json
 import os
@@ -49,21 +55,42 @@ def env(name: str, legacy: str, default: str) -> str:
     return os.environ.get(name) or os.environ.get(legacy) or default
 
 
-def env_num(name: str, legacy: str, default: str, kind=float):
+def env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     """Reads a number from the environment WITHOUT killing the process if it is malformed.
 
     This is read at module load, i.e. BEFORE `main`'s catch-all — a
     `QCTX_RECALL_MAX_CHARS=14k` blew up before any of our code ran, and the user lost
     recall while getting a traceback instead of the unavailability warning. An invalid
     value falls back to the default and is recorded in the log.
+
+    `minimum` CLAMPS, and it does not refuse. A value that leaves nothing to return makes
+    this hook LIE: `core.retrieval` applies `max_memories` as a slice, so measured against
+    three stored memories that all match, `QCTX_RECALL_MAX_MEMORIES=6` injected 3, `=1`
+    injected 1, and `=0` produced an empty block reading "There is no recorded precedent on
+    this subject" — on every prompt, about an archive that answered. `=-1` silently dropped
+    the lowest hit, and `QCTX_RECALL_TOP_K=0` asked Qdrant for nothing at all. `0` meaning
+    "unlimited" is a common deployer convention, so the lie was one typo away. Ignoring an
+    absurd value is strictly better than asserting absence on the strength of it.
+
+    The clamp is announced TWICE on purpose: in the log, beside the other config notes,
+    which is where this hook's history is read after the fact; and one line on stderr, so
+    it is visible the first time it happens. Never on stdout — that carries the hook
+    protocol, and a stray line there costs the whole injection.
     """
     raw = env(name, legacy, default)
     try:
-        return kind(raw)
+        value = kind(raw)
     except (TypeError, ValueError):
         _pending_notes.append(f"{name}={raw!r} is not a number — using {default}")
+        value = kind(default)
+    if minimum is not None and value < minimum:
+        note = f"{name}={raw!r} would leave nothing to return — using {minimum}"
+        _pending_notes.append(note)
+        print(f"recall: {note}", file=sys.stderr)
 
-        return kind(default)
+        return kind(minimum)
+
+    return value
 
 
 #: Warnings collected before the log exists (the log depends on STATE_DIR, which
@@ -75,12 +102,21 @@ STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-p
 LOG = STATE_DIR / "recall.log"
 LOG_MAX_BYTES = 256 * 1024
 
+#: WHICH KNOBS CARRY A FLOOR, and why the others must not. `minimum=1` goes on every knob
+#: that can zero the RESULT SET, because a zero there makes this hook claim the archive holds
+#: nothing (see `env_num`). The same four carry it in hosts/hermes/__init__.py, with the same
+#: reasoning, so a deployer's mistake costs the same on both hosts. It deliberately does NOT
+#: go on QCTX_CHECKPOINT_INTERVAL (0 disables the nudge, a documented feature),
+#: QCTX_RECALL_BREAKER (0 disables the breaker, likewise), the three floors (thresholds: 0
+#: lets everything through, not nothing) or QCTX_RECALL_QDRANT_BUDGET (a 0 timeout fails
+#: LOUDLY, and this hook turns that into an explicit unavailability block — degraded, never
+#: a lie).
 STRICT_FLOOR = env_num("QCTX_RECALL_STRICT_FLOOR", "RECALL_MIN_SCORE", "0.58")
 DENSE_FLOOR = env_num("QCTX_RECALL_DENSE_FLOOR", "RECALL_DENSE_FLOOR", "0.45")
 MIN_SCORE = env_num("QCTX_RECALL_MIN_SCORE", "RECALL_RERANK_MIN_SCORE", "0.10")
-MAX_MEMORIES = env_num("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6", int)
-MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
-MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
+MAX_MEMORIES = env_num("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6", int, minimum=1)
+MAX_CHARS = env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int, minimum=1)
+MAX_PER_MEM = env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int, minimum=1)
 BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 
 #: Hits per angle asked of Qdrant. TWO defaults for ONE knob: with no second stage to
@@ -98,8 +134,8 @@ BREAKER_SECONDS = env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
 #: and `env_num`'s explanatory log note never ran, because the value never went through it.
 #: The same typo on hermes only cost the tolerant fallback. This user exports `RECALL_*`
 #: from `.bashrc`, so it was one keystroke away.
-TOP_K = env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int)
-TOP_K_STRICT = env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int)
+TOP_K = env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int, minimum=1)
+TOP_K_STRICT = env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int, minimum=1)
 
 #: The UserPromptSubmit hook timeout in hooks.json — the deadline the whole invocation
 #: must fit inside. Named here, beside the shares carved out of it, so the relationship

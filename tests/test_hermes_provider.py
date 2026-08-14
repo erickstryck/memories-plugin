@@ -684,11 +684,15 @@ class TestCheckpointIntervalIsRobust(unittest.TestCase):
 #:
 #: `^\s*` and not `^\s{4}`: the hermes knobs sit in a class body and the two hooks' sit at
 #: module level, and the whole point of scanning all three is that indentation must not
-#: decide what gets checked.
+#: decide what gets checked. The tail is `[^)]*\)` and not `[^)\n]*\)` for the same reason
+#: one level down: a call wrapped across two lines because `minimum=1` pushed it past the
+#: margin is the same knob, and a scan that loses it to a line break lets the formatter
+#: decide the coverage. Measured — that is precisely what dropped three knobs the day the
+#: floors were added.
 _KNOB = re.compile(
     r'^\s*(?P<attr>[A-Z][A-Z0-9_]*)\s*=\s*(?:(?P<cast>int|float)\()?'
     r'_?env(?:_num)?\(\s*"(?P<name>[A-Z][A-Z0-9_]*)"\s*,\s*"(?P<legacy>[A-Z][A-Z0-9_]*)"\s*,'
-    r'\s*"(?P<default>[^"]*)"(?:\s*,\s*(?P<kind>int|float))?[^)\n]*\)',
+    r'\s*"(?P<default>[^"]*)"(?:\s*,\s*(?P<kind>int|float))?[^)]*\)',
     re.M)
 
 #: The files that read numeric knobs at import time, and the statement that imports each so

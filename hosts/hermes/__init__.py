@@ -74,18 +74,38 @@ def _env(name: str, legacy: str, default: str) -> str:
     return os.environ.get(name) or os.environ.get(legacy) or default
 
 
-def _env_num(name: str, legacy: str, default: str, kind=float):
+def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     """Read a number from the environment without letting a typo kill the provider.
 
     Same tolerance the claude-code hook needed and for the same reason: this runs at import
     time, before any guard, so `QCTX_RECALL_MAX_CHARS=14k` would otherwise take the whole
     provider down instead of falling back.
+
+    `minimum` CLAMPS, and it does not refuse. A knob whose value would leave nothing to
+    return is worse than a knob that ignores an absurd value: `retrieval` applies
+    `max_memories` as a slice, so measured against three stored memories that all match,
+    `QCTX_RECALL_MAX_MEMORIES=6` gave 3 hits, `=1` gave 1, and `=0` gave 0 — an empty block
+    reading "There is no recorded precedent on this subject", on every prompt, from an
+    archive that answered. `=-1` silently dropped the lowest hit, and `QCTX_RECALL_TOP_K=0`
+    asked Qdrant for nothing at all. Since `0` meaning "unlimited" is a common deployer
+    convention, that lie was one plausible typo away. Refusing to start would trade a silent
+    false claim for a loud dead host; clamping keeps the archive answering and says so.
+
+    The note goes to stderr because that is the one channel neither host reads as data:
+    stdout carries the hook protocol on claude-code and the block itself here.
     """
     raw = _env(name, legacy, default)
     try:
-        return kind(raw)
+        value = kind(raw)
     except (TypeError, ValueError):
-        return kind(default)
+        value = kind(default)
+    if minimum is not None and value < minimum:
+        print(f"memories: {name}={raw!r} would leave nothing to return — using {minimum}",
+              file=sys.stderr)
+
+        return kind(minimum)
+
+    return value
 
 
 def _safe(session_id: str) -> str:
@@ -104,12 +124,26 @@ class MemoriesProvider(_Base):
     # Identical names are not a nicety: the equivalence test extracts every QCTX_RECALL_*
     # name from both adapters and requires the two sets to match, because a setting that
     # moves one host and not the other is a configuration that only looks shared.
+    #
+    # WHICH KNOBS CARRY A FLOOR, and why the others must not. `minimum=1` goes on every knob
+    # that can zero the RESULT SET — the four below — because a zero there produces a false
+    # claim that the archive holds nothing (see `_env_num`). It deliberately does NOT go on:
+    #   - CHECKPOINT_INTERVAL: 0 DISABLES the nudge, a documented and tested feature.
+    #   - BREAKER_SECONDS: 0 disables the breaker (`core.breaker.Breaker`: `cooldown <= 0`),
+    #     likewise deliberate.
+    #   - the three floors: they are thresholds, so 0 lets everything through rather than
+    #     nothing — the opposite failure, and not a claim of absence.
+    #   - QDRANT_BUDGET: a 0 timeout makes every search fail LOUDLY, and both hosts turn
+    #     that into an explicit unavailability block. Degraded, but never a lie.
     STRICT_FLOOR = _env_num("QCTX_RECALL_STRICT_FLOOR", "RECALL_MIN_SCORE", "0.58")
     DENSE_FLOOR = _env_num("QCTX_RECALL_DENSE_FLOOR", "RECALL_DENSE_FLOOR", "0.45")
     MIN_SCORE = _env_num("QCTX_RECALL_MIN_SCORE", "RECALL_RERANK_MIN_SCORE", "0.10")
-    MAX_MEMORIES = _env_num("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6", int)
-    MAX_CHARS = _env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int)
-    MAX_PER_MEM = _env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int)
+    MAX_MEMORIES = _env_num("QCTX_RECALL_MAX_MEMORIES", "RECALL_MAX_MEMORIES", "6", int,
+                            minimum=1)
+    MAX_CHARS = _env_num("QCTX_RECALL_MAX_CHARS", "RECALL_MAX_CHARS", "14000", int,
+                         minimum=1)
+    MAX_PER_MEM = _env_num("QCTX_RECALL_MAX_PER_MEM", "RECALL_MAX_PER_MEM", "4500", int,
+                           minimum=1)
     BREAKER_SECONDS = _env_num("QCTX_RECALL_BREAKER", "RECALL_RERANK_BREAKER", "300")
     QDRANT_BUDGET = _env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.0")
     #: Hits per angle asked of Qdrant. TWO defaults for ONE knob, and the pair is not a
@@ -127,8 +161,8 @@ class MemoriesProvider(_Base):
     #: provider came back None `agent/agent_init.py` warned about nothing at all. The user
     #: lost recall, the checkpoint and all 15 tools, silently. The same value on claude-code
     #: imports fine and degrades to a visible unavailability block.
-    TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int)
-    TOP_K_STRICT = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int)
+    TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int, minimum=1)
+    TOP_K_STRICT = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int, minimum=1)
 
     #: Turns between checkpoint nudges. Same env var as the claude-code hook
     #: (QCTX_CHECKPOINT_INTERVAL, legacy REMEMBER_INTERVAL) — the equivalence test in
