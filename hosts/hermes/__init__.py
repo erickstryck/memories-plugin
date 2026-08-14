@@ -361,6 +361,16 @@ class MemoriesProvider(_Base):
         Tolerant like everything else here: a malformed `turn_number` degrades to "no
         turn recorded" (0, never due) rather than raising out of a method the host does
         not expect a return value from in the first place.
+
+        WHAT TO RE-CHECK WHEN THE PINNED HERMES VERSION MOVES: treating turn 0 as never
+        due means the checkpoint depends on this method being called before `prefetch`.
+        That holds in v0.20.0, and it was verified by reading the host rather than by
+        trusting the ABC's prose — `agent/turn_context.py` calls `on_turn_start` (:1252)
+        and then `prefetch_all` (:1260) in one synchronous function, and it is the only
+        call site pairing them. If a later hermes reaches `prefetch` from somewhere that
+        never announced a turn, the write side goes quiet with nothing to show for it:
+        recall keeps working, so the failure looks like a model that stopped bothering to
+        save rather than a feature that is dead. Assert the pairing, don't assume it.
         """
         try:
             self._turn = int(turn_number or 0)
