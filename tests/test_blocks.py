@@ -389,3 +389,10 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
                 self.assertNotRegex(note, r"(?i)not (needed|necessary|required)|"
                                           r"unnecessary|superfluous|redundant",
                                     "a stage described as unneeded is not a caution")
+
+
+if __name__ == "__main__":
+    # Without this, `python3 tests/test_blocks.py` printed nothing and exited 0 — a file
+    # that reports "no tests" as success is worse than one that fails, and this file holds
+    # the pins on what the model is told about an archive that could not be searched.
+    unittest.main()

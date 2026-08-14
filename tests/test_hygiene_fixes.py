@@ -220,5 +220,45 @@ class TestUpdateWithoutReembedding(unittest.TestCase):
                          {"document", "metadata", "created_at", "updated_at"})
 
 
+class TestEveryTestFileCanBeRunDirectly(unittest.TestCase):
+    """A test file that reports "no tests" and exits 0 is worse than one that fails.
+
+    Measured: `python3 tests/test_blocks.py`, `tests/test_hermes_provider.py` and
+    `tests/test_session_state.py` each printed nothing and exited 0 — 93 tests between them,
+    including the pins on what the model is told about an archive that could not be searched
+    and, later, the fixes from this very review. Anyone checking one file's tests before
+    committing got a green exit for having run none of them.
+
+    A static check on purpose: launching twenty subprocesses to compare counts would add ten
+    seconds to every run of the suite to re-derive what `unittest discover` already runs. The
+    counts themselves were compared file by file, directly against the module run, when the
+    guards were added.
+    """
+
+    TESTS_DIR = Path(__file__).resolve().parent
+
+    def test_no_test_file_silently_runs_nothing(self):
+        for path in sorted(self.TESTS_DIR.glob("test_*.py")):
+            with self.subTest(file=path.name):
+                source = path.read_text()
+                self.assertIn('if __name__ == "__main__":', source,
+                              f"{path.name} run directly reports 0 tests and exits 0")
+                self.assertRegex(source, r'__main__.*\n\s*(#.*\n\s*)*.*unittest\.main\(',
+                                 f"{path.name} has a guard that does not run the tests")
+
+    def test_the_guard_is_the_LAST_thing_in_the_file(self):
+        """A class defined BELOW the guard is invisible to a direct run, and this test caught
+        itself doing exactly that: appended after `unittest.main()`, it ran under
+        `unittest discover` (19 tests) and not directly (18) — the same silent gap it exists
+        to close, one line lower.
+        """
+        for path in sorted(self.TESTS_DIR.glob("test_*.py")):
+            with self.subTest(file=path.name):
+                after = path.read_text().split('if __name__ == "__main__":')[-1]
+                self.assertNotRegex(after, r"(?m)^(class|def) ",
+                                    f"{path.name} defines tests after the guard: a direct "
+                                    f"run never sees them")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -529,6 +529,97 @@ class TestMemoryTools(unittest.TestCase):
         self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
                          "a fact worth keeping")
 
+    def test_update_refuses_an_EMPTY_information_instead_of_ignoring_it(self):
+        """`""` is not "not sent". `_text` mapped it to None, so the call came back
+        `{"status": "updated", "reembedded": false}` with the text untouched — a destructive
+        request answered as a successful no-op. Two things were wrong at once: the schema says
+        "It cannot be empty or blank", which was false, and `qctx memory update --text ""`
+        raised on the same input, so the two hosts disagreed about one operation.
+        """
+        mid = self.call("memory_store", information="a fact worth keeping")["id"]
+        res = self.call("memory_update", id=mid, information="")
+        self.assertIn("error", res)
+        self.assertIn("information", res["error"], "the message has to name the argument")
+        self.assertNotIn("status", res, "an ignored request must not report success")
+        self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
+                         "a fact worth keeping")
+
+    #: Characters that print as nothing and survive `str.strip()`. `\xa0` and U+3000 are
+    #: included as the CONTROLS: they were already refused, which is what made the hole hard
+    #: to see — the obvious probes pass.
+    INVISIBLE = {"empty": "", "spaces": "   ", "non-breaking space": "\xa0",
+                 "ideographic space": "　", "zero-width space": "​",
+                 "zero-width non-joiner": "‌", "zero-width joiner": "‍",
+                 "word joiner": "⁠", "BOM": "﻿",
+                 "mongolian vowel separator": "᠎"}
+
+    def test_no_invisible_text_can_replace_a_stored_fact(self):
+        """Measured: `information="​"` — one ZERO WIDTH SPACE — passed the blank guard,
+        REPLACED the document and reported `{"status": "updated", "reembedded": true}`. The
+        record then has no readable text, and `_flatten_hit` drops such a record, so the fact
+        was destroyed AND made permanently invisible to recall while still occupying a point.
+        Nothing anywhere reports it. The guard is `core.is_blank` now, shared with `store`.
+        """
+        for label, text in self.INVISIBLE.items():
+            with self.subTest(character=label):
+                mid = self.call("memory_store", information="a fact worth keeping")["id"]
+                res = self.call("memory_update", id=mid, information=text)
+                self.assertIn("error", res, f"{label} blanked a memory and reported success")
+                self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
+                                 "a fact worth keeping")
+
+    def test_no_invisible_text_can_be_STORED_either(self):
+        """`store` had the identical blind spot, which is why the guard moved into `core`
+        instead of being fixed at the one call site the review happened to probe."""
+        before = len(self.q.collections["mem"]["points"])
+        for label, text in self.INVISIBLE.items():
+            with self.subTest(character=label):
+                res = self.call("memory_store", information=text)
+                self.assertIn("error", res, f"{label} was written as a memory")
+        self.assertEqual(len(self.q.collections["mem"]["points"]), before,
+                         "an unreadable record was created")
+
+    def test_a_non_string_information_is_named_not_leaked_as_an_AttributeError(self):
+        """`information=42` answered `{"error": "AttributeError: 'int' object has no attribute
+        'strip'"}` — the interpreter's words about the core's internals. It names neither the
+        argument nor the fix, so the model cannot act on it, and it is the only coercer in
+        this module that had no type check while every other one says "'x' must be an
+        integer, got …".
+        """
+        mid = self.call("memory_store", information="a fact worth keeping")["id"]
+        for value in (42, 3.5, True, ["a fact"], {"text": "a fact"}):
+            with self.subTest(value=value):
+                res = self.call("memory_update", id=mid, information=value)
+                self.assertIn("error", res)
+                self.assertNotIn("AttributeError", res["error"],
+                                 "a raw interpreter error tells the model nothing")
+                self.assertIn("information", res["error"],
+                              "the message has to name the argument")
+        self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
+                         "a fact worth keeping")
+
+    def test_an_empty_metadata_object_does_not_clear_the_labels_and_the_schema_says_so(self):
+        """Measured: `metadata={}` leaves the labels untouched and reports "updated", because
+        the assembled object goes through `or None` and an empty one is indistinguishable from
+        "no labels sent". `--json-meta '{}'` does the same in the CLI. There is NO way to
+        clear every label on either surface.
+
+        That is the behaviour; what was wrong was the schema, which said the argument is "the
+        record's labels after the update" — false for exactly the call a model would try in
+        order to clear them. The two are asserted together so neither can drift alone.
+        """
+        mid = self.call("memory_store", information="a fact",
+                        metadata={"type": "reference", "project": "p"})["id"]
+        res = self.call("memory_update", id=mid, metadata={})
+        self.assertEqual(res["status"], "updated")
+        self.assertEqual(self.q.get_point("mem", mid)["payload"]["metadata"],
+                         {"type": "reference", "project": "p"})
+        schema = next(s for s in tools.SCHEMAS if s["name"] == "memory_update")
+        described = schema["parameters"]["properties"]["metadata"]["description"].lower()
+        self.assertIn("empty object", described,
+                      "the schema has to say what an empty object actually does")
+        self.assertRegex(described, r"(does not|cannot|no way to) (clear|remove)")
+
     def test_updating_one_label_replaces_the_whole_set(self):
         """The behaviour the schema now warns about, pinned so the warning stays true.
 

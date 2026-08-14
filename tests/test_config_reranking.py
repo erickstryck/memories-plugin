@@ -85,10 +85,18 @@ class TestTheProductionCollectionDefaultsArePinned(unittest.TestCase):
     That IS the intended default: the two hosts share one archive by the user's decision, so
     nothing here changes it. What was missing is that nothing recorded it — mutating either
     name survived the whole suite, so neither the names nor the fact that an un-injected
-    Config reaches production was held anywhere. A tool call with no configuration
-    (`docs_refresh` and `docs_drop` have NO required arguments) therefore lands on the
-    operator's library, and every test that walks the tool surface has to inject a Config for
-    exactly this reason — see `tests/test_hermes_tools.py::setUpModule`, which guards it.
+    Config reaches production was held anywhere. Every test that walks the tool surface has to
+    inject a Config for exactly this reason — see `tests/test_hermes_tools.py::setUpModule`,
+    which guards it.
+
+    The no-required-arguments path to a production collection is `docs_refresh`: its `scope`
+    DEFAULTS to "library", so a bare call reads and rewrites the operator's permanent archive
+    — and it is the tool carrying the parked delete-before-embed hazard, which makes it the
+    worst one to reach by accident. NOT `docs_drop`, as an earlier version of this docstring
+    said: measured, a bare `docs_drop` raises `DocsError("nothing to drop: give a doc_id,
+    purge_tmp or expired")` and touches nothing. Its danger is a different one, already
+    documented on the schema — a `doc_id` with no `scope` defaults to "all" and so reaches
+    the library too.
 
     `memory_collection` is the counter-example and it must stay one: no default, and a read
     that raises with instructions instead of silently searching some other collection.

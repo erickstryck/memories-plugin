@@ -107,11 +107,36 @@ def _require(args: dict, name: str):
     return value
 
 
-def _text(args: dict, name: str):
-    """An optional string argument, absent when not given."""
-    value = args.get(name)
+def _text(args: dict, name: str, *, blank_is_absent: bool = True):
+    """An optional string argument, absent when not given.
 
-    return value if value not in (None, "") else None
+    TYPE-CHECKED like every other coercer here. It was the only one without a check, and it
+    showed: `memory_update(id, information=42)` came back as
+    `{"error": "AttributeError: 'int' object has no attribute 'strip'"}` — the interpreter's
+    words about the core's internals, which names neither the argument nor the fix, so the
+    model cannot act on it. Every other coercer answers "'x' must be an integer, got …".
+
+    `blank_is_absent` is the difference between an OPTIONAL FILTER and a REPLACEMENT VALUE.
+    For `doc_id`, `""` reasonably means "no filter given". For `memory_update`'s
+    `information` it cannot: mapping `""` to None made the tool answer
+    `{"status": "updated", "reembedded": false}` with the text untouched, while the schema
+    says "It cannot be empty or blank" (so the schema was false) and the CLI raised on the
+    same input (so the two hosts disagreed). The blanking refusal in `core` never saw it —
+    None never reaches the guard, by design, because None means "keep the current text".
+    """
+    value = args.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolArgError(f"{name!r} must be a string, got {type(value).__name__} "
+                           f"({value!r}) — send the text itself")
+    if not value.strip():
+        if blank_is_absent:
+            return None
+        raise ToolArgError(f"{name!r} cannot be empty or blank: omit it to keep the "
+                           f"current text, or delete the record")
+
+    return value
 
 
 def _int(args: dict, name: str, default: int) -> int:
@@ -254,7 +279,11 @@ def _memory_update(args: dict, cfg) -> str:
     # every label. Same rule the CLI's `cmd_memory_update` follows.
     metadata = _metadata(args) or None
 
-    return _ok(_memory(cfg).update(mid, _text(args, "information"), metadata))
+    # `blank_is_absent=False`: here an empty string is a REPLACEMENT, not an omission, and
+    # the schema promises it is refused. See `_text`.
+    information = _text(args, "information", blank_is_absent=False)
+
+    return _ok(_memory(cfg).update(mid, information, metadata))
 
 
 def _memory_delete(args: dict, cfg) -> str:
@@ -353,11 +382,20 @@ _REPLACES_THE_LABELS = ("Passing this REPLACES the record's whole label set — 
                         "to keep (memory_get shows the current ones), or send no labels at "
                         "all to leave them untouched.")
 
+#: Measured, on both surfaces: `metadata={}` here and `--json-meta '{}'` in the CLI leave the
+#: labels untouched and report `"updated"`. Both assemble the metadata and then apply `or
+#: None`, which is what makes "no labels sent" mean "leave them alone" — and an empty object
+#: is indistinguishable from that. Saying "the record's labels after the update" without this
+#: made the schema false for the one call a model would try in order to clear them.
+_CANNOT_BE_CLEARED = ("An EMPTY object does not clear the labels: it reads as \"no labels "
+                      "sent\", so they are left as they are. There is no way to remove every "
+                      "label — replace them with the ones you want instead.")
+
 _UPDATE_META_PROPERTIES = {
     "metadata": {"type": "object",
-                 "description": "The record's labels after the update, e.g. "
+                 "description": "The labels the record should END UP with, e.g. "
                                 "{\"type\": \"decision\", \"project\": \"x\"}. "
-                                + _REPLACES_THE_LABELS},
+                                + _REPLACES_THE_LABELS + " " + _CANNOT_BE_CLEARED},
     "type": {"type": "string",
              "description": "Shortcut for metadata.type: decision, reference, preference, "
                             "bug, measurement… " + _REPLACES_THE_LABELS},

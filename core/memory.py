@@ -18,6 +18,7 @@ value, otherwise the mode with re-ranking ends up worse than the mode without, w
 is the opposite of the intent.
 """
 import json
+import unicodedata
 import uuid
 from dataclasses import dataclass
 
@@ -53,6 +54,34 @@ def _now() -> str:
 #: The metadata shortcuts every host offers by name, declared once so no caller retypes
 #: them. They are conventions, not a schema — `metadata` accepts any keys.
 METADATA_FIELDS = ("type", "project", "area")
+
+#: Unicode categories that print as nothing: control, format, and the three space classes.
+#: `Cf` is the one that matters and the one `str.strip()` does not touch.
+_INVISIBLE = {"Cc", "Cf", "Zs", "Zl", "Zp"}
+
+
+def is_blank(text) -> bool:
+    """Whether storing `text` would leave a record with nothing anyone can read.
+
+    `str.strip()` is not that test, and the gap was reachable by the model. Measured through
+    the real dispatcher: `memory_update(id, information="​")` — one ZERO WIDTH SPACE —
+    passed the guard, REPLACED the document and reported `{"status": "updated"}`. The same
+    holds for U+200C, U+200D, U+2060, U+FEFF and U+180E: all category `Cf`, none of them
+    whitespace as far as `strip()` is concerned. `\\xa0` and U+3000 were refused, which is
+    what made the hole easy to miss — the obvious probes pass.
+
+    The consequence is the worst kind this package has: `_flatten_hit` drops a record whose
+    document is blank, so the fact was destroyed AND the record became permanently invisible
+    to recall while still occupying a point. Nothing anywhere reports it.
+
+    In `core` and not in a host, because `store` and `update` had the identical blind spot
+    and both hosts reach both — the CLI, the hermes tools, and anything a third host adds.
+    """
+    if not isinstance(text, str):
+        return True
+
+    return not any(not (ch.isspace() or unicodedata.category(ch) in _INVISIBLE)
+                   for ch in text)
 
 
 def metadata_from(meta=None, **fields) -> dict:
@@ -127,7 +156,9 @@ class MemoryStore:
     # ---- writing -----------------------------------------------------------
 
     def store(self, information: str, metadata: dict | None = None) -> dict:
-        if not information or not information.strip():
+        # `is_blank` and not `.strip()`: a document of zero-width characters is as unreadable
+        # as an empty one and passes `strip()` — see the function's own docstring.
+        if is_blank(information):
             raise MemoryStoreError("an empty memory is not writable")
         self.ensure()
         mid = str(uuid.uuid4())
@@ -162,7 +193,7 @@ class MemoryStore:
         texts = []
         for i, item in enumerate(items):
             info = (item or {}).get("information")
-            if not isinstance(info, str) or not info.strip():
+            if not isinstance(info, str) or is_blank(info):
                 raise MemoryStoreError(f"items[{i}] needs 'information' (a non-empty string)")
             texts.append(info)
         self.ensure()
@@ -194,7 +225,12 @@ class MemoryStore:
         #
         # BEFORE the read, so a refusal cannot have written anything. `None` is untouched:
         # it means "keep the current text", which is a different request entirely.
-        if information is not None and not information.strip():
+        #
+        # The predicate is `is_blank` and not `.strip()`, because the first version of this
+        # guard was defeated by a single ZERO WIDTH SPACE: `information="​"` replaced the
+        # document and answered `{"status": "updated", "reembedded": true}`. Shared with
+        # `store` above, which had the identical hole.
+        if information is not None and is_blank(information):
             raise MemoryStoreError(
                 "an empty memory is not writable, and blanking one is worse: it would "
                 "destroy the fact and leave a record no search can find. Omit "

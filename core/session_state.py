@@ -100,9 +100,16 @@ def purge_dead(state_dir, days: float = 7.0, pattern: str = "recall-*.json") -> 
     empty `seen` — the worst effect is one memory reinjected once. The pattern is narrow on
     purpose: the log is not session state.
     """
-    cutoff = time.time() - days * 86400
     removed = 0
     try:
+        # INSIDE the try, and coerced. It used to sit above it, which made this the one
+        # function in a module whose docstring says nothing here raises: `days=None` or
+        # `days="x"` raised TypeError before the guard it was standing next to could catch
+        # it. `sweep_if_due` coerces `round_no` and `every` and forwarded `days` untouched,
+        # so the tolerance stopped exactly one argument short. No caller passes a bad value
+        # today; the contract is what callers rely on, and it has to hold without them
+        # checking who calls it.
+        cutoff = time.time() - float(days) * 86400
         for path in Path(state_dir).glob(pattern):
             if path.stat().st_mtime < cutoff:
                 path.unlink()

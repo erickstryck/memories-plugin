@@ -171,6 +171,26 @@ class TestSweepIfDue(unittest.TestCase):
         self.assertEqual(st.sweep_if_due(Path("/proc/impossible"),
                                         st.PURGE_EVERY_ROUNDS), 0)
 
+    def test_a_corrupted_RETENTION_is_not_due_rather_than_an_error_either(self):
+        """The tolerance stopped one argument short of the module's own contract.
+
+        `sweep_if_due` coerced `round_no` and `every` and forwarded `days` untouched, and
+        `purge_dead` computed `cutoff = time.time() - days * 86400` OUTSIDE its `try` — so
+        `days=None` raised TypeError from the one module whose docstring says nothing here
+        raises, one line above a guard that would have caught it. No host passes a bad value
+        today; the contract is what every caller in this package relies on instead of checking
+        who calls it, so it has to hold without them.
+        """
+        d, dead = self._dir()
+        for bad in (None, "x", [7], {}):
+            with self.subTest(days=bad):
+                self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS, days=bad), 0)
+                self.assertEqual(st.purge_dead(d, days=bad), 0)
+        self.assertTrue(dead.exists(), "a housekeeping sweep it could not size ran anyway")
+        # And a NUMERIC STRING still works, the same way `next_round` and `due` accept one.
+        self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS, days="7"), 1)
+        self.assertFalse(dead.exists())
+
 
 class TestCadence(unittest.TestCase):
     def test_it_is_due_on_the_multiple_and_only_there(self):
@@ -204,3 +224,9 @@ class TestNextRound(unittest.TestCase):
     def test_a_corrupted_round_restarts_from_one(self):
         state = {"round": "wat", "seen": {}}
         self.assertEqual(st.next_round(state), 1)
+
+
+if __name__ == "__main__":
+    # See the note in tests/test_blocks.py: run directly, this file used to report nothing
+    # and exit 0.
+    unittest.main()

@@ -988,3 +988,9 @@ class TestConfigSchema(unittest.TestCase):
         self.assertEqual(written["embed_model"], "already-configured-model",
                          "a field the wizard did not touch must survive the save")
         self.assertEqual(written["memory_collection"], "new_collection")
+
+
+if __name__ == "__main__":
+    # See the note in tests/test_blocks.py: run directly, this file used to report nothing
+    # and exit 0.
+    unittest.main()

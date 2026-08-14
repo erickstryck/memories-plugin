@@ -1164,6 +1164,58 @@ class TestTheToolsDoWhatTheCLIDoes(unittest.TestCase):
                                  {"type": "reference", "project": "p"},
                                  f"{label} wiped the labels of a text-only update")
 
+    #: Text that prints as nothing. The first three were already refused everywhere; the rest
+    #: passed `str.strip()` and replaced the document.
+    INVISIBLE = ("", "   ", "\xa0", "​", "⁠", "﻿")
+
+    def test_neither_host_lets_an_INVISIBLE_replacement_destroy_a_fact(self):
+        """One operation, two answers — the divergence this file exists to catch.
+
+        Measured before the fix: `memory_update(information="")` through the tool returned
+        `{"status": "updated", "reembedded": false}` with the text untouched (because `_text`
+        mapped `""` to None, i.e. "not sent"), while `qctx memory update --text ""` raised.
+        And `information="​"` — one ZERO WIDTH SPACE — was accepted by BOTH: it survives
+        `str.strip()`, so it replaced the document and reported success on either surface,
+        leaving a record with no readable text that `_flatten_hit` then drops from every
+        recall. A fact destroyed, invisibly, by a call that answered "updated".
+
+        Both halves are asserted for both hosts: the call must fail, and the stored fact must
+        still be there afterwards.
+        """
+        for text in self.INVISIBLE:
+            for host in ("cli", "tool"):
+                with self.subTest(text=repr(text), host=host):
+                    mid = self.store.store("the original fact",
+                                           {"type": "reference"})["id"]
+                    if host == "cli":
+                        with self.assertRaises(core_module().CoreError):
+                            self._through_the_cli(self.cli.cmd_memory_update,
+                                                  id=mid, text=text)
+                    else:
+                        answer = self._through_the_tool("memory_update", id=mid,
+                                                        information=text)
+                        self.assertIn("error", answer,
+                                      "the tool reported a destructive no-op as success")
+                    self.assertEqual(self.q.get_point("mem", mid)["payload"]["document"],
+                                     "the original fact", "the fact was destroyed")
+
+    def test_neither_host_clears_the_labels_with_an_empty_object(self):
+        """`metadata={}` and `--json-meta '{}'` both read as "no labels sent" — the labels are
+        left untouched and the call reports "updated". Held for both hosts because it is the
+        documented contract now (see the memory_update schema): a divergence here would make
+        one host's documentation false rather than merely surprising.
+        """
+        for label, write in (("cli", lambda mid: self._through_the_cli(
+                                 self.cli.cmd_memory_update, id=mid, json_meta="{}")),
+                             ("tool", lambda mid: self._through_the_tool(
+                                 "memory_update", id=mid, metadata={}))):
+            with self.subTest(host=label):
+                mid = self.store.store("a fact", {"type": "reference", "project": "p"})["id"]
+                write(mid)
+                self.assertEqual(self.q.get_point("mem", mid)["payload"]["metadata"],
+                                 {"type": "reference", "project": "p"},
+                                 f"{label} cleared the labels with an empty object")
+
     def test_recall_reports_the_same_two_halves_on_both_hosts(self):
         self.store.store("a durable fact about pagination cursors")
         cli_json = json.loads(self._through_the_cli(
