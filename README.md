@@ -141,15 +141,29 @@ a secret to `config.json`, and `is_available()` does not look at the keys — it
 Qdrant URL, the embedding endpoint and the collection. So a hermes started from a shell
 without them reports a perfectly healthy provider and then fails every single search.
 
-The script therefore checks the environment, not only the files: both accepted spellings of
-each key, in this shell **and** in `$HERMES_HOME/.env` — which hermes loads itself
+The script therefore checks the environment, not only the files: **every** spelling each key
+accepts — three for the Qdrant key, `QCTX_QDRANT_API_KEY`, `QDRANT_SERVICE_API_KEY` and
+`QDRANT_API_KEY` — in this shell **and** in `$HERMES_HOME/.env`, which hermes loads itself
 (`hermes_cli/env_loader.py`, from `run_agent.py` and `cli.py`) and which is the only one of
-the two a systemd/gateway hermes has. It prints the variable names and never their values.
+the two a systemd/gateway hermes has. It prints the variable names, never their values.
+Checking fewer aliases than the core accepts would be worse than not checking: the core
+would resolve the key fine while the script told the operator to export what they already had.
+
+And it asks the same question about the settings that are **not** secrets. The URLs and the
+collection names can live in `config.json` — which both hosts read with no shell involved —
+so the script resolves the configuration with the environment layer removed
+(`core.load(env={})`) and reports what a hermes that inherits no shell would be missing,
+pointing at `qctx config set qdrant-url …` rather than at `.env`. Without that second half
+the only remedy on offer fixes the keys and leaves a gateway hermes memory-less on the URLs.
 
 It also reports where the provider being replaced actually lives, whether the plugins
-directory it is about to write to is the one the loader reads, and whether it is being run
-from a git worktree — a symlink into a temporary checkout dies with it, leaving hermes with
-a dangling directory that discovery silently skips.
+directory it is about to write to is the one the loader reads, and it **refuses** to
+`--apply` from a git worktree (`--i-know-its-a-worktree` overrides): the symlink dies with the
+worktree, and a dangling `plugins/memories` is skipped in silence — `load_memory_provider`
+returns `None`, and hermes warns only when the provider is not `None`.
+
+Every write it makes to `config.yaml` is verified by re-reading the key afterwards. The
+rewriter exiting 0 says the file was replaced, not that `memory.provider` is now `memories`.
 
 ## Configuration
 
@@ -187,7 +201,7 @@ Recognized variables (canonical first, legacy aliases accepted):
 | config | environment |
 |---|---|
 | `qdrant_url` | `QCTX_QDRANT_URL`, `QDRANT_URL` |
-| `qdrant_api_key` | `QCTX_QDRANT_API_KEY`, `QDRANT_SERVICE_API_KEY` |
+| `qdrant_api_key` | `QCTX_QDRANT_API_KEY`, `QDRANT_SERVICE_API_KEY`, `QDRANT_API_KEY` |
 | `api_base_url` | `QCTX_API_BASE_URL`, `SERVER_BASE_URL` |
 | `api_key` | `QCTX_API_KEY`, `SERVER_API_KEY` |
 | `embed_url` | `QCTX_EMBED_URL`, `RECALL_EMBED_URL` |

@@ -43,14 +43,24 @@ LINK="$PLUGINS/memories"
 TARGET="$ROOT/hosts/hermes"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
-case "${1:-}" in
-  "")       APPLY=no ;;
-  --apply)  APPLY=yes ;;
-  *)        printf 'usage: %s [--apply]\n' "$0" >&2
-            printf '  no argument: check the install and report what would change\n' >&2
-            printf '  --apply:     apply it, after backing up config.yaml\n' >&2
-            exit 2 ;;
-esac
+usage() {
+  printf 'usage: %s [--apply] [--i-know-its-a-worktree]\n' "$0" >&2
+  printf '  no argument: check the install and report what would change\n' >&2
+  printf '  --apply:     apply it, after backing up config.yaml\n' >&2
+  printf '  --i-know-its-a-worktree: allow --apply from a git worktree (see below)\n' >&2
+}
+APPLY=no
+WORKTREE_OK=no
+for arg in "$@"; do
+  case "$arg" in
+    --apply)                  APPLY=yes ;;
+    --i-know-its-a-worktree)  WORKTREE_OK=yes ;;
+    # Anything else is a usage error and NOT a dry run: a mistyped `--aply` that silently
+    # became an ensaio, or a `-apply` that silently became an apply, is a worse outcome than
+    # an error message.
+    *)                        usage; exit 2 ;;
+  esac
+done
 
 failed=0
 say()  { printf '%s\n' "$*"; }
@@ -71,7 +81,15 @@ command -v python3 >/dev/null && ok "python3 available" || fail "python3 is requ
 # this. Announced as a WARN and never as an "ok": a skipped check must not read like a
 # passing one.
 if [ -n "${HERMES_CUTOVER_SKIP_SUITE:-}" ]; then
-  warn "offline suite NOT run (HERMES_CUTOVER_SKIP_SUITE is set) — it was not verified"
+  # It gates the DRY RUN only. A stray export in a shell would otherwise apply the cutover
+  # with the suite unverified, which is the one thing this variable must never buy.
+  if [ "$APPLY" = yes ]; then
+    fail "HERMES_CUTOVER_SKIP_SUITE is set — refusing to --apply with the suite unverified"
+    say  "        unset it and run again; it exists for the script's own tests, which would"
+    say  "        otherwise re-enter the suite that contains them"
+  else
+    warn "offline suite NOT run (HERMES_CUTOVER_SKIP_SUITE is set) — it was not verified"
+  fi
 elif python3 -m unittest discover -s "$ROOT/tests" >/dev/null 2>&1; then
   ok "offline suite passes"
 else
@@ -79,23 +97,51 @@ else
 fi
 
 # The provider's OWN verdict, through the same `is_available()`/`unavailable_reason()` pair
-# hermes calls, rather than a re-implementation of the config rules that could drift from
-# it. `-S` keeps site-packages out of the way; the core is stdlib only.
+# hermes calls, rather than a re-implementation of the config rules that could drift from it.
+#
+# The SECOND question is the one an interactive shell hides: `core.load(env={})` resolves the
+# same settings with the environment layer removed, i.e. what a hermes that inherits no shell
+# — systemd, the gateway, cron — would see. Everything but the two API keys can live in
+# config.json, so a gap here is fixable and worth naming.
 probe_out="$(python3 - "$ROOT" <<'PY' 2>&1 || true
 import sys
 sys.path.insert(0, sys.argv[1])
+
+
+def verdict(cfg):
+    cfg.require_qdrant()
+    cfg.resolved_embed_url()
+    cfg.require_memory_collection()
+
+
+def line(text):
+    print(" ".join(str(text).split()) or "no reason given")
+
+
 try:
+    import core
     from hosts.hermes import MemoriesProvider
     p = MemoriesProvider()
     print("1" if p.is_available() else "0")
-    print(p.unavailable_reason() or "no reason given")
-except Exception as exc:                      # noqa: BLE001 - reported, never raised
+    line(p.unavailable_reason())
+    try:
+        verdict(core.load(env={}))          # the file alone, no shell
+        print("1")
+        line("")
+    except Exception as exc:                # noqa: BLE001 - reported, never raised
+        print("0")
+        line(exc)
+except Exception as exc:                    # noqa: BLE001 - reported, never raised
     print("0")
-    print(f"the adapter did not import: {exc}")
+    line(f"the adapter did not import: {exc}")
+    print("0")
+    line("the adapter did not import")
 PY
 )"
-probe_ok="$(printf '%s\n' "$probe_out" | head -1)"
-probe_reason="$(printf '%s\n' "$probe_out" | sed -n '2,3p' | tr '\n' ' ')"
+probe_ok="$(printf '%s\n' "$probe_out" | sed -n 1p)"
+probe_reason="$(printf '%s\n' "$probe_out" | sed -n 2p)"
+file_ok="$(printf '%s\n' "$probe_out" | sed -n 3p)"
+file_reason="$(printf '%s\n' "$probe_out" | sed -n 4p)"
 if [ "$probe_ok" = "1" ]; then
   ok "the plugin reports itself available"
 else
@@ -106,33 +152,47 @@ fi
 say ""
 say "=== credentials (environment only — they are not in config.json) ==="
 
-# Both spellings each key accepts, canonical first. Only NAMES are printed, never values:
-# this report gets pasted into issues and chats.
+# EVERY spelling each key accepts, canonical first, taken from `ENV_ALIASES` in
+# core/config.py rather than from memory — the Qdrant key has THREE (`QDRANT_API_KEY` is the
+# upstream Qdrant name), and checking two of them turns a working environment into a FAIL
+# that tells the operator to export what they already have. Only NAMES are printed, never
+# values: this report gets pasted into issues and chats.
 dotenv_has() {
   [ -f "$DOTENV" ] || return 1
   grep -qE "^[[:space:]]*(export[[:space:]]+)?$1=[^[:space:]]" "$DOTENV"
 }
-in_shell=""; in_dotenv=""; missing=""
+in_shell=""; in_dotenv=""; missing=""; dotenv_gap=""
 check_key() {
-  local canonical="$1" legacy="$2" shell_hit="" dotenv_hit=""
+  # $1 is a human label, $2 the canonical name, the rest its legacy aliases.
+  local label="$1" canonical="$2" shell_hit="" dotenv_hit="" name
+  shift 2
   # Spelled out rather than as `A || B && C`: that list is exempt from `set -e` only by a
   # rule about which command follows the final connector, which is not something the next
   # reader should have to know to be sure the script does not exit here.
-  if [ -n "${!canonical:-}" ] || [ -n "${!legacy:-}" ]; then
-    shell_hit=yes
+  for name in "$canonical" "$@"; do
+    # The name that is ACTUALLY set, not the canonical one — the operator debugging this
+    # needs to know which of the three spellings the value came from.
+    if [ -z "$shell_hit" ] && [ -n "${!name:-}" ]; then shell_hit="$name"; fi
+    if [ -z "$dotenv_hit" ] && dotenv_has "$name"; then dotenv_hit="$name"; fi
+  done
+  if [ -n "$shell_hit" ]; then in_shell="$in_shell $shell_hit"; fi
+  if [ -n "$dotenv_hit" ]; then in_dotenv="$in_dotenv $dotenv_hit"; fi
+  local rest="$*"
+  rest="${rest// /, }"
+  # Per key, not by substring-matching the accumulated list: `QDRANT_SERVICE_API_KEY` does
+  # not contain the string `QDRANT_API_KEY`, and a glob that assumed it did reported a gap
+  # for a key that was right there.
+  if [ -z "$dotenv_hit" ]; then
+    dotenv_gap="$dotenv_gap
+    $label — $canonical, or $rest"
   fi
-  if dotenv_has "$canonical" || dotenv_has "$legacy"; then
-    dotenv_hit=yes
-  fi
-  if [ -n "$shell_hit" ]; then in_shell="$in_shell $canonical"; fi
-  if [ -n "$dotenv_hit" ]; then in_dotenv="$in_dotenv $canonical"; fi
   if [ -z "$shell_hit" ] && [ -z "$dotenv_hit" ]; then
     missing="$missing
-    $canonical (or $legacy)"
+    $label — $canonical, or $rest"
   fi
 }
-check_key QCTX_QDRANT_API_KEY QDRANT_SERVICE_API_KEY
-check_key QCTX_API_KEY SERVER_API_KEY
+check_key "the Qdrant key"           QCTX_QDRANT_API_KEY QDRANT_SERVICE_API_KEY QDRANT_API_KEY
+check_key "the embedding-server key" QCTX_API_KEY SERVER_API_KEY
 
 if [ -n "$missing" ]; then
   fail "these keys are in neither this shell nor $DOTENV:$missing"
@@ -147,12 +207,25 @@ else
   # cli.py (`hermes_cli/env_loader.py::load_hermes_dotenv`). A systemd/gateway hermes
   # inherits no interactive shell, so keys that live only in ~/.secrets reach a hermes you
   # launch by hand and NOT the gateway — the exact shape of hermes-agent#2765.
-  for key in QCTX_QDRANT_API_KEY QCTX_API_KEY; do
-    case "$in_dotenv" in
-      *"$key"*) ;;
-      *) warn "$key is not in $DOTENV — a systemd/gateway hermes will not have it" ;;
-    esac
-  done
+  if [ -n "$dotenv_gap" ]; then
+    warn "not in $DOTENV, so a systemd/gateway hermes will not have it:$dotenv_gap"
+  fi
+fi
+
+# The OTHER half of the same question, and the half the printed remedy above cannot fix. The
+# keys are secrets and can only come from the environment; the URLs and the collection names
+# are NOT, so they belong in config.json — which both hosts read with no shell involved. On
+# this machine they are `export`ed from ~/.bashrc, so an interactive hermes has them and a
+# gateway hermes does not, and telling that operator to put the KEYS in .env would leave them
+# still memory-less with no idea why.
+if [ "$file_ok" = "1" ]; then
+  ok "every non-secret setting is in config.json — a hermes with no shell finds them"
+else
+  warn "with no shell environment the plugin is NOT configured: $file_reason"
+  say  "        These are not secrets, so they belong in the config file both hosts read:"
+  say  "            qctx config set qdrant-url \"<url>\"   ·   qctx config set embed-url \"<url>\""
+  say  "            qctx config set memory-collection \"<name>\""
+  say  "        Without that, only a hermes started from a shell that exports them has memory."
 fi
 
 # --------------------------------------------------------------------- configuration
@@ -167,6 +240,12 @@ try:
 except OSError:
     sys.exit(0)
 want, inside, indent = sys.argv[2], False, None
+#: The LAST direct child wins, not the first. That is what a YAML parser resolves a duplicate
+#: key to (PyYAML keeps the last and does not complain), and hermes reads this file with
+#: yaml.safe_load. Reading the first would let a file holding BOTH
+#: `provider: memories` and `provider: qdrant` answer "memories" while hermes loads qdrant —
+#: which is exactly the corruption the post-write verification exists to catch.
+found = None
 for line in src.splitlines():
     if re.match(r"^memory:\s*(#.*)?$", line):
         inside = True
@@ -180,8 +259,9 @@ for line in src.splitlines():
         if indent is None:
             indent = m.group(1)
         if m.group(1) == indent and m.group(2) == want:
-            print(m.group(3))
-            break
+            found = m.group(3)
+if found is not None:
+    print(found)
 PY
 }
 
@@ -220,10 +300,23 @@ fi
 # The symlink is only as durable as what it points at, and a git worktree is a temporary
 # checkout: remove it and hermes is left with a dangling `plugins/memories`, which
 # discovery skips — no provider, no error, no memory. Install from the main checkout.
+#
+# `--apply` REFUSES rather than warning, because the failure it prevents is the silent one:
+# discovery skips a dangling `plugins/memories` and `load_memory_provider` returns None, and
+# hermes 0.20.1 does not warn on the None case at all — `agent/agent_init.py:1784-1798` only
+# warns when `_mp is not None`. So the operator gets a hermes with no memory and nothing
+# anywhere says why. A WARN in the middle of a forty-line report is easy to scroll past.
 case "$ROOT" in
   */.claude/worktrees/*|*/.git/worktrees/*)
-    warn "$ROOT is a git WORKTREE — the symlink dies when the worktree is removed."
-    say  "        Install from the main checkout once this branch is merged." ;;
+    if [ "$APPLY" = yes ] && [ "$WORKTREE_OK" != yes ]; then
+      fail "$ROOT is a git WORKTREE — refusing to --apply from it: the symlink dies when the"
+      say  "        worktree is removed, and a dangling plugins/memories is skipped SILENTLY"
+      say  "        (load_memory_provider returns None, and hermes does not warn on None)."
+      say  "        Install from the main checkout, or pass --i-know-its-a-worktree."
+    else
+      warn "$ROOT is a git WORKTREE — the symlink dies when the worktree is removed."
+      say  "        Install from the main checkout once this branch is merged."
+    fi ;;
 esac
 
 # The two-plausible-locations lesson, and not a hypothetical one: the provider being
@@ -306,7 +399,10 @@ else
   exit 1
 fi
 
-mkdir -p "$PLUGINS"
+# Reported like every neighbouring step instead of dying through `set -e` with no message.
+if ! mkdir -p "$PLUGINS"; then
+  fail "could not create $PLUGINS — the symlink has nowhere to go"
+fi
 if [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
   if ln -sfn "$TARGET" "$LINK"; then
     ok "symlink in place"
@@ -369,7 +465,19 @@ sys.stdout.write("".join(out))
 PY
 then
   if mv "$tmp" "$CONFIG"; then
-    ok "memory.provider = memories"
+    # RE-READ, with the same parser that reported the value before the change. The rewriter
+    # exiting 0 and `mv` succeeding say the file was replaced, not that `memory.provider` is
+    # now `memories`: a rewriter bug can emit a file where the old key survives (two
+    # `provider:` lines in the block, the first one winning nothing) and every signal above
+    # still looks like success. Printing ok for a state it had not verified is the defect
+    # scripts/cutover.sh already paid for once.
+    written="$(read_memory_key provider)"
+    if [ "$written" = memories ]; then
+      ok "memory.provider = memories"
+    else
+      fail "the rewrite did not take: memory.provider reads '${written:-<unset>}' in $CONFIG"
+      say  "        Restore $CONFIG.bak-$STAMP and set the key by hand."
+    fi
   else
     rm -f "$tmp"; fail "could not replace $CONFIG — set memory.provider by hand"
   fi

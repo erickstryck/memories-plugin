@@ -127,6 +127,41 @@ class TestBothHostsRenderTheSameBlock(unittest.TestCase):
         self.assertEqual(hermes.strip(), expected.strip())
 
 
+class TestTheInjectedTextNamesNoSingleHostSurface(unittest.TestCase):
+    """`core/prompts.py` is injected VERBATIM into both hosts, so a sentence in it that names
+    one host's surface is wrong on the other — and unlike a divergence in the block, nothing
+    else would catch it: the two hosts inject the same wrong sentence identically.
+
+    The concrete case: the checkpoint procedure ended "the commands are in the memory skill",
+    which on hermes points at something the model cannot load. Skills are the claude-code
+    surface; hermes gets the 15 tools.
+    """
+
+    def texts(self):
+        from core import prompts
+
+        return {
+            "CHECKPOINT_PROCEDURE": prompts.CHECKPOINT_PROCEDURE,
+            "INSTRUCTIONS": prompts.INSTRUCTIONS,
+        }
+
+    def test_no_shared_text_promises_a_skill_without_naming_the_tools_too(self):
+        for name, text in self.texts().items():
+            with self.subTest(text=name):
+                if "skill" in text.lower():
+                    self.assertIn("tool", text.lower(),
+                                  f"{name} sends the model to a skill only — on hermes there "
+                                  f"is no loadable memory skill, only the tools")
+
+    def test_no_shared_text_names_a_host_or_its_hook(self):
+        for name, text in self.texts().items():
+            with self.subTest(text=name):
+                lowered = text.lower()
+                for word in ("userpromptsubmit", "claude code", "claude-code", "hermes"):
+                    self.assertNotIn(word, lowered,
+                                     f"{name} names {word!r}, and it is injected into both")
+
+
 class TestBothHostsShareOneConfiguration(unittest.TestCase):
     def test_they_resolve_the_same_collections_from_the_same_file(self):
         cfg_dir = Path(tempfile.mkdtemp())

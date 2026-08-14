@@ -6,9 +6,14 @@ the method set hermes actually calls, measured from the install rather than assu
 published source — the two differ, and the installed one is what runs.
 
 That measurement is taken at RUN time, not written down here, and the plan proved why: the
-install moved from v0.20.0 to v0.20.1 mid-task, growing `unavailable_reason`, `RecallStatus`
-and five optional hooks. The test below read the new surface and still passed, because it
-asks the installed ABC instead of comparing against a list someone typed.
+install moved from v0.20.0 to v0.20.1 mid-task, taking the ABC from 19 public members to 21
+— it gained `unavailable_reason` and `recall_status`, the two this adapter had already
+implemented while nothing called them. The test below read the new surface and still passed,
+because it asks the installed ABC instead of comparing against a list someone typed.
+
+(The five optional hooks further down the adapter — `on_session_switch`, `on_pre_compress`,
+`on_delegation`, `on_memory_write`, `backup_paths` — are NOT new in v0.20.1; they were in the
+pre-upgrade ABC too, which is what the comment at hosts/hermes/__init__.py:505 says.)
 """
 import json
 import os

@@ -503,8 +503,10 @@ class MemoriesProvider(_Base):
     # -- explicit no-ops for the REAL ABC's other default hooks ---------------
     #
     # `dir(MemoryProvider)` off the v0.20.0 install has 19 non-underscore names, not the 16
-    # the skeleton above covers. These five are optional hooks the ABC itself defaults to
-    # no-op — in production they would be inherited for free from `_Base`. But this suite
+    # the skeleton above covers (v0.20.1 has 21: it adds `unavailable_reason` and
+    # `recall_status`, both already above — these five are NOT new there). They are optional
+    # hooks the ABC itself defaults to no-op: in production they would be inherited for free
+    # from `_Base`. But this suite
     # builds the provider with `_Base = object` (hermes off the path), so nothing here would
     # answer to them without an explicit definition, and the contract test that reads the
     # REAL surface (test_hermes_provider.py) catches exactly that gap.

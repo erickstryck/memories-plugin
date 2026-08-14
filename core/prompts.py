@@ -68,4 +68,5 @@ than filler memory.
 5. CONFIRM in a short list: what was saved or updated, each item with its id, in the
    user's language.
 
-The commands are in the memory skill; the essence of the procedure is here."""
+The commands are in the memory skill or in the memory tools, whichever this host gives you;
+the essence of the procedure is here."""

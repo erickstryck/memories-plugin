@@ -120,7 +120,7 @@ def empty_block(outcome, n_angles: int) -> str:
     # the note warned about candidates left unjudged by the pair ceiling while the
     # conclusion still asserted flatly that no precedent exists. Both sentences went into
     # the same block, contradicting each other — and the flat claim is the exact failure
-    # this hook exists to prevent, so it is the one that has to yield.
+    # automatic recall exists to prevent — on either host — so it is the one that yields.
     #
     # Deriving one from the other was necessary and not sufficient: the note itself still
     # had to LEARN each new degradation, and it did not know about the circuit breaker.
