@@ -1,0 +1,7 @@
+name: memories
+version: 0.3.0
+description: "Long-term semantic memory with automatic recall, plus an index for long documents (permanent library and a temporary archive with TTL), on top of Qdrant. Shares its archives with the claude-code plugin."
+category: memory
+kind: exclusive
+license: MIT
+homepage: https://github.com/erickstryck/memories-plugin
