@@ -5,6 +5,7 @@ had to copy them, and copies drift on the first fix — this repo already paid t
 with three copies of the two-stage pipeline.
 """
 import os
+import re
 import sys
 import unittest
 from dataclasses import dataclass
@@ -17,9 +18,14 @@ from core.retrieval import CE, DENSE, Outcome
 
 class TestPrompts(unittest.TestCase):
     def test_instructions_carry_the_four_rules(self):
-        for fragment in ("PREVAILS", "VERIFY it against the current tree",
-                         "the measurement wins", "another angle"):
+        for fragment in ("PREVAILS", "the measurement wins", "another angle"):
             self.assertIn(fragment, prompts.INSTRUCTIONS)
+        # A regex and not the literal sentence, for the reason the class below states at
+        # length: "VERIFY it against the current SOURCE tree" is the same rule with one word
+        # added, and it failed the literal pin. A pin that an honest synonym trips is a pin
+        # that gets deleted the third time it cries wolf, taking the real coverage with it.
+        self.assertRegex(prompts.INSTRUCTIONS, r"VERIFY it against the current[\w ]*tree",
+                         "the rule that a cited file, line or flag must be re-checked")
 
     def test_checkpoint_procedure_formats_without_leftover_braces(self):
         rendered = prompts.CHECKPOINT_PROCEDURE.format(count=5, interval=5)
@@ -182,10 +188,18 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
 
     def test_the_unavailable_block_forbids_concluding_absence(self):
         """The whole point of this state. The search did not run, so silence carries no
-        information — and the model must be told so in the imperative, not merely hinted at."""
+        information — and the model must be told so in the imperative, not merely hinted at.
+
+        Both halves are regexes now. Measured: "Never claim anything is without precedent"
+        failed the literal pins on "Do not claim" and "unprecedented" while forbidding exactly
+        the same conclusion in the same imperative. What is required is a PROHIBITION that
+        NAMES the claim, not two particular strings.
+        """
         out = blocks.unavailable_block("embedding", "connection refused")
-        self.assertIn("Do not claim", out, "the prohibition has to be an instruction")
-        self.assertIn("unprecedented", out, "and it has to name what must not be claimed")
+        self.assertRegex(out, r"(?i)\b(do not|don't|never)\s+(claim|assert|state|say)\b",
+                         "the prohibition has to be an instruction")
+        self.assertRegex(out, r"(?i)unprecedented|without (a |any )?(precedent|history)",
+                         "and it has to name what must not be claimed")
         self.assertNotIn(FLAT_CLAIM, out, "an unavailable search cannot assert absence")
 
     def test_the_unavailable_block_says_NOT_CONSULTED_and_never_EMPTY(self):
@@ -195,12 +209,33 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
         self.assertIn("was not consulted", out)
         self.assertNotIn("archive is empty", out)
 
+    def test_the_unavailable_block_denies_the_absence_READING_and_not_only_the_claim(self):
+        """The prohibition and the DENIAL are two requirements, and only the first was pinned.
+
+        Measured: "This does NOT mean there is no precedent" could be rewritten into "This
+        probably means there is no precedent, but strictly it means the archive was not
+        consulted" with the whole suite green — every pinned fragment still present ("was not
+        consulted", "Do not claim", "unprecedented") and the block nonetheless inviting the
+        reader to assume absence. A prohibition the same paragraph then concedes is not a
+        prohibition; the reader keeps the concession.
+        """
+        out = blocks.unavailable_block("qdrant", "timeout")
+        self.assertRegex(out, r"(?i)(does NOT mean|is not evidence|says nothing about|"
+                              r"carries no information|proves nothing)",
+                         "the block has to deny the absence reading outright, not merely "
+                         "forbid stating it")
+
     def test_the_unavailable_block_tells_the_model_to_say_it_is_without_memory(self):
         """Without this the model answers normally and the user never learns that the turn
-        had no archive behind it. The failure becomes invisible exactly when it matters."""
+        had no archive behind it. The failure becomes invisible exactly when it matters.
+
+        Regexes for the same reason as above: "say to the user that you have no long-term
+        memory" is the identical instruction and failed the literal pins.
+        """
         out = blocks.unavailable_block("rerank", "boom")
-        self.assertIn("without memory", out)
-        self.assertIn("tell the user", out.lower())
+        self.assertRegex(out, r"(?i)(tell|say to|inform) the user")
+        self.assertRegex(out, r"(?i)you (are|have) (no |without )(long-term |durable )?memory",
+                         "and what it has to tell them is that THIS TURN had no archive")
 
     def test_a_partial_judgement_demands_a_targeted_search(self):
         """Partial means candidates went unjudged. Saying so and stopping would leave the
@@ -209,7 +244,10 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
                           scored=[0.2] * 3, dropped_above_floor=14)
         out = blocks.empty_block(outcome, n_angles=3)
         self.assertIn(HEDGE, out)
-        self.assertIn("targeted search", out)
+        # A regex: "run a specific search" is the same instruction and failed the literal
+        # "targeted search". What is load-bearing is that the search be NARROWED — the
+        # generic one already ran — not the adjective chosen for it.
+        self.assertRegex(out, r"(?i)(targeted|specific|explicit|focused|narrower?) search")
         self.assertNotIn(FLAT_CLAIM, out)
         # The CONDITION, not just the instruction. Measured: asserting only "targeted search"
         # let the trigger be rewritten from "if the subject might have history" to "if you
@@ -231,3 +269,123 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
         out = blocks.empty_block(Outcome(candidates=0, best_dense=0.1), n_angles=3)
         self.assertIn(FLAT_CLAIM, out)
         self.assertNotIn(HEDGE, out)
+
+    #: Words that hand the forbidden inference straight back, or turn a fact about what the
+    #: harness DID into a guess. A block whose job is "do not conclude absence from this
+    #: silence" cannot also say the silence probably means absence — the reader keeps the
+    #: second sentence — and a block delivering memories cannot say they are probably from
+    #: earlier sessions, which is not a thing anyone is uncertain about. Two measured
+    #: mutations survived the whole suite by ADDING one of these, with every pinned fragment
+    #: still in place; hence a pin on the block's stance rather than on its fragments.
+    CONCESSIONS = re.compile(r"(?i)\b(probably|likely|usually|typically|generally|"
+                             r"in practice|almost always|most of the time|"
+                             r"nine times out of ten|for all practical purposes)\b")
+
+    # -- the POPULATED state, which had no pin on its framing at all ----------------------
+    #
+    # It is the state that fires most often, and until this review nothing held the two
+    # sentences that make the injection worth its context: the order to read the memories,
+    # and the claim that the search really happened.
+
+    def _framing(self):
+        """A populated block's own framing — everything before the shared INSTRUCTIONS.
+
+        Split rather than asserted over the whole block on purpose: INSTRUCTIONS is pinned by
+        TestPrompts and by test_host_equivalence, and it legitimately contains conditionals
+        ("if you think it should change…") that the negative pins below must not read as the
+        framing offering the memories as optional.
+        """
+        out = blocks.recall_block([FakeHit()], [], 2, Outcome(candidates=1, reranked=True),
+                                  BUDGET)
+        head, _, _ = out.partition(prompts.INSTRUCTIONS)
+        self.assertTrue(head.strip(), "the framing disappeared, or INSTRUCTIONS moved")
+
+        return head
+
+    def test_the_populated_block_ORDERS_the_reading_and_does_not_offer_it(self):
+        """Measured: "read it BEFORE answering, investigating or proposing a design" could be
+        rewritten to "read it only if it looks relevant to you" with the whole suite green.
+
+        That single edit undoes the reason automatic recall exists. Leaving the reading to the
+        model's discretion is the very situation the hook was built to replace — reading is the
+        direction that gets skipped, because nothing fails visibly when it does. An unread
+        memory costs exactly as much context as a read one and buys nothing.
+        """
+        head = self._framing()
+        self.assertRegex(head, r"(?i)read (it|them|these)[^.]{0,40}before (answering|acting)",
+                         "the reading has to be ordered, and ordered BEFORE the answer")
+        self.assertNotRegex(head, r"(?i)(only if|if it (looks|seems)|if you (feel|want|"
+                                  r"prefer|like)|at your discretion|optional)",
+                            "the framing turned the order into an invitation")
+
+    def test_the_populated_block_says_the_search_REALLY_RAN(self):
+        """"This search was EXECUTED by the harness" → "was attempted by the harness" also
+        survived the whole suite. It is a small word and it changes what the model may
+        conclude from the block: an attempt that may not have run cannot ground anything, so
+        the memories below it become hearsay and their absence becomes uninformative — which
+        is the unavailable state's message smuggled into the populated one.
+        """
+        head = self._framing()
+        self.assertRegex(head, r"(?i)this search was (EXECUTED|run|performed|carried out)",
+                         "the block has to state that the search actually happened")
+        self.assertNotRegex(head, r"(?i)(attempted|tried|may have (run|been run)|"
+                                  r"if it ran)",
+                            "a search reported as merely attempted grounds nothing")
+        # The same stance check the unavailable and partial blocks get below, and found the
+        # same way: "What follows PROBABLY is knowledge from earlier sessions" passed every
+        # other assertion here. The provenance of an injected memory is not a guess.
+        self.assertEqual(self.CONCESSIONS.findall(head), [],
+                         "the framing hedges what the harness actually did")
+
+    # -- no block may take back the prohibition it just issued ----------------------------
+
+    def NO_HEDGING_CASES(self):
+        return {
+            "unavailable": blocks.unavailable_block("embeddings", "HttpError"),
+            "partial/rerank-error": blocks.empty_block(
+                Outcome(candidates=5, best_dense=0.5, rerank_error="timeout"), 2),
+            "partial/breaker": blocks.empty_block(
+                Outcome(candidates=27, best_dense=0.54,
+                        suppressed="circuit breaker: the re-rank failed 12s ago"), 2),
+            "partial/collapsed": blocks.empty_block(
+                Outcome(candidates=5, best_dense=0.46, reranked=True, collapsed=True), 2),
+            "partial/dropped": blocks.empty_block(
+                Outcome(candidates=26, best_dense=0.5, reranked=True, dropped=14,
+                        dropped_above_floor=3), 2),
+        }
+
+    def test_no_block_that_forbids_ABSENCE_may_then_concede_it(self):
+        """The pin the review asked for by name: one that catches a CONTRADICTING SENTENCE
+        added elsewhere in the same block, not only the removal of a fragment.
+
+        Measured survivors: appending "In practice, though, an empty result almost always
+        means nothing is stored on it." to the hedged conclusion, and rewriting "This does NOT
+        mean there is no precedent" into "This probably means there is no precedent, but
+        strictly…". Both passed 544 tests. Every fragment-based pin is blind to them by
+        construction, because nothing was removed.
+        """
+        for label, out in self.NO_HEDGING_CASES().items():
+            with self.subTest(state=label):
+                found = self.CONCESSIONS.findall(out)
+                self.assertEqual(found, [],
+                                 f"the {label} block forbids concluding absence and then "
+                                 f"concedes it with {found}: the reader keeps the concession")
+
+    def test_the_degradation_note_says_the_SECOND_STAGE_DID_NOT_HAPPEN(self):
+        """"the re-rank was not used" → "was not needed" survived the whole suite, and it
+        inverts the note's meaning: not needed says the pipeline was fine, which is the exact
+        opposite of the CAUTION the note exists to raise. A judgement is partial because
+        something did not happen, never because it was superfluous.
+        """
+        for outcome in (Outcome(candidates=5, best_dense=0.5, rerank_error="timeout"),
+                        Outcome(candidates=27, best_dense=0.54,
+                                suppressed="circuit breaker: the re-rank failed 12s ago")):
+            with self.subTest(outcome=repr(outcome)):
+                note = blocks.degradation_note(outcome, BUDGET.max_memories)
+                self.assertIn("partial judgement", note)
+                self.assertRegex(note, r"(?i)re-rank (was not (used|applied|run)|did not run|"
+                                       r"was skipped|was held back|never ran)",
+                                 "the note has to say the stage did not happen")
+                self.assertNotRegex(note, r"(?i)not (needed|necessary|required)|"
+                                          r"unnecessary|superfluous|redundant",
+                                    "a stage described as unneeded is not a caution")
