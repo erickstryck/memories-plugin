@@ -518,3 +518,113 @@ class TestCheckpointFailureDoesNotCostRecall(unittest.TestCase):
         self.assertIn("a durable fact", out, "the recall must survive a broken checkpoint")
         self.assertNotIn("UNAVAILABLE", out, "a checkpoint failure is not a recall failure")
         self.assertNotIn("memory checkpoint", out)
+
+
+class TestConfigSchema(unittest.TestCase):
+    """`hermes memory setup` walks this, and it must write where claude-code reads.
+
+    The two write-path tests below run the whole thing in a FRESH SUBPROCESS rather than
+    mutating `os.environ["QCTX_CONFIG"]` in-process, and that is not a style preference.
+    `core.config.DEFAULT_CONFIG_PATH` (core/config.py:22-25) is computed ONCE, at module
+    import time, from whatever `QCTX_CONFIG` says at that moment — it is a frozen
+    constant, never re-read per call. `core` is already imported at the top of this test
+    FILE, before any test method runs, so setting the env var inside a test method has
+    ZERO effect on it (measured). `save_config` calls `core.save(patch)` with no explicit
+    path, so it falls back to that already-frozen `DEFAULT_CONFIG_PATH` — which, absent an
+    ambient `QCTX_CONFIG` for the whole test run, IS the operator's real
+    `~/.config/memories-plugin/config.json`. Every other QCTX_CONFIG-dependent test in
+    this suite (TestAvailability above, TestCheckpointIntervalIsRobust, and the two other
+    test modules) already sets the variable in a subprocess's `env=` for exactly this
+    reason; these two follow the same idiom instead of introducing a second, unsafe one.
+    """
+
+    def test_the_two_api_keys_are_declared_secret(self):
+        by_key = {f["key"]: f for f in MemoriesProvider().get_config_schema()}
+        for key in ("qdrant_api_key", "api_key"):
+            self.assertTrue(by_key[key]["secret"],
+                            f"{key} in a config file is a leaked secret")
+            self.assertTrue(by_key[key]["env_var"].startswith("QCTX_"),
+                            "a secret needs the env var name it will be read from")
+
+    def test_no_non_secret_field_is_marked_secret(self):
+        by_key = {f["key"]: f for f in MemoriesProvider().get_config_schema()}
+        self.assertFalse(by_key["memory_collection"]["secret"])
+        self.assertFalse(by_key["qdrant_url"]["secret"])
+
+    def test_the_schema_covers_every_configurable_field(self):
+        from core.config import Config
+        from dataclasses import fields as dc_fields
+        declared = {f["key"] for f in MemoriesProvider().get_config_schema()}
+        self.assertEqual({f.name for f in dc_fields(Config)}, declared,
+                         "a field missing here is a setting the hermes wizard cannot set")
+
+    def _clean_env(self, cfg_path):
+        env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}
+        env["QCTX_CONFIG"] = str(cfg_path)
+
+        return env
+
+    def test_save_config_writes_where_claude_code_reads(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        cfg_path = cfg_dir / "config.json"
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "MemoriesProvider().save_config({'memory_collection': 'shared_memory'}, %r)\n"
+            "import core\n"
+            "print(json.dumps(core.load().memory_collection))\n"
+        ) % (str(REPO), str(cfg_dir))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=self._clean_env(cfg_path))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        # Both halves checked: the file itself (the artifact claude-code reads from disk)
+        # AND core.load() (the actual read path claude-code uses) — a divergence between
+        # the two would mean the file is right but the loader disagrees, or vice versa.
+        self.assertEqual(json.loads(cfg_path.read_text())["memory_collection"],
+                         "shared_memory")
+        self.assertEqual(json.loads(out.stdout.strip()), "shared_memory")
+
+    def test_save_config_refuses_a_secret_even_if_hermes_passes_one(self):
+        """core.save already refuses; this asserts the adapter does not route around it."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        cfg_path = cfg_dir / "config.json"
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "MemoriesProvider().save_config({'api_key': 'SUPERSECRET'}, %r)\n"
+            "print('done')\n"
+        ) % (str(REPO), str(cfg_dir))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=self._clean_env(cfg_path))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        written = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+        self.assertNotIn("api_key", written)
+        self.assertNotIn("SUPERSECRET", json.dumps(written))
+
+    def test_save_config_merges_and_does_not_clobber_an_unrelated_existing_field(self):
+        """The user may already be running claude-code against a live config. A wizard run
+        through hermes must not truncate it: a field the wizard never asked about — here,
+        `embed_model`, chosen because it is untouched by either write below — has to
+        survive both the secret-refusal write and the ordinary write that follows it."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        cfg_path = cfg_dir / "config.json"
+        cfg_path.write_text(json.dumps({"embed_model": "already-configured-model",
+                                        "memory_collection": "old_collection"}))
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, %r)\n"
+            "from hosts.hermes import MemoriesProvider\n"
+            "p = MemoriesProvider()\n"
+            "p.save_config({'api_key': 'SUPERSECRET'}, %r)\n"
+            "p.save_config({'memory_collection': 'new_collection'}, %r)\n"
+            "print('done')\n"
+        ) % (str(REPO), str(cfg_dir), str(cfg_dir))
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=self._clean_env(cfg_path))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        written = json.loads(cfg_path.read_text())
+        self.assertEqual(written["embed_model"], "already-configured-model",
+                         "a field the wizard did not touch must survive the save")
+        self.assertEqual(written["memory_collection"], "new_collection")
