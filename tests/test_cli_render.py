@@ -13,6 +13,7 @@ with it while both drifted from the producer — which is exactly the failure it
 catch.
 """
 import io
+import json
 import os
 import sys
 import tempfile
@@ -201,9 +202,10 @@ class TestRenderDrop(unittest.TestCase):
     """`cmd_docs_drop` renders what `DocIndex.drop_request` decided.
 
     The decision moved into the core so the hermes `docs_drop` tool could route through
-    the same one. What has to stay true here is that each action the core can return still
-    renders as text a person can read — an unmapped action would print nothing and look
-    like a no-op that removed something.
+    the same one. Two things have to stay true here: each status the core can return still
+    renders as text a person can read — an unmapped one would print nothing and look like a
+    no-op that removed something — and the `--json` shape a script may already parse is
+    unchanged.
     """
 
     def setUp(self):
@@ -244,20 +246,42 @@ class TestRenderDrop(unittest.TestCase):
         out = self._run(self.Args(expired=True))
         self.assertIn("expired entries removed", out)
 
-    def test_every_action_the_core_can_return_renders_something(self):
+    def test_every_status_the_core_can_return_renders_something(self):
         """A branch the renderer does not know prints an empty line, which reads as
-        success. Read the actions out of `drop_request`'s source so a fourth one added
+        success. Read the statuses out of `drop_request`'s source so a fourth one added
         later shows up here."""
         import inspect
         import re
-        actions = set(re.findall(r'"action": "(\w+)"',
-                                 inspect.getsource(self.idx.drop_request)))
-        self.assertTrue(actions, "drop_request stopped declaring its actions inline")
-        rendered_actions = set(re.findall(r'"action"\] == "(\w+)"',
-                                         inspect.getsource(self.cli.cmd_docs_drop)))
-        unhandled = actions - rendered_actions - {"removed"}   # `removed` is the else
+        statuses = set(re.findall(r'"status": "(\w+)"',
+                                  inspect.getsource(self.idx.drop_request)))
+        self.assertTrue(statuses, "drop_request stopped declaring its statuses inline")
+        rendered_statuses = set(re.findall(r'"status"\] == "(\w+)"',
+                                          inspect.getsource(self.cli.cmd_docs_drop)))
+        unhandled = statuses - rendered_statuses - {"removed"}   # `removed` is the else
         self.assertEqual(unhandled, set(),
                          f"cmd_docs_drop renders nothing for {unhandled}")
+
+    def test_the_json_shape_of_a_doc_id_drop_is_the_one_already_published(self):
+        """`qctx docs drop <id> --json` has printed exactly these three keys since it
+        existed, and a user's script may parse them. Moving the decision into the core was
+        not a reason to rename one of them."""
+        res = self.idx.keep_file(self.path)
+        out = self._run(self.Args(doc_id=res["doc_id"], scope="library", json=True))
+        payload = json.loads(out)
+        self.assertEqual(set(payload), {"doc_id", "scope", "status"})
+        self.assertEqual(payload["status"], "removed")
+        self.assertEqual(payload["doc_id"], res["doc_id"])
+        self.assertEqual(payload["scope"], "library")
+
+    def test_the_purge_and_expired_branches_now_honour_json(self):
+        """These two printed human text and ignored `--json` entirely. Nothing could have
+        been parsing what did not exist, so they carry the core's own shape."""
+        self.idx.index_file(self.path, ttl_seconds=60)
+        purged = json.loads(self._run(self.Args(purge_tmp=True, json=True)))
+        self.assertEqual(purged["status"], "purged")
+        self.assertEqual(purged["collection"], "tmp")
+        swept = json.loads(self._run(self.Args(expired=True, json=True)))
+        self.assertEqual(swept["status"], "swept")
 
     def test_no_target_exits_2_rather_than_reporting_success(self):
         from contextlib import redirect_stderr

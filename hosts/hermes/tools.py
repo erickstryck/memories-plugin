@@ -597,7 +597,15 @@ SCHEMAS = [
             "properties": {
                 "doc_id": {"type": "string",
                            "description": "The document to remove, as shown by docs_list."},
-                "scope": _SCOPE,
+                # NOT the shared _SCOPE: the default matters more here than anywhere else,
+                # because this is the one tool where omitting an argument REMOVES something.
+                # The default is `all` to match the CLI — but a model has to be told that,
+                # or the permanent library gets touched by an argument nobody supplied.
+                "scope": {"type": "string", "enum": list(core.docs.SCOPES),
+                          "description": "Which archive to remove from. DEFAULTS TO all, "
+                                         "which means a doc_id drop reaches the PERMANENT "
+                                         "library as well as the temporary archive. Pass "
+                                         "tmp explicitly to leave the library alone."},
                 "purge_tmp": {"type": "boolean",
                               "description": "Delete the whole TEMPORARY collection; the "
                                              "permanent library is left alone."},
@@ -642,7 +650,15 @@ def dispatch(name: str, args, *, cfg) -> str:
         if isinstance(args, str):
             # Measured shape of the problem: some models emit the arguments object as its
             # JSON text. Refusing it costs a turn and teaches the model nothing.
-            args = json.loads(args) if args.strip() else {}
+            #
+            # Its own try, so unparseable text gets the message below rather than a raw
+            # JSONDecodeError from the catch-all at the bottom — "Expecting value: line 1
+            # column 1" says nothing about what the argument should have been.
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except ValueError:
+                return _err("arguments must be an object; got text that is not JSON: "
+                            f"{args[:80]!r}")
         if args is None:
             args = {}
         if not isinstance(args, dict):

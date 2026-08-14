@@ -42,6 +42,39 @@ FORBIDDEN = {"setup", "config_set", "config_detect", "config_show", "collections
 HERMES_INSTALL = Path.home() / ".hermes" / "hermes-agent"
 
 
+#: Started in `setUpModule`, stopped in `tearDownModule`. See the docstring there.
+_CONFIG_GUARD = None
+
+
+def setUpModule():
+    """Make any test that reaches the OPERATOR'S REAL CONFIG fail loudly and immediately.
+
+    This is a guard, not a reminder, because the danger is concrete and one line deep:
+    `core.load()` defaults `library_collection` to `memories_docs_library`
+    (core/config.py:54-55), a PRODUCTION archive, and `docs_refresh` has no required
+    arguments. A provider left without an injected config — one deleted `p._cfg = ...` line
+    in a test that walks all 15 tools — would reindex the user's permanent library from a
+    unit test, with the suite green.
+
+    Every test here therefore injects a `Config`. The one behaviour that must call
+    `core.load` (`_config()`'s fallback) re-patches it locally with a recorder, which is
+    both allowed and visible.
+    """
+    global _CONFIG_GUARD
+
+    def forbidden(*a, **kw):
+        raise AssertionError(
+            "a test tried to read the operator's real configuration via core.load(); "
+            "inject a Config instead — this suite must never reach a production collection")
+
+    _CONFIG_GUARD = unittest.mock.patch.object(core, "load", forbidden)
+    _CONFIG_GUARD.start()
+
+
+def tearDownModule():
+    _CONFIG_GUARD.stop()
+
+
 def a_config(**over) -> core.Config:
     """A Config that reaches nothing. The store is injected in these tests, so the only
     field that has to be right is `vector_size`, which has to match `FakeEmbedder`."""
@@ -99,6 +132,23 @@ class TestSchemas(unittest.TestCase):
         for s in tools.SCHEMAS:
             for prop, spec in s["parameters"]["properties"].items():
                 self.assertTrue(spec.get("description"), f"{s['name']}.{prop} has none")
+
+    def test_the_drop_scope_says_what_omitting_it_does(self):
+        """`docs_drop` is the one tool where omitting an argument REMOVES something.
+
+        `scope` defaults to `all`, matching the CLI, so a `doc_id` drop reaches the
+        PERMANENT library as well as the temporary archive. The default stays — the two hosts
+        must agree — but a model must not discover it by touching the permanent archive, so
+        the schema has to say it. The shared scope description used by search and list does
+        not, which is why this reads the drop tool's own.
+        """
+        by_name = {s["name"]: s for s in tools.SCHEMAS}
+        scope = by_name["docs_drop"]["parameters"]["properties"]["scope"]["description"]
+        self.assertIn("default", scope.lower(), "the default has to be stated")
+        self.assertIn("all", scope, "and it has to say WHICH default")
+        self.assertIn("library", scope,
+                      "and that the default reaches the permanent archive")
+        self.assertIn("tmp", scope, "and how to avoid it")
 
     def test_the_schemas_survive_the_wire(self):
         """hermes serializes these into a chat-completions request. Anything that does not
@@ -159,16 +209,21 @@ class TestDispatch(unittest.TestCase):
             self.assertIn(missing, out["error"], f"{name} does not name {missing}")
 
     def test_a_wrong_typed_argument_is_reported_not_raised(self):
-        """The model WILL send "5" or "many" where an integer was asked for. A string that
-        parses is accepted; one that does not is an error naming the argument."""
+        """An integer the model sent as text that cannot BE an integer: named, not raised.
+
+        The other half of the claim — that `"3"` is accepted and honoured — is in
+        TestMemoryTools, where a real archive can show the limit taking effect. It used to
+        live here as `assertNotIn("error", ok if isinstance(ok, dict) else {})`, and
+        `memory_find` returns a LIST, so that line asserted `"error" not in {}` and could
+        never fail.
+        """
         with unittest.mock.patch.object(core, "build_memory", lambda cfg, **kw: _store()[0]):
-            ok = json.loads(tools.dispatch("memory_find", {"query": "x", "limit": "3"},
-                                           cfg=a_config()))
-            self.assertNotIn("error", ok if isinstance(ok, dict) else {})
             bad = json.loads(tools.dispatch("memory_find", {"query": "x", "limit": "many"},
                                             cfg=a_config()))
-            self.assertIn("error", bad)
-            self.assertIn("limit", bad["error"])
+        self.assertIn("error", bad)
+        self.assertIn("limit", bad["error"])
+        self.assertIn("must be an integer", bad["error"],
+                      "the message has to say what was wrong, not only which argument")
 
     def test_an_unexpected_exception_is_still_a_json_error(self):
         """The failure the `except Exception` exists for: not a core error, not a bad
@@ -201,6 +256,20 @@ class TestDispatch(unittest.TestCase):
                                             cfg=a_config()))
         self.assertEqual(out["status"], "created")
 
+    def test_unparseable_arguments_say_what_was_expected(self):
+        """A JSON parse error escaping to the catch-all reads "Expecting value: line 1
+        column 1", which says nothing about the shape the model should have sent."""
+        for junk in ("not json at all", "{unclosed", "information='a fact'"):
+            out = json.loads(tools.dispatch("memory_store", junk, cfg=a_config()))
+            self.assertIn("error", out, junk)
+            self.assertIn("must be an object", out["error"])
+            self.assertNotIn("Expecting value", out["error"])
+
+    def test_arguments_that_parse_to_something_other_than_an_object_are_named(self):
+        for not_an_object in ("[1, 2]", "42", '"a string"'):
+            out = json.loads(tools.dispatch("memory_store", not_an_object, cfg=a_config()))
+            self.assertIn("must be an object", out["error"], not_an_object)
+
     def test_an_unconfigured_host_says_so_instead_of_failing_on_None(self):
         out = json.loads(tools.dispatch("memory_find", {"query": "x"}, cfg=None))
         self.assertIn("error", out)
@@ -209,6 +278,7 @@ class TestDispatch(unittest.TestCase):
 
     def test_the_provider_routes_through_dispatch(self):
         p = MemoriesProvider()
+        p._cfg = a_config()          # see setUpModule: reaching the real config is fatal
         out = p.handle_tool_call("memory_teleport", {})
         self.assertIn("error", json.loads(out))
 
@@ -216,7 +286,9 @@ class TestDispatch(unittest.TestCase):
         """The ABC's contract (agent/memory_provider.py:182, v0.20.0 as installed): "Must
         return a JSON string". A dict here fails at the host boundary, past every test of
         the handler's own logic."""
-        out = MemoriesProvider().handle_tool_call("memory_teleport", {})
+        p = MemoriesProvider()
+        p._cfg = a_config()
+        out = p.handle_tool_call("memory_teleport", {})
         self.assertIsInstance(out, str)
         json.loads(out)
 
@@ -227,6 +299,64 @@ class TestDispatch(unittest.TestCase):
             out = p.handle_tool_call(name, {})
             self.assertIsInstance(out, str, name)
             self.assertIsInstance(json.loads(out), (dict, list), name)
+
+
+class TestTheConfigATooLCallRunsAgainst(unittest.TestCase):
+    """`MemoriesProvider._config()` — where a tool call gets its configuration.
+
+    `is_available()` caches it and hermes calls that before initializing, so the fallback to
+    a fresh `core.load()` covers a host that dispatches a tool without having asked. Untested,
+    it could be deleted with the suite green, and the symptom would be every tool call
+    answering "not configured" while recall kept working — a feature that looks like a model
+    that stopped bothering.
+    """
+
+    def setUp(self):
+        self.provider = MemoriesProvider()
+        self.loads = []
+
+    def _loading(self, cfg):
+        """A `core.load` that records its calls. Overrides the module-level guard for this
+        test only — deliberately, since this is the one behaviour that must call it."""
+        def load():
+            self.loads.append(1)
+
+            return cfg
+
+        return unittest.mock.patch.object(core, "load", load)
+
+    def test_a_tool_call_with_no_cached_config_loads_it_itself(self):
+        store, q = _store()
+        with self._loading(a_config()), \
+             unittest.mock.patch.object(core, "build_memory", lambda cfg, **kw: store):
+            store.store("a fact that was already there")
+            out = json.loads(self.provider.handle_tool_call("memory_list", {}))
+        self.assertEqual(self.loads, [1], "the provider never read the configuration")
+        self.assertNotIn("error", out)
+        self.assertEqual(out["count"], 1)
+
+    def test_the_configuration_is_read_once_and_cached(self):
+        store, _ = _store()
+        with self._loading(a_config()), \
+             unittest.mock.patch.object(core, "build_memory", lambda cfg, **kw: store):
+            self.provider.handle_tool_call("memory_list", {})
+            self.provider.handle_tool_call("memory_list", {})
+        self.assertEqual(self.loads, [1], "one config read per provider, not per tool call")
+
+    def test_an_unconfigured_install_says_what_the_OPERATOR_has_to_do(self):
+        """A ConfigError here is not the model's fault and it cannot fix it, so the message
+        has to name the operator's action instead of the model's argument."""
+        def raising():
+            raise core.ConfigError("memory_collection is not configured (QCTX_...)")
+
+        with unittest.mock.patch.object(core, "load", raising):
+            out = json.loads(self.provider.handle_tool_call("memory_find", {"query": "x"}))
+        self.assertIn("error", out)
+        self.assertIn("qctx setup", out["error"])
+        self.assertNotIn("NoneType", out["error"],
+                         "an AttributeError on None tells the model nothing it can act on")
+        self.assertIn("QCTX_", self.provider.unavailable_reason(),
+                      "the operator's actual reason has to survive for whoever asks")
 
 
 def _store(collection="mem"):
@@ -291,8 +421,17 @@ class TestMemoryTools(unittest.TestCase):
         self.assertEqual(res["count"], 1)
 
     def test_store_many_refuses_something_that_is_not_a_list(self):
-        self.assertIn("error", self.call("memory_store_many",
-                                        items={"information": "not in an array"}))
+        """The guard has to produce an ACTIONABLE message, not just an error.
+
+        Asserting only `"error" in …` could not tell the guard from what happens without it:
+        the core iterates the dict's keys and raises `AttributeError: 'str' object has no
+        attribute 'get'`, which tells the model nothing about the shape it should have sent.
+        """
+        out = self.call("memory_store_many", items={"information": "not in an array"})
+        self.assertIn("error", out)
+        self.assertIn("must be an array", out["error"])
+        self.assertIn("dict", out["error"], "say what arrived, so the model can see the gap")
+        self.assertNotIn("AttributeError", out["error"])
 
     def test_find_returns_the_dense_hits(self):
         self.call("memory_store", information="pagination cursor in the connector poll")
@@ -304,6 +443,17 @@ class TestMemoryTools(unittest.TestCase):
         for i in range(4):
             self.call("memory_store", information=f"pagination fact number {i}")
         self.assertEqual(len(self.call("memory_find", query="pagination fact", limit=2)), 2)
+
+    def test_an_integer_sent_as_a_string_is_honoured_and_not_merely_tolerated(self):
+        """The accepting half of the coercion claim, over a real archive: `"2"` has to
+        actually LIMIT the search, not just avoid an error. Asserted against the unlimited
+        result, so a coercion that silently fell back to the default would show."""
+        for i in range(4):
+            self.call("memory_store", information=f"pagination fact number {i}")
+        self.assertEqual(len(self.call("memory_find", query="pagination fact")), 4)
+        hits = self.call("memory_find", query="pagination fact", limit="2")
+        self.assertIsInstance(hits, list)
+        self.assertEqual(len(hits), 2, "the string '2' was not honoured as the limit")
 
     def test_recall_reports_the_trail_next_to_the_hits(self):
         """The tool answers with the same two halves the CLI's `--json` does: the hits and
@@ -373,6 +523,24 @@ class TestMemoryTools(unittest.TestCase):
         self.assertIn("someone_elses", res["searched"])
         self.assertTrue(any(s["collection"] == "wrong_dimension" for s in res["skipped"]),
                         "a mismatched dimension has to be reported, never read silently")
+
+    def test_search_collections_refuses_a_collections_argument_that_is_not_a_list(self):
+        """`collections` reaches `qdrant.list_collections()`'s place in the core, which
+        iterates it: a dict would search collections named after its KEYS and a bare string
+        one letter at a time, both reporting "not found" for archives nobody asked about.
+        Named here instead, before anything is searched."""
+        for bad in ({"name": "x"}, "42"):        # a dict, and a JSON scalar in a string
+            out = self.call("memory_search_collections", query="x", collections=bad)
+            self.assertIn("error", out, bad)
+            self.assertIn("must be an array", out["error"])
+        # A single name in a proper array still works — the guard cannot pass by refusing all.
+        with unittest.mock.patch.object(core, "build_qdrant", lambda cfg, **kw: self.q), \
+             unittest.mock.patch.object(core, "build_embedder",
+                                        lambda cfg, **kw: FakeEmbedder()):
+            self.call("memory_store", information="a fact to find across archives")
+            ok = self.call("memory_search_collections", query="a fact to find",
+                           collections=["mem"])
+        self.assertEqual(ok["searched"], ["mem"])
 
 
 class TestDocsTools(unittest.TestCase):
@@ -459,7 +627,7 @@ class TestDocsTools(unittest.TestCase):
     def test_drop_removes_one_document(self):
         kept = self.call("docs_keep", path=self.path)
         res = self.call("docs_drop", doc_id=kept["doc_id"], scope="library")
-        self.assertEqual(res["action"], "removed")
+        self.assertEqual(res["status"], "removed")
         self.assertEqual(len(self.q.collections["lib"]["points"]), 0)
 
     def test_drop_with_no_target_is_refused_rather_than_a_silent_no_op(self):
@@ -471,19 +639,27 @@ class TestDocsTools(unittest.TestCase):
         self.call("docs_keep", path=self.path)
         self.call("docs_index", path=self.path, ttl="1h")
         res = self.call("docs_drop", purge_tmp=True)
-        self.assertEqual(res["action"], "purged")
+        self.assertEqual(res["status"], "purged")
         self.assertNotIn("tmp", self.q.collections)
         self.assertTrue(self.q.collections["lib"]["points"],
                         "the library is out of reach of any cleanup, by construction")
 
     def test_a_boolean_sent_as_a_string_is_understood(self):
         self.call("docs_index", path=self.path, ttl="1h")
-        self.assertEqual(self.call("docs_drop", purge_tmp="true")["action"], "purged")
+        self.assertEqual(self.call("docs_drop", purge_tmp="true")["status"], "purged")
 
     def test_a_boolean_that_means_nothing_is_reported(self):
+        """Asserted on the REASON, not on the argument name.
+
+        Naming the argument was not enough to pin this: with `_bool` swallowing `"maybe"` as
+        False, `docs_drop` gets no target at all and `drop_request` refuses with "give a
+        doc_id, purge_tmp or expired" — which contains "purge_tmp" and satisfied the old
+        assertion. The model would have been told to supply an argument it did supply.
+        """
         out = self.call("docs_drop", purge_tmp="maybe")
         self.assertIn("error", out)
-        self.assertIn("purge_tmp", out["error"])
+        self.assertIn("must be true or false", out["error"])
+        self.assertIn("maybe", out["error"], "quote the value back; the model sent it")
 
     def test_a_scope_the_archive_does_not_have_is_reported_with_the_valid_ones(self):
         """Driven with the fake archive in place, so the ONLY thing that can produce an
@@ -515,7 +691,7 @@ class TestDocsTools(unittest.TestCase):
     def test_expired_sweeps_the_temporary_archive(self):
         self.call("docs_index", path=self.path, ttl="1h")
         res = self.call("docs_drop", expired=True)
-        self.assertEqual(res["action"], "swept")
+        self.assertEqual(res["status"], "swept")
 
 
 class TestTheWiringFromOutside(unittest.TestCase):

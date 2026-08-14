@@ -374,7 +374,7 @@ class TestDropRequest(unittest.TestCase):
         idx, q = self._index()
         res = idx.keep_file(self._write_file())
         out = idx.drop_request(res["doc_id"], "library")
-        self.assertEqual(out["action"], "removed")
+        self.assertEqual(out["status"], "removed")
         self.assertEqual(out["doc_id"], res["doc_id"])
         self.assertEqual(len(q.collections["lib"]["points"]), 0)
 
@@ -382,7 +382,7 @@ class TestDropRequest(unittest.TestCase):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=60)
         out = idx.drop_request(purge_tmp=True)
-        self.assertEqual(out["action"], "purged")
+        self.assertEqual(out["status"], "purged")
         self.assertEqual(out["collection"], "tmp")
         self.assertNotIn("tmp", q.collections)
 
@@ -399,7 +399,7 @@ class TestDropRequest(unittest.TestCase):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=-1)   # already expired
         out = idx.drop_request(expired=True)
-        self.assertEqual(out["action"], "swept")
+        self.assertEqual(out["status"], "swept")
         self.assertEqual(len(q.collections["tmp"]["points"]), 0)
 
     def test_nothing_specified_is_refused_and_not_a_silent_no_op(self):
@@ -411,7 +411,7 @@ class TestDropRequest(unittest.TestCase):
     def test_purge_wins_over_expired_so_the_precedence_is_pinned(self):
         idx, q = self._index()
         idx.index_file(self._write_file(), ttl_seconds=3600)
-        self.assertEqual(idx.drop_request(purge_tmp=True, expired=True)["action"], "purged")
+        self.assertEqual(idx.drop_request(purge_tmp=True, expired=True)["status"], "purged")
 
 
 if __name__ == "__main__":

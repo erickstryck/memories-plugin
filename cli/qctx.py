@@ -443,13 +443,16 @@ def cmd_docs_drop(args, cfg):
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(2)
     if args.json:
+        # Same three keys `docs drop <id> --json` has always printed. The purge and expired
+        # branches gain JSON they never had: before, they printed human text and ignored the
+        # flag entirely.
         output(res, True)
 
         return
-    if res["action"] == "purged":
+    if res["status"] == "purged":
         print(f"temporary collection {res['collection']} removed (recreated on next use); "
               f"library untouched")
-    elif res["action"] == "swept":
+    elif res["status"] == "swept":
         print("expired entries removed from the temporary archive")
     else:
         print(f"doc_id {res['doc_id']} removed from {res['scope']}")

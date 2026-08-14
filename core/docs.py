@@ -410,20 +410,26 @@ class DocIndex:
         guard exists for.
 
         The precedence is pinned here rather than settled twice: `purge_tmp` first,
-        `expired` second, a `doc_id` last. Returning the action taken (instead of printing
-        it) is what lets a CLI render text and a tool return JSON over the same decision.
+        `expired` second, a `doc_id` last. Returning the decision (instead of printing it) is
+        what lets a CLI render text and a tool return JSON over the same one.
+
+        The key is `status`, like every other write in this package reports (`created`,
+        `updated`, `deleted`, `not_found`) — and because `qctx docs drop <id> --json` already
+        published `{"doc_id", "scope", "status": "removed"}`, which a user's script may parse.
+        Naming it `action` here would have been a gratuitous break of that contract; `action`
+        stays the per-row word in `refresh`, which is a different producer.
         """
         if purge_tmp:
-            return {"action": "purged", "scope": "tmp", "collection": self.drop_all_tmp()}
+            return {"status": "purged", "scope": "tmp", "collection": self.drop_all_tmp()}
         if expired:
             self.sweep()
 
-            return {"action": "swept", "scope": "tmp"}
+            return {"status": "swept", "scope": "tmp"}
         if not doc_id:
             raise DocsError("nothing to drop: give a doc_id, purge_tmp or expired")
         self.drop(doc_id, scope)
 
-        return {"action": "removed", "doc_id": doc_id, "scope": scope}
+        return {"status": "removed", "doc_id": doc_id, "scope": scope}
 
     def drop_all_tmp(self) -> str:
         """Deletes the entire TEMPORARY collection.

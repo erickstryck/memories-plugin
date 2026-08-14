@@ -35,8 +35,8 @@ def hermes_adapter_source() -> str:
     `tools.py`, a knob introduced there would be invisible to the comparison — which is the
     exact failure these tests exist to prevent, one directory deeper.
     """
-    return "\n".join(sorted(p.read_text()
-                            for p in (REPO / "hosts" / "hermes").glob("*.py")))
+    return "\n".join(path.read_text()
+                     for path in sorted((REPO / "hosts" / "hermes").glob("*.py")))
 
 
 class TestBothHostsRenderTheSameBlock(unittest.TestCase):
@@ -501,7 +501,11 @@ class TestTheToolsDoWhatTheCLIDoes(unittest.TestCase):
             self.cli.cmd_memory_recall, query="pagination cursors", limit=6,
             dense_floor=0.45, strict_floor=0.58, min_score=0.10, top_k=20))
         tool_json = self._through_the_tool("memory_recall", query="pagination cursors")
-        self.assertEqual(set(cli_json), set(tool_json), {"info", "hits"})
+        # Both halves asserted, and asserted to be the RIGHT two: `{"info", "hits"}` used to
+        # sit in assertEqual's third parameter, which is the message, so the keys themselves
+        # were never checked and a rename in both hosts at once would have passed.
+        self.assertEqual(set(cli_json), {"info", "hits"})
+        self.assertEqual(set(tool_json), {"info", "hits"})
         self.assertEqual(set(cli_json["info"]), set(tool_json["info"]),
                          "the trail a consumer reads must have the same fields on both")
         self.assertEqual([h["document"] for h in cli_json["hits"]],
