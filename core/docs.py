@@ -241,6 +241,8 @@ class DocIndex:
             if ttl_seconds is not None:
                 expires_at = now_ts + ttl_seconds
                 payload["expires_at_ts"] = expires_at
+                # Human-readable twin of expires_at_ts, for anyone reading a payload by
+                # hand. The CLI shows the one from the RESULT dict, not this one.
                 payload["metadata"]["expires_at"] = _iso(expires_at)
                 # Store the DURATION, not just the instant: without it `refresh` has no
                 # way to know you asked for 1 hour, and reindexed with the 24h default,

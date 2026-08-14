@@ -100,5 +100,58 @@ class TestUpdateNeverCorruptsTheVector(unittest.TestCase):
                          {"type": "corrected"})
 
 
+class TestSearchCollectionsIsHonestAboutWhatItSkipped(unittest.TestCase):
+    """READ-ONLY search across other systems' archives — it had no test of any kind.
+
+    The reason it needs one is the guard, not the happy path: reading from an archive
+    built by a DIFFERENT embedding model returns random neighbours with plausible scores,
+    which is worse than returning nothing, so a dimension mismatch has to be skipped and
+    REPORTED rather than silently searched.
+    """
+
+    def _world(self):
+        q, emb = FakeVectorStore(), FakeEmbedder()
+        q.ensure_collection("ours", emb.dim)
+        q.upsert("ours", [{"id": "1", "vector": emb.embed_one("pagination poll cursor"),
+                           "payload": {"document": "poll pagination truncates at 100"}}])
+        q.ensure_collection("other_model", emb.dim + 4)   # a different embedding model
+
+        return q, emb
+
+    def test_a_collection_of_another_dimension_is_skipped_and_named(self):
+        q, emb = self._world()
+        res = core.search_collections(q, emb, "pagination", None, emb.dim)
+        self.assertIn("ours", res["searched"])
+        self.assertNotIn("other_model", res["searched"])
+        skipped = {s["collection"]: s["reason"] for s in res["skipped"]}
+        self.assertIn("other_model", skipped)
+        self.assertIn("dimension", skipped["other_model"],
+                      "the reason has to say WHY, or the caller cannot act on it")
+
+    def test_a_missing_collection_is_reported_rather_than_raising(self):
+        q, emb = self._world()
+        res = core.search_collections(q, emb, "pagination", ["ours", "not_there"], emb.dim)
+        self.assertEqual(res["searched"], ["ours"])
+        self.assertEqual([s["collection"] for s in res["skipped"]], ["not_there"])
+
+    def test_it_finds_the_document_through_the_field_heuristic(self):
+        q, emb = self._world()
+        hit = core.search_collections(q, emb, "pagination poll", None, emb.dim)["results"][0]
+        self.assertEqual(hit["collection"], "ours")
+        self.assertIn("pagination", hit["document"])
+        self.assertIsNone(hit["payload"], "the raw payload is only for when the guess fails")
+
+    def test_an_unrecognised_payload_shape_returns_the_payload_instead_of_nothing(self):
+        """Degrading honestly: when no known field holds the text, hand back everything
+        and let the caller look, rather than reporting a hit with no content."""
+        q, emb = self._world()
+        q.upsert("ours", [{"id": "2", "vector": emb.embed_one("pagination poll cursor"),
+                           "payload": {"weird_field": "the text lives here"}}])
+        res = core.search_collections(q, emb, "pagination poll", ["ours"], emb.dim)
+        odd = [h for h in res["results"] if h["id"] == "2"][0]
+        self.assertIsNone(odd["document"])
+        self.assertEqual(odd["payload"], {"weird_field": "the text lives here"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

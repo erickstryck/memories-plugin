@@ -21,11 +21,16 @@ silently:
    the mode WITH re-ranking ends up worse than the mode without, which is the
    opposite of the intent.
 
-2. The cross-encoder COLLAPSES on a cross-lingual pair (measured: 0.2073 with the
-   query in English against 0.0004 in Portuguese, on the same English document; the
-   dense stage was indifferent, 0.475 against 0.460). When it collapses, its ORDER is
-   noise too — so it is not enough to stop filtering, the collapse has to be detected
-   and the dense order restored.
+2. The cross-encoder COLLAPSES on a cross-lingual pair (measured: 0.2073 with the query
+   in English against 0.0004 in Portuguese, on the same English document; the dense stage
+   was indifferent, 0.475 against 0.460). When it collapses its ORDER is noise too, so
+   falling back to the dense order is the only useful response.
+
+   But collapse is NOT distinguishable from plain irrelevance by score — the same model
+   scores an irrelevant document at 1.6e-05, below the threshold — so that fallback is
+   available only where discarding the judgement is harmless, which means only where the
+   second stage does not veto. Under a veto it is refused outright, because there it can
+   only re-add what the veto removed. See `Policy.detect_collapse`.
 """
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -172,10 +177,6 @@ class Outcome:
     of degradation at all, so the hook reported an empty result as proof that no
     precedent exists — for the 300 seconds following every rerank failure, which is
     exactly when the shared GPU is struggling."""
-
-    @property
-    def items(self) -> list[Any]:
-        return [s.item for s in self.scored]
 
     @property
     def by_rerank(self) -> bool:

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
 from core import retrieval
 from core.docs import DocIndex
-from core.memory import MemoryError_, MemoryStore
+from core.memory import MemoryStoreError, MemoryStore
 from tests.fakes import (FakeEmbedder, FailingFakeEmbedder, FakeReranker,
                          FakeVectorStore)
 
@@ -84,12 +84,12 @@ class TestRefusedWrites(unittest.TestCase):
     def test_empty_memory(self):
         s, _, _ = store()
         for bad in ("", "   ", "\n"):
-            with self.assertRaises(MemoryError_):
+            with self.assertRaises(MemoryStoreError):
                 s.store(bad)
 
     def test_batch_validates_before_writing_anything(self):
         s, q, _ = store()
-        with self.assertRaises(MemoryError_):
+        with self.assertRaises(MemoryStoreError):
             s.store_many([{"information": "valid"}, {"information": "  "}])
         self.assertEqual(len(q.collections["mem"]["points"]), 0,
                          "validation has to happen BEFORE writing, not during")
@@ -112,18 +112,18 @@ class TestReadsNeverCreate(unittest.TestCase):
 
     def test_find_fails_loudly(self):
         s, q = self._missing_collection()
-        with self.assertRaises(MemoryError_):
+        with self.assertRaises(MemoryStoreError):
             s.find("x")
         self.assertEqual(q.list_collections(), [], "nothing may have been created")
 
     def test_recall_fails_loudly(self):
         s, _ = self._missing_collection()
-        with self.assertRaises(MemoryError_):
+        with self.assertRaises(MemoryStoreError):
             s.recall(["x"], POL, top_k=5)
 
     def test_list_page_fails_loudly(self):
         s, _ = self._missing_collection()
-        with self.assertRaises(MemoryError_):
+        with self.assertRaises(MemoryStoreError):
             s.list_page()
 
     def test_store_MAY_create(self):

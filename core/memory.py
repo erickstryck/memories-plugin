@@ -25,8 +25,13 @@ from .errors import CoreError
 from datetime import datetime, timezone
 
 
-class MemoryError_(CoreError):
-    pass
+class MemoryStoreError(CoreError):
+    """Named after `MemoryStore`, like every other error here is named after its subject.
+
+    It was `MemoryError_` — the trailing underscore dodging the builtin `MemoryError`,
+    which means something entirely different and would have been a genuinely confusing
+    thing to shadow. The escape character was the only one in the package.
+    """
 
 
 @dataclass
@@ -67,7 +72,7 @@ class MemoryStore:
         and the hook turns that into an explicit unavailability warning.
         """
         if self.q.collection_info(self.collection) is None:
-            raise MemoryError_(
+            raise MemoryStoreError(
                 f"memory collection {self.collection!r} does not exist. Check the name with "
                 f"`collections list`; nothing is created by a read."
             )
@@ -76,7 +81,7 @@ class MemoryStore:
 
     def store(self, information: str, metadata: dict | None = None) -> dict:
         if not information or not information.strip():
-            raise MemoryError_("an empty memory is not writable")
+            raise MemoryStoreError("an empty memory is not writable")
         self.ensure()
         mid = str(uuid.uuid4())
         vector = self.embedder.embed_one(information)
@@ -91,11 +96,19 @@ class MemoryStore:
         return {"status": "created", "id": mid}
 
     def store_many(self, items: list[dict]) -> dict:
-        """A batch with ONE trip to the embeddings endpoint, all-or-nothing.
+        """A batch that embeds before it writes, all-or-nothing.
 
         The vectors are generated BEFORE any write: a timeout halfway through the batch
-        does not leave half of it stored, which is the worst possible state for an
-        archive where a partial duplicate is indistinguishable from a new fact.
+        does not leave half of it stored, which is the worst possible state for an archive
+        where a partial duplicate is indistinguishable from a new fact.
+
+        It used to claim ONE trip to the embeddings endpoint, which is true only up to
+        `EMBED_BATCH` (32) items — measured, 40 items cost 2 requests. The all-or-nothing
+        guarantee does not depend on it and survives: every request happens before the
+        first write. It does weaken past `Qdrant.upsert`'s own batch of 256 points, where
+        the write itself becomes several calls; nothing here writes batches that large,
+        and saying so is better than implying a guarantee that stops at a size nobody
+        states.
         """
         if not items:
             return {"status": "noop", "ids": [], "count": 0}
@@ -103,7 +116,7 @@ class MemoryStore:
         for i, item in enumerate(items):
             info = (item or {}).get("information")
             if not isinstance(info, str) or not info.strip():
-                raise MemoryError_(f"items[{i}] needs 'information' (a non-empty string)")
+                raise MemoryStoreError(f"items[{i}] needs 'information' (a non-empty string)")
             texts.append(info)
         self.ensure()
         vectors = self.embedder.embed(texts)

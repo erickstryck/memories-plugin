@@ -183,14 +183,14 @@ class TestCrudInAThrowawayCollection(unittest.TestCase):
 
     def test_store_many_refuses_an_invalid_item_before_writing(self):
         before = self.store.count() or 0
-        with self.assertRaises(core.memory.MemoryError_):
+        with self.assertRaises(core.memory.MemoryStoreError):
             self.store.store_many([{"information": "valid"}, {"information": "  "}])
         time.sleep(0.2)
         self.assertEqual(self.store.count() or 0, before,
                          "validation has to happen BEFORE any write")
 
     def test_empty_store_is_refused(self):
-        with self.assertRaises(core.memory.MemoryError_):
+        with self.assertRaises(core.memory.MemoryStoreError):
             self.store.store("   ")
 
 

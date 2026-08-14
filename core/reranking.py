@@ -4,10 +4,16 @@ Two things live here, and neither is the retrieval algorithm — that one is in
 `retrieval`, shared. This is only the conversation with the server:
 
 1. The WIRE CONTRACT, which varies per server implementation. It used to be an `if`
-   inside the ranking method, looking at the URL suffix. Now each shape is a small
-   class: adding a new server means writing a strategy and registering it, without
-   touching the path that already works (OCP). The `if` also hid the fact that the two
-   shapes differ in the BODY and in how the response is READ, not just in the path.
+   inside the ranking method, looking at the URL suffix. Now each shape is a small class,
+   and the `if` no longer hides that the two shapes differ in the BODY and in how the
+   response is READ, not just in the path.
+
+   The open/closed property is real but bounded, and the bound is worth stating rather
+   than implying the stronger claim: a new contract can be INJECTED with zero edits to
+   any file here (`Reranker(url, model, contract=MyContract())`), but auto-DISCOVERING it
+   from a URL still needs a branch in `contract_for`. A registry keyed on URL suffix
+   would be more machinery than two contracts justify; when there is a third, that is the
+   moment to build it.
 
 2. The SCALE NORMALIZATION, which is mandatory rather than optional: the SAME model
    returns a sigmoid (0..1) on one server and a raw logit on another. Measured with

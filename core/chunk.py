@@ -39,10 +39,6 @@ class Chunk:
     end_line: int    # 1-based, inclusive
     text: str
 
-    @property
-    def n_lines(self) -> int:
-        return self.end_line - self.start_line + 1
-
 
 #: Above this share of replacement characters, the decode failed rather than succeeded.
 #: Generous on purpose: a legitimate document may carry a stray bad byte, and refusing it
