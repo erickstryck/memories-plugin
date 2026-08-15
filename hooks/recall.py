@@ -86,7 +86,17 @@ def env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     if minimum is not None and value < minimum:
         note = f"{name}={raw!r} would leave nothing to return — using {minimum}"
         _pending_notes.append(note)
-        print(f"recall: {note}", file=sys.stderr)
+        # Guarded, because this runs at IMPORT — above main()'s catch-all, where a raise is
+        # not a degraded block but NO block at all. Measured with the read end of the stderr
+        # pipe closed: unguarded, the hook exited 120 and emitted nothing, so the model was
+        # told neither that memory exists nor that the search failed. With fd 2 closed,
+        # `print(file=None)` falls back to STDOUT and corrupts the hook's JSON protocol.
+        # Neither state occurs under a normal spawn — both are one misbehaving parent away,
+        # and the note is a convenience that must never cost the injection it accompanies.
+        try:
+            print(f"recall: {note}", file=sys.stderr)
+        except Exception:      # noqa: BLE001 — a lost note is cheaper than a lost block
+            pass
 
         return kind(minimum)
 

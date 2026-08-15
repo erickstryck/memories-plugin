@@ -70,9 +70,13 @@ def is_blank(text) -> bool:
     whitespace as far as `strip()` is concerned. `\\xa0` and U+3000 were refused, which is
     what made the hole easy to miss — the obvious probes pass.
 
-    The consequence is the worst kind this package has: `_flatten_hit` drops a record whose
-    document is blank, so the fact was destroyed AND the record became permanently invisible
-    to recall while still occupying a point. Nothing anywhere reports it.
+    The consequence, stated exactly, because an earlier version of this docstring overstated
+    it and was corrected by measurement: the fact is DESTROYED and the write reports success.
+    The record stays VISIBLE to recall — `_flatten_hit` drops only documents that `strip()`
+    empties, and `"\\u200b".strip()` is truthy — so it comes back as a hit carrying nothing,
+    which is its own quiet failure: the archive answers, and the answer is blank. (A
+    whitespace-only document WOULD be dropped and become invisible; that is a different
+    input, and it was already refused before this guard existed.)
 
     In `core` and not in a host, because `store` and `update` had the identical blind spot
     and both hosts reach both — the CLI, the hermes tools, and anything a third host adds.

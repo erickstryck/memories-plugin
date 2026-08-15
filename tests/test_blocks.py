@@ -281,6 +281,27 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
                              r"in practice|almost always|most of the time|"
                              r"nine times out of ten|for all practical purposes)\b")
 
+    #: The adverb list above is necessary and NOT sufficient, and a review proved it by
+    #: walking through: twelve sentences that hand the reader the forbidden inference with no
+    #: hedging word at all — "treat the subject as one with no recorded precedent", "assume
+    #: nothing is stored on the subject and move on", "this list is exhaustive: whatever is
+    #: not below is not in the archive" — all passed. A closed vocabulary is one imperative
+    #: away from useless, and the docstring below it CLAIMED to catch added contradictions,
+    #: which made the gap read as covered.
+    #:
+    #: So the second pattern matches the ACT rather than the wording: telling the reader to
+    #: treat, assume, proceed or answer AS IF the subject had none. That is what every escape
+    #: had in common, and it is the thing these blocks exist to forbid.
+    LICENCES = re.compile(
+        r"(?i)("
+        r"(treat|regard|consider)\b[^.]{0,60}\bas (one with no|having no|without)|"
+        r"assume\b[^.]{0,40}\b(nothing|no precedent|no history|not (stored|recorded))|"
+        r"(proceed|answer|reply|respond|move on)\b[^.]{0,60}"
+        r"\bas (if|though)\b[^.]{0,40}\b(no|nothing|none)\b|"
+        r"\b(is|are) exhaustive\b|"
+        r"\bwhat(ever)? is (not|missing)\b[^.]{0,40}\b(not in|never (recorded|stored))"
+        r")")
+
     # -- the POPULATED state, which had no pin on its framing at all ----------------------
     #
     # It is the state that fires most often, and until this review nothing held the two
@@ -363,13 +384,25 @@ class TestTheInstructionsTheModelActuallyRECEIVES(unittest.TestCase):
         mean there is no precedent" into "This probably means there is no precedent, but
         strictly…". Both passed 544 tests. Every fragment-based pin is blind to them by
         construction, because nothing was removed.
+
+        TWO patterns, because the first version of this test used only the adverb list and a
+        later review walked twelve sentences straight through it — every one of them
+        conceding absence outright, none of them hedging. Worse than the gap was this
+        docstring, which already claimed the added-contradiction case was covered. A test
+        that overstates its own reach converts a hole into documented assurance, which is the
+        defect this suite has now caught six times.
         """
         for label, out in self.NO_HEDGING_CASES().items():
             with self.subTest(state=label):
-                found = self.CONCESSIONS.findall(out)
-                self.assertEqual(found, [],
+                hedges = self.CONCESSIONS.findall(out)
+                self.assertEqual(hedges, [],
                                  f"the {label} block forbids concluding absence and then "
-                                 f"concedes it with {found}: the reader keeps the concession")
+                                 f"concedes it with {hedges}: the reader keeps the concession")
+                licences = self.LICENCES.findall(out)
+                self.assertEqual(licences, [],
+                                 f"the {label} block forbids concluding absence and then "
+                                 f"LICENSES it outright ({licences}) — no hedging word "
+                                 f"needed, which is how twelve such sentences got through")
 
     def test_the_degradation_note_says_the_SECOND_STAGE_DID_NOT_HAPPEN(self):
         """"the re-rank was not used" → "was not needed" survived the whole suite, and it
