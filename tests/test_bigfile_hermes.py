@@ -558,5 +558,77 @@ class TestTheEnrichmentCannotBlowTheGuardDeadline(unittest.TestCase):
         self.assertIn("docs_search", reason)
 
 
+#: The loader's own mechanism, replicated: `spec_from_file_location`, registered in
+#: `sys.modules` BEFORE `exec_module`, with the repo root nowhere on `sys.path`. Printed as
+#: JSON so the assertions below read the SAME run that produced the module.
+_LOADER_REPLICA = """
+import importlib.util, json, sys
+
+# The guard on the guard, and it is what makes this test honest. Run from inside the repo
+# root, Python's implicit `sys.path[0] = ""` makes `core` importable anyway and the replica
+# goes green with the bootstrap deleted — a measured false negative. So prove `core` is
+# UNREACHABLE first, and let the run report it.
+visible_before = importlib.util.find_spec("core") is not None
+
+name = "hermes_user_plugins.memories.bigfile"
+spec = importlib.util.spec_from_file_location(name, sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[name] = module          # the loader registers FIRST, then execs
+error = ""
+try:
+    spec.loader.exec_module(module)
+except Exception as exc:            # what `logger.debug` would swallow
+    error = f"{type(exc).__name__}: {exc}"
+
+print(json.dumps({"core_visible_before": visible_before, "error": error,
+                  "shell_left_behind": name in sys.modules,
+                  "usable": hasattr(sys.modules[name], "main")}))
+"""
+
+
+class TestTheBootstrapSurvivesTheLoadersOwnPreExec(unittest.TestCase):
+    """hermes pre-execs every sibling `*.py` BEFORE `__init__.py`, registering each in
+    `sys.modules` first and swallowing the failure at `logger.debug`
+    (`plugins/memory/__init__.py::_load_provider_from_dir`, :486-501 in the installed
+    v0.20.1). A sibling that cannot find `core` on its own raises THERE, where nothing is
+    listening, and leaves a shell behind that any later `from . import` hands back empty.
+
+    The subprocess tests above already fail without the bootstrap, but they fail as a
+    SCRIPT. This one fails the way the incident happened — and the proof the brief called
+    the most important of the task cannot be the one the CI never runs.
+    """
+
+    def _replicate(self):
+        """Always from a temp directory, never from the repo root: Python prepends the
+        working directory to `sys.path` for `-c`, which makes `core` importable without the
+        bootstrap and turns this into a false negative. Measured by the reviewer, and the
+        `core_visible_before` assertion below is what stops it coming back."""
+        env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}
+        done = subprocess.run([sys.executable, "-c", _LOADER_REPLICA, GUARD],
+                              cwd=tempfile.mkdtemp(), env=env, capture_output=True,
+                              text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+        return json.loads(done.stdout)
+
+    def test_the_module_execs_standalone_where_core_is_not_importable(self):
+        seen = self._replicate()
+        self.assertFalse(seen["core_visible_before"],
+                         "`core` was already importable, so this run could not have proven "
+                         "anything — the replica must not be started from the repo root")
+        self.assertEqual(seen["error"], "",
+                         "the pre-exec raised; hermes would swallow this at debug level and "
+                         "the provider would go down with it")
+        self.assertTrue(seen["usable"], "the module exec'd but has no main() to call")
+
+    def test_the_shell_the_loader_leaves_behind_is_a_working_module(self):
+        """`sys.modules` keeps whatever was registered even when the exec failed — the loader
+        pops only the package's own entry, never a sibling's. So "registered" proves nothing
+        on its own; what matters is that the thing left behind is the real module."""
+        seen = self._replicate()
+        self.assertTrue(seen["shell_left_behind"])
+        self.assertTrue(seen["usable"])
+
+
 if __name__ == "__main__":
     unittest.main()

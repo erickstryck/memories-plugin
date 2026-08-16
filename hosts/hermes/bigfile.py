@@ -31,6 +31,15 @@ footnote: on a WAL database SQLite may still CREATE the `-shm`/`-wal` sidecars f
 read-only connection — measured. What `mode=ro` guarantees is that no statement of ours can
 modify the database, and that is the property hermes' data needs.)
 
+WHERE THE READING IS BOUNDED, AND IT IS NOT WHERE THE SIBLING BOUNDS IT. `hooks/bigfile.py`
+reads at most `TAIL_BYTES` (256 KB) of a transcript that was measured at 15.8 MB — an explicit
+ceiling in the adapter. This one puts NO `LIMIT` on `select content from messages … active=1`;
+it leans on hermes flipping `active` off when it compacts, so the rows it gets back are already
+the size of the window. Stress-measured at 20,000 active rows of 5,000 chars (100 MB) and still
+back in ~40 ms, so this is not a performance note — it is a structural difference resting on an
+invariant this file does not verify, and the equivalence work needs to know the two hosts reach
+"bounded read" by different means.
+
 WHAT THE PAYLOAD ACTUALLY LOOKS LIKE, MEASURED. `agent/shell_hooks.py::_serialize_payload`
 (v0.20.1, installed) writes `{"hook_event_name", "tool_name", "tool_input", "session_id",
 "cwd", "extra"}` — `tool_input` is the invoke-site kwarg `args` RENAMED, so a hook that
