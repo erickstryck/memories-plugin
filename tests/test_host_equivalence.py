@@ -1473,5 +1473,194 @@ class TestEveryDivergenceOfTheGuardsIsDeclaredInTheSPEC(unittest.TestCase):
                               f"silent about it")
 
 
+# --- The equivalence itself, and the one layer at which it is true ------------------------
+# The plan for this task asked for "same file and same Budget -> same Verdict on both hosts".
+# That is FALSE today, and not by defect: each host now passes its OWN read ceiling into
+# `decide`, and hermes' extra byte ceiling makes it price a file of long lines LOWER than
+# claude-code does. So the claim is asserted where it holds — same Budget AND same cost ->
+# same verdict — and the ceiling difference is tested as the declared divergence it is.
+from tests import test_bigfile_claude as claude_fixtures   # noqa: E402
+from tests import test_bigfile_hermes as hermes_fixtures   # noqa: E402
+from core.bigfile import Budget, decide                    # noqa: E402
+
+#: 171k tokens at the core's 4 chars/token, and no newline anywhere — the file the spec's own
+#: worked example is about.
+A_BIG_FILE = 4 * 171_000
+#: Small enough that BOTH hosts' ceilings fall back to the file itself, which is the regime
+#: where the two hosts price identically and the equivalence claim is about something.
+A_FILE_UNDER_EVERY_CEILING = 40_000
+#: Two ORDINARY text files, and the point is that they are ordinary. Under a 2,000-line
+#: ceiling one read pulls 819,200 and 202,271 bytes; under hermes' 100,000-CHARACTER ceiling
+#: it pulls 100,000 in both cases. Neither has long lines — 400 and 100 bytes — because the
+#: divergence is not about long lines: it is about any read that would pull more than 100 KB,
+#: which is 2,000 lines averaging over ~50 bytes, or any big file with few newlines.
+A_FILE_ONE_READ_CANNOT_SWALLOW = (4_000, 400)
+AN_EVERYDAY_BIG_FILE = (4_000, 100)
+
+
+def a_flat_file(chars: int) -> str:
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w") as fh:
+        fh.write("x" * chars)
+
+    return path
+
+
+def ceilings_claude_code_applies() -> dict:
+    """The read ceilings `hooks/bigfile.py` hands to `decide`, taken from the ADAPTER.
+
+    Captured by running the guard rather than restated here, and that is the whole value of
+    it: a test that wrote `read_bytes=None` itself would keep passing with the two hosts'
+    ceilings swapped, and would be proving its own literal.
+    """
+    guard = claude_fixtures.adapter
+    seen = []
+    real = guard.bigfile.decide
+
+    def recording(path, budget, **kw):
+        seen.append(kw)
+
+        return real(path, budget, **kw)
+
+    payload = claude_fixtures.a_read_payload(
+        a_flat_file(400), claude_fixtures.a_transcript([claude_fixtures.ASSISTANT]))
+    with unittest.mock.patch.object(guard.bigfile, "decide", recording):
+        claude_fixtures.run_main(payload, claude_fixtures.Spy(set()))
+
+    return {k: seen[0].get(k) for k in ("read_lines", "read_bytes")}
+
+
+def ceilings_hermes_applies() -> dict:
+    """The same, for `hosts/hermes/bigfile.py`, driven through ITS host's payload and db."""
+    guard = hermes_fixtures.adapter
+    seen = []
+    real = guard.bigfile.decide
+
+    def recording(path, budget, **kw):
+        seen.append(kw)
+
+        return real(path, budget, **kw)
+
+    db = hermes_fixtures.a_session_using(400)
+    payload = hermes_fixtures.a_read_payload(a_flat_file(400))
+    with unittest.mock.patch.object(guard, "state_db_path", lambda: db), \
+         unittest.mock.patch.object(guard.bigfile, "decide", recording):
+        hermes_fixtures.run_main(payload, hermes_fixtures.Spy(set()))
+
+    return {k: seen[0].get(k) for k in ("read_lines", "read_bytes")}
+
+
+class TestBothHostsGuardTheSameWay(unittest.TestCase):
+    """The same Budget and the same COST must produce the same Verdict on both hosts.
+
+    The hosts MEASURE differently — claude-code exactly, hermes by estimate — and that
+    asymmetry is deliberate and documented. What must not differ is the DECISION, and the
+    only thing allowed to differ is the wording, which must say the number is a guess.
+
+    Read the qualifier: same Budget AND same cost. The two hosts do not always reach the
+    same cost, because each applies its own host's read ceiling — that is the class below,
+    and it is a declared divergence, not a break in this one.
+    """
+
+    def test_identical_budgets_give_identical_verdicts(self):
+        path = a_flat_file(A_BIG_FILE)
+        for label, ceilings in (("no ceiling", {}),
+                                ("claude-code's", ceilings_claude_code_applies()),
+                                ("hermes'", ceilings_hermes_applies())):
+            for used, window in ((604_023, 1_000_000), (10_000, 1_000_000),
+                                 (190_000, 200_000)):
+                exact = decide(path, Budget(window=window, used=used, exact=True), **ceilings)
+                approx = decide(path, Budget(window=window, used=used, exact=False),
+                                **ceilings)
+                with self.subTest(ceilings=label, used=used):
+                    self.assertEqual(exact.block, approx.block,
+                                     "the decision must not depend on how the number was "
+                                     "obtained")
+                    self.assertEqual(exact.cost, approx.cost)
+
+    def test_only_the_wording_marks_the_estimate(self):
+        """A number that looks precise and is a guess is worse than a guess that admits it."""
+        path = a_flat_file(A_BIG_FILE)
+        exact = decide(path, Budget(window=1_000_000, used=604_023, exact=True))
+        approx = decide(path, Budget(window=1_000_000, used=604_023, exact=False))
+        self.assertTrue(exact.block and approx.block, "the fixture stopped blocking")
+        self.assertNotIn("≈", exact.reason)
+        self.assertIn("≈", approx.reason)
+        self.assertNotEqual(exact.reason, approx.reason,
+                            "the estimate is being presented as a measurement")
+
+    def test_where_the_ceilings_agree_the_two_hosts_agree_on_everything_but_wording(self):
+        """The claim at the host layer, with each adapter's REAL ceilings: on a file below
+        the tightest of them both hosts reach the same cost, and there the verdicts must be
+        identical — block, allow and the number quoted."""
+        path = a_flat_file(A_FILE_UNDER_EVERY_CEILING)
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        for used, window, expected in ((190_000, 200_000, True), (10_000, 1_000_000, False)):
+            c = decide(path, Budget(window=window, used=used, exact=True), **claude)
+            h = decide(path, Budget(window=window, used=used, exact=False), **hermes)
+            with self.subTest(used=used):
+                self.assertEqual(c.cost, h.cost, "the precondition of the claim is gone: "
+                                                 "the two hosts priced the same file apart")
+                self.assertEqual(c.block, h.block)
+                self.assertEqual(c.block, expected, "the fixture stopped exercising what "
+                                                    "it was chosen for")
+
+
+class TestEachHostAppliesItsOwnReadCeiling(unittest.TestCase):
+    """The declared divergence, and the reason the equivalence above carries a qualifier.
+
+    One `Read` on claude-code stops at 2,000 lines. One `read_file` on hermes stops at 2,000
+    lines OR ~100,000 characters, whichever comes first (`tools/file_tools.py:65`), and the
+    second ceiling is the one that bites.
+
+    MEASURED, because the size of this is easy to understate: the two hosts price a file
+    identically only while one read stays under 100,000 characters — a file below ~100 KB, or
+    lines averaging under ~50 bytes. Past that, hermes is pinned at 25,000 tokens and
+    claude-code is not: 4,000 lines of 100 bytes is 202,271 against 100,000, and 4,000 of 400
+    is 819,200 against 100,000. So this is not a corner case about exotic files; on nearly
+    every file big enough to concern the guard at all, the two hosts may legitimately take
+    different decisions.
+
+    Aligning the ceilings would make a "same file, same verdict" test pass, and it would be
+    a lie about the host: the guard would be pricing a read that neither host performs.
+    """
+
+    def test_each_adapter_hands_decide_its_own_hosts_ceilings(self):
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        self.assertEqual(claude["read_lines"], hermes["read_lines"],
+                         "the LINE ceiling is 2,000 on both hosts and is not a divergence")
+        self.assertIsNone(claude["read_bytes"],
+                          "claude-code has no readable byte ceiling; passing one prices a "
+                          "truncation the host does not perform")
+        self.assertEqual(hermes["read_bytes"], hermes_fixtures.adapter.READ_CHAR_CEILING,
+                         "hermes truncates by characters and the price must know it")
+
+    #: (shape, window, used). Each budget is chosen so the SIZE-ONLY first pass already
+    #: blocks, and that is not tuning: `decide` refines the price only on the rare path it
+    #: reaches after deciding to block, so a budget the file sails through never computes
+    #: the number this test is about — both hosts would report the size-only price and the
+    #: divergence would be invisible.
+    STRADDLING = ((A_FILE_ONE_READ_CANNOT_SWALLOW, 1_000_000, 604_023),
+                  (AN_EVERYDAY_BIG_FILE, 200_000, 100_000))
+
+    def test_past_the_character_ceiling_the_two_hosts_price_and_decide_apart(self):
+        """Both fixtures are ordinary text — 400-byte lines and 100-byte lines — and that
+        IS the assertion: same file, same Budget, one host blocks and the other allows, on
+        files nobody would call exotic. Declared, and tested so nobody 'fixes' it quietly
+        by aligning the two ceilings, which would price a read neither host performs."""
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        for shape, window, used in self.STRADDLING:
+            path = hermes_fixtures.a_file_of_lines(*shape)
+            c = decide(path, Budget(window=window, used=used, exact=True), **claude)
+            h = decide(path, Budget(window=window, used=used, exact=False), **hermes)
+            with self.subTest(lines=shape[0], width=shape[1]):
+                self.assertGreater(c.cost, h.cost,
+                                   "hermes' character ceiling stopped biting; if the host "
+                                   "changed, the spec's divergence table changes with it")
+                self.assertTrue(c.block,
+                                "the control: without a byte ceiling this read is too big")
+                self.assertFalse(h.block, "hermes loads a fraction of it and must not block")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
