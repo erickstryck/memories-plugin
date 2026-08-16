@@ -114,7 +114,14 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
         return Verdict(False, "", cost, free)
 
     floor_hit = after > budget.window * (1 - floor_pct)
-    share_hit = free > 0 and cost > free * share_pct
+    # No `free > 0` here on purpose. The early return above is the SINGLE OWNER of "the
+    # window is not usable" — `free == 0` iff `used >= window` iff that return has already
+    # fired — so a guard here would be a second owner of the same invariant, and two owners
+    # do not stay agreeing. Ruling F5 settled the identical shape once already, when two
+    # detectors both answered "is this indexable". Do not re-add it as a missing guard: it
+    # protects no arithmetic (`free * share_pct` is fine at zero, and the division lives in
+    # `pct` below, which the same early return guards).
+    share_hit = cost > free * share_pct
     if not (floor_hit or share_hit):
         return Verdict(False, "", cost, free)
 
