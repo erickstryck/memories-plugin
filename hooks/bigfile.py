@@ -41,72 +41,23 @@ cage: every error path here emits nothing and exits 0, so the read proceeds.
 import json
 import os
 import sys
-import threading
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
 from core import bigfile, windows  # noqa: E402
-from core.breaker import Breaker  # noqa: E402
+from core.knobs import env_num  # noqa: E402
 
 #: Enough for the last usage block and the last user turn, never the whole file.
 TAIL_BYTES = 256 * 1024
-
-
-def _env(name: str, legacy: str, default: str) -> str:
-    return os.environ.get(name) or os.environ.get(legacy) or default
-
-
-def _env_num(name: str, legacy: str, default: str, kind=float):
-    """Reads a number from the environment WITHOUT killing the process if it is malformed.
-
-    Same shape and same reason as `recall.py::env_num`: this runs at IMPORT, above main()'s
-    catch-all, so a `QCTX_BIGFILE_FLOOR_PCT=20%` would take the hook down before any guard
-    could turn it into a fail-open. No clamp on either of these two: they are FRACTIONS,
-    and a 0 means "this criterion never fires", which is a coherent thing to ask for —
-    unlike the recall ceilings, where a 0 makes the hook claim an empty archive.
-    """
-    raw = _env(name, legacy, default)
-    try:
-        return kind(raw)
-    except (TypeError, ValueError):
-        return kind(default)
 
 
 #: The two thresholds of `core.bigfile.decide`, read HERE and not there: the core stays
 #: pure and environment-free, and the adapter is what knows it is running on a host. The
 #: names are the ones hermes must use too — a deployer who tuned the guard on one host
 #: expects the same variable to move the same number on the other.
-FLOOR_PCT = _env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
-SHARE_PCT = _env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
-
-#: Where the breaker below keeps its one timestamp. Same variable `recall.py` reads, so a
-#: deployer who moved the state moved all of it.
-STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
-
-#: Seconds allowed PER Qdrant call on the rare enrichment path. A backstop, and explicitly
-#: not the thing that keeps us inside the hook deadline — see `IDS_DEADLINE_S`.
-QDRANT_TIMEOUT_S = 1.5
-
-#: ONE HARD WALL-CLOCK DEADLINE for the whole enrichment step, and the only thing that
-#: bounds it. A per-call timeout cannot: `list_docs("all")` is a structural minimum of six
-#: sequential round trips (ensure tmp, sweep's ensure, sweep's delete, scroll tmp, ensure
-#: library, scroll library), each bounded on its own and their SUM bounded by nothing.
-#: Measured against a healthy-but-slow backend answering every endpoint correctly at 1.2 s
-#: per call, the hook took 7.267 s against the `timeout: 5` declared in hooks.json — every
-#: individual ceiling respected, the total blown anyway.
-#:
-#: The count of those round trips is knowledge that rots: `list_docs` may grow a call
-#: tomorrow and nothing here would notice. A wall clock does not care how many terms the
-#: sum has. The healthy path measures 0.10-0.12 s, so 2.0 s is ~20x headroom and never
-#: fires when Qdrant is well.
-IDS_DEADLINE_S = 2.0
-
-#: How long a failed (or too slow) inventory lookup keeps the enrichment switched off.
-#: Not an env knob on purpose: a knob here would have to be mirrored name-for-name on
-#: hermes, and nothing about the message quality is worth a second vocabulary.
-BREAKER_SECONDS = 300.0
+FLOOR_PCT = env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
+SHARE_PCT = env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
 
 
 def _tail_objects(path: str) -> list:
@@ -176,71 +127,6 @@ def escape_requested(path: str) -> bool:
     return False
 
 
-def indexed_ids(cfg) -> set | None:
-    """Doc ids already in the archive, or None when finding out was not worth it.
-
-    CALLED ONLY AFTER a `decide(..., indexed_ids=None)` has already said it would block.
-    Knowing this costs a round trip to Qdrant and this hook runs before EVERY file read;
-    the common case is "small file, allow", and taxing it with a round trip it never
-    needed is the one thing the ordering here exists to prevent.
-
-    None is a complete answer, not a failure: it only costs the better half of the
-    message ("already indexed, search it" instead of "index it"). A worse message beats a
-    hook that blew its deadline, so anything that raises — and anything still running when
-    `IDS_DEADLINE_S` expires — degrades to None AND arms the breaker, so the next blocked
-    read does not pay to rediscover it.
-
-    ABANDONED, NOT CANCELLED. There is no way to interrupt a blocking socket read from
-    outside, so the deadline is enforced by joining a DAEMON worker with a timeout: on
-    expiry we stop waiting and walk away, and being a daemon is what lets the interpreter
-    exit while it is still in flight. Checking the clock AFTER the work returned — which is
-    what this did before — only ever bounds the NEXT invocation, never the one that is
-    already over its budget.
-    """
-    breaker = Breaker(STATE_DIR / "bigfile-docs-breaker", BREAKER_SECONDS)
-    if breaker.is_open() is not None:
-        return None
-    done: dict = {}
-    worker = threading.Thread(target=_collect_ids, args=(cfg, done), daemon=True)
-    worker.start()
-    worker.join(IDS_DEADLINE_S)
-    if "ids" not in done:
-        # Either still running at the deadline, or it raised. Both mean the same thing to
-        # the read that is waiting on us, and both deserve the same cooldown.
-        breaker.arm()
-
-        return None
-    breaker.clear()
-
-    return done["ids"]
-
-
-def _collect_ids(cfg, done: dict) -> None:
-    """The round trip itself, on a worker thread. Reports only by landing a key in `done`.
-
-    Swallows everything: this thread may still be running after `indexed_ids` has given up
-    on it, and an exception raised then would print a traceback to stderr for a result
-    nobody is listening for any more.
-    """
-    try:
-        index = core.DocIndex(core.build_qdrant(cfg, timeout=QDRANT_TIMEOUT_S),
-                              # The embedder and reranker carry build_docs' own 60 s and
-                              # 15 s timeouts. Harmless TODAY because `list_docs` touches
-                              # neither — but they are two unbounded waits sitting inside a
-                              # step that must finish in two seconds, and the day a listing
-                              # grows an embedding call they become the trap. The wall
-                              # clock above is what keeps that from being a regression.
-                              core.build_embedder(cfg), core.build_reranker(cfg),
-                              cfg.require_docs_collection(), cfg.require_library_collection(),
-                              cfg.vector_size)
-        # `doc_id` is the key `list_docs` publishes, confirmed against a live listing
-        # rather than assumed: {'doc_id', 'scope', 'chunks', 'path', 'mode', 'indexed_at',
-        # 'expires_at_ts', 'src_mtime', 'src_size', 'src_digest', 'ttl_seconds'}.
-        done["ids"] = {d["doc_id"] for d in index.list_docs(scope="all")}
-    except BaseException:      # noqa: BLE001 — a lost nicety may never cost the read
-        pass
-
-
 def deny(reason: str) -> None:
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -273,6 +159,12 @@ def _run() -> None:
 
     # PASS TWO: same decision, better message. The ids are fetched only now, and the
     # verdict is re-read rather than assumed — `decide` owns whether it blocks, always.
+    #
+    # The import is HERE and not at the top, the way `core.bigfile` imports `doc_id_for`:
+    # `core.inventory` is the only thing in this hook that reaches the network, and the
+    # common path — every allowed read — must never so much as load it.
+    from core.inventory import indexed_ids
+
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
                              floor_pct=FLOOR_PCT, share_pct=SHARE_PCT)
     if verdict.block:

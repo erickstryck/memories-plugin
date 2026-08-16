@@ -80,6 +80,7 @@ import time                # noqa: E402
 import types               # noqa: E402
 import unittest.mock       # noqa: E402
 
+from core import inventory  # noqa: E402
 from core.docs import doc_id_for  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -155,7 +156,7 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 100_000):
     cfg = types.SimpleNamespace(context_window=window)
     code = 0
     with unittest.mock.patch.object(adapter.core, "load", loader or (lambda: cfg)), \
-         unittest.mock.patch.object(adapter, "indexed_ids", ids_spy), \
+         unittest.mock.patch.object(inventory, "indexed_ids", ids_spy), \
          unittest.mock.patch.object(sys, "stdin", io.StringIO(payload)), \
          contextlib.redirect_stdout(out):
         try:
@@ -580,8 +581,13 @@ try:
 except Exception as exc:            # what `logger.debug` would swallow
     error = f"{type(exc).__name__}: {exc}"
 
+# The rare path imports `core.inventory` LATE, so the bootstrap has to have made it
+# reachable too — not just the `core` the module imported at exec time.
+late = importlib.util.find_spec("core.inventory") is not None if not error else False
+
 print(json.dumps({"core_visible_before": visible_before, "error": error,
                   "shell_left_behind": name in sys.modules,
+                  "late_import_reachable": late,
                   "usable": hasattr(sys.modules[name], "main")}))
 """
 
@@ -620,6 +626,9 @@ class TestTheBootstrapSurvivesTheLoadersOwnPreExec(unittest.TestCase):
                          "the pre-exec raised; hermes would swallow this at debug level and "
                          "the provider would go down with it")
         self.assertTrue(seen["usable"], "the module exec'd but has no main() to call")
+        self.assertTrue(seen["late_import_reachable"],
+                        "`core.inventory` — imported only on the rare path, long after this "
+                        "exec — would not resolve through the loader's own import")
 
     def test_the_shell_the_loader_leaves_behind_is_a_working_module(self):
         """`sys.modules` keeps whatever was registered even when the exec failed — the loader
@@ -628,6 +637,51 @@ class TestTheBootstrapSurvivesTheLoadersOwnPreExec(unittest.TestCase):
         seen = self._replicate()
         self.assertTrue(seen["shell_left_behind"])
         self.assertTrue(seen["usable"])
+
+
+#: Runs `main()` in a fresh interpreter and reports, on stderr, whether the ONE module that
+#: reaches the network was ever loaded. stderr because stdout is the block protocol.
+_LAZY_IMPORT_PROBE = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from hosts.hermes import bigfile
+
+try:
+    bigfile.main()
+except SystemExit:
+    pass                      # exit 2 is the block signal, not a failure to report
+finally:
+    print(json.dumps({"network_module_loaded": "core.inventory" in sys.modules}),
+          file=sys.stderr)
+"""
+
+
+class TestTheCommonPathNeverLoadsTheNetworkModule(unittest.TestCase):
+    """`core.inventory` is imported INSIDE the rare branch, and this is the proof by
+    EXECUTION that it stays there — a grep for the import line would pass just as happily
+    with the import at the top of the file, which is the regression that matters.
+
+    The allow case is the claim; the block case is the CONTROL. Without it, "never loaded"
+    could equally mean the probe never worked.
+    """
+
+    def _probe(self, size):
+        chars, _ = SHARE_ONLY
+        db = a_session_using(chars)
+        done = subprocess.run([sys.executable, "-c", _LAZY_IMPORT_PROBE, REPO],
+                              input=a_read_payload(a_file_of(size)), env=guard_env(db),
+                              cwd="/", capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+        return json.loads(done.stderr.strip().splitlines()[-1])["network_module_loaded"]
+
+    def test_an_allowed_read_does_not_even_import_it(self):
+        self.assertFalse(self._probe(size=400),
+                         "the common path loaded the module that talks to Qdrant")
+
+    def test_a_blocked_read_does(self):
+        self.assertTrue(self._probe(size=SHARE_ONLY[1]),
+                        "the control failed: the probe cannot tell loaded from not loaded")
 
 
 if __name__ == "__main__":

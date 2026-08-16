@@ -90,6 +90,7 @@ import threading          # noqa: E402
 import time               # noqa: E402
 
 
+from core import inventory  # noqa: E402
 from core.docs import doc_id_for  # noqa: E402
 
 #: 171k tokens at the core's 4 chars/token. With window=1M and used=604,023 this is 43% of
@@ -136,7 +137,7 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 1_000_000) -> str
     out = io.StringIO()
     cfg = types.SimpleNamespace(context_window=window)
     with unittest.mock.patch.object(adapter.core, "load", loader or (lambda: cfg)), \
-         unittest.mock.patch.object(adapter, "indexed_ids", ids_spy), \
+         unittest.mock.patch.object(inventory, "indexed_ids", ids_spy), \
          unittest.mock.patch.object(sys, "stdin", io.StringIO(payload)), \
          contextlib.redirect_stdout(out):
         adapter.main()
@@ -451,6 +452,47 @@ class TestTheOtherTwoHalvesOfTheRealTurnFilter(unittest.TestCase):
         t = a_transcript([REAL_TURN, ASSISTANT, SDK_TURN])
         self.assertFalse(adapter.escape_requested(t),
                          "entrypoint=sdk is not the interactive CLI the marker is typed in")
+
+
+#: Runs `main()` in a fresh interpreter and reports, on stderr, whether the ONE module that
+#: reaches the network was ever loaded. stderr because stdout is the hook protocol.
+_LAZY_IMPORT_PROBE = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+import bigfile
+
+bigfile.main()
+print(json.dumps({"network_module_loaded": "core.inventory" in sys.modules}), file=sys.stderr)
+"""
+
+
+class TestTheCommonPathNeverLoadsTheNetworkModule(unittest.TestCase):
+    """`core.inventory` is imported INSIDE the rare branch, and this is the proof by
+    EXECUTION that it stays there — a grep for the import line would pass just as happily
+    with the import at the top of the file, which is the regression that matters.
+
+    The allow case is the claim; the block case is the CONTROL. Without it, "never loaded"
+    could equally mean the probe never worked.
+    """
+
+    def _probe(self, size):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        done = subprocess.run(
+            [sys.executable, "-c", _LAZY_IMPORT_PROBE, repo, os.path.join(repo, "hooks")],
+            input=a_read_payload(a_file_of(size), a_transcript([ASSISTANT])),
+            env=hook_env(), cwd="/", capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+        return json.loads(done.stderr.strip().splitlines()[-1])["network_module_loaded"]
+
+    def test_an_allowed_read_does_not_even_import_it(self):
+        self.assertFalse(self._probe(size=400),
+                         "the common path loaded the module that talks to Qdrant")
+
+    def test_a_blocked_read_does(self):
+        self.assertTrue(self._probe(size=A_BIG_FILE),
+                        "the control failed: the probe cannot tell loaded from not loaded")
 
 
 if __name__ == "__main__":

@@ -61,7 +61,6 @@ import json
 import os
 import sqlite3
 import sys
-import threading
 from pathlib import Path
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -70,29 +69,10 @@ if REPO_ROOT not in sys.path:
 
 import core  # noqa: E402
 from core import bigfile, windows  # noqa: E402
-from core.breaker import Breaker  # noqa: E402
+from core.knobs import env_num  # noqa: E402
 
 #: The exit code `agent/shell_hooks.py::BLOCK_EXIT_CODE` honours on `pre_tool_call`.
 BLOCK_EXIT_CODE = 2
-
-
-def _env(name: str, legacy: str, default: str) -> str:
-    return os.environ.get(name) or os.environ.get(legacy) or default
-
-
-def _env_num(name: str, legacy: str, default: str, kind=float):
-    """Reads a number from the environment WITHOUT killing the process if it is malformed.
-
-    Same shape and same reason as `hooks/bigfile.py::_env_num`: this runs at IMPORT, above
-    `main()`'s catch-all, so a `QCTX_BIGFILE_FLOOR_PCT=20%` would take the guard down before
-    any fail-open could catch it — and on THIS host an import-time raise is worse still,
-    because the loader pre-execs this file and swallows the failure at debug level.
-    """
-    raw = _env(name, legacy, default)
-    try:
-        return kind(raw)
-    except (TypeError, ValueError):
-        return kind(default)
 
 
 #: The two thresholds of `core.bigfile.decide`, read HERE and not there: the core stays pure
@@ -100,38 +80,12 @@ def _env_num(name: str, legacy: str, default: str, kind=float):
 #: byte-for-byte the ones `hooks/bigfile.py` reads — a deployer who tuned the guard on one
 #: host expects the same variable to move the same number on the other, and the knob-parity
 #: scan in the test suite is what keeps that true.
-FLOOR_PCT = _env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
-SHARE_PCT = _env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
-
-#: Where the breaker below keeps its one timestamp — the same variable the recall path and
-#: the claude-code hook read, so a deployer who moved the state moved all of it.
-STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
+FLOOR_PCT = env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
+SHARE_PCT = env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
 
 #: Short on purpose: hermes writes to this database live, and this runs before every read.
 #: It is the ceiling on how long a locked database may cost us before we fail open.
 SQLITE_TIMEOUT_S = 0.5
-
-#: Seconds allowed PER Qdrant call on the rare enrichment path. A backstop, and explicitly
-#: not the thing that keeps the step inside its budget — see `IDS_DEADLINE_S`.
-QDRANT_TIMEOUT_S = 1.5
-
-#: ONE HARD WALL-CLOCK DEADLINE for the whole enrichment step, and the only thing that bounds
-#: it. A per-call timeout cannot: `list_docs("all")` is a structural minimum of six sequential
-#: round trips, each bounded on its own and their SUM bounded by nothing — measured on the
-#: sibling host at 7.267 s against a 5 s budget with every individual ceiling respected. The
-#: number of terms in that sum is knowledge that rots; a wall clock does not care.
-#:
-#: Identical to the claude-code hook's, and deliberately NOT relaxed to hermes' far larger
-#: hook timeout (`DEFAULT_TIMEOUT_SECONDS = 60`): the deadline exists to keep a guard that
-#: runs before EVERY read from adding latency the user feels, and the user's patience does
-#: not scale with the host's configuration.
-IDS_DEADLINE_S = 2.0
-
-#: How long a failed (or too slow) inventory lookup keeps the enrichment switched off. Not
-#: an env knob on purpose, and the file name is the sibling host's on purpose too: the thing
-#: being circuit-broken is the shared Qdrant backend, so what one host learns about it holds
-#: for the other.
-BREAKER_SECONDS = 300.0
 
 #: `sessions` keys the session by `id` — measured against the live `~/.hermes/state.db`,
 #: where `select … where session_id=?` raises `OperationalError: no such column: session_id`.
@@ -226,59 +180,6 @@ def escape_requested(db_path: str, session_id: str) -> bool:
     return bool(rows) and bigfile.ESCAPE_MARKER in (rows[0][0] or "")
 
 
-def indexed_ids(cfg) -> set | None:
-    """Doc ids already in the archive, or None when finding out was not worth it.
-
-    CALLED ONLY AFTER a `decide(..., indexed_ids=None)` has already said it would block.
-    Knowing this costs a round trip to Qdrant and this guard runs before EVERY file read; the
-    common case is "small file, allow", and taxing it with a round trip it never needed is
-    the one thing the ordering here exists to prevent.
-
-    None is a complete answer, not a failure: it only costs the better half of the message
-    ("already indexed, search it" instead of "index it"). Anything that raises — and anything
-    still running when `IDS_DEADLINE_S` expires — degrades to None AND arms the breaker, so
-    the next blocked read does not pay to rediscover it.
-
-    ABANDONED, NOT CANCELLED: a blocking socket read cannot be interrupted from outside, so
-    the deadline is enforced by joining a DAEMON worker with a timeout. Checking the clock
-    AFTER the work returned would only ever bound the NEXT invocation.
-    """
-    breaker = Breaker(STATE_DIR / "bigfile-docs-breaker", BREAKER_SECONDS)
-    if breaker.is_open() is not None:
-        return None
-    done: dict = {}
-    worker = threading.Thread(target=_collect_ids, args=(cfg, done), daemon=True)
-    worker.start()
-    worker.join(IDS_DEADLINE_S)
-    if "ids" not in done:
-        # Either still running at the deadline, or it raised. Both mean the same thing to the
-        # read that is waiting on us, and both deserve the same cooldown.
-        breaker.arm()
-
-        return None
-    breaker.clear()
-
-    return done["ids"]
-
-
-def _collect_ids(cfg, done: dict) -> None:
-    """The round trip itself, on a worker thread. Reports only by landing a key in `done`.
-
-    Swallows everything: this thread may still be running after `indexed_ids` has given up on
-    it, and an exception raised then would print a traceback to stderr for a result nobody is
-    listening for any more — and on this host stderr is what hermes quotes as the block
-    message when stdout carries none.
-    """
-    try:
-        index = core.DocIndex(core.build_qdrant(cfg, timeout=QDRANT_TIMEOUT_S),
-                              core.build_embedder(cfg), core.build_reranker(cfg),
-                              cfg.require_docs_collection(), cfg.require_library_collection(),
-                              cfg.vector_size)
-        done["ids"] = {d["doc_id"] for d in index.list_docs(scope="all")}
-    except BaseException:      # noqa: BLE001 — a lost nicety may never cost the read
-        pass
-
-
 def _run() -> str:
     """The reason to block with, or "" to allow. Prints nothing: emission belongs to main()."""
     data = json.load(sys.stdin)
@@ -305,6 +206,12 @@ def _run() -> str:
 
     # PASS TWO: same decision, better message. The ids are fetched only now, and the verdict
     # is re-read rather than assumed — `decide` owns whether it blocks, always.
+    #
+    # The import is HERE and not at the top, the way `core.bigfile` imports `doc_id_for`:
+    # `core.inventory` is the only thing this guard has that reaches the network, and the
+    # common path — every allowed read — must never so much as load it.
+    from core.inventory import indexed_ids
+
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
                              floor_pct=FLOOR_PCT, share_pct=SHARE_PCT)
 
