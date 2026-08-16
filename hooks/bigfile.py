@@ -41,7 +41,7 @@ cage: every error path here emits nothing and exits 0, so the read proceeds.
 import json
 import os
 import sys
-import time
+import threading
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -85,15 +85,23 @@ SHARE_PCT = _env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", floa
 #: deployer who moved the state moved all of it.
 STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
-#: Seconds allowed per Qdrant call on the RARE enrichment path. Sized against the
-#: `timeout: 5` in hooks.json, which is the deadline the whole invocation must fit inside.
+#: Seconds allowed PER Qdrant call on the rare enrichment path. A backstop, and explicitly
+#: not the thing that keeps us inside the hook deadline — see `IDS_DEADLINE_S`.
 QDRANT_TIMEOUT_S = 1.5
 
-#: Above this, the inventory lookup is treated as a failure even though it answered — the
-#: enrichment is a nicety and it may not eat the deadline that protects the read.
-#: Measured on this deployment: build 0.000s, `list_docs("all")` 0.10-0.12s over 297
-#: chunks, four consecutive runs.
-SLOW_S = 1.5
+#: ONE HARD WALL-CLOCK DEADLINE for the whole enrichment step, and the only thing that
+#: bounds it. A per-call timeout cannot: `list_docs("all")` is a structural minimum of six
+#: sequential round trips (ensure tmp, sweep's ensure, sweep's delete, scroll tmp, ensure
+#: library, scroll library), each bounded on its own and their SUM bounded by nothing.
+#: Measured against a healthy-but-slow backend answering every endpoint correctly at 1.2 s
+#: per call, the hook took 7.267 s against the `timeout: 5` declared in hooks.json — every
+#: individual ceiling respected, the total blown anyway.
+#:
+#: The count of those round trips is knowledge that rots: `list_docs` may grow a call
+#: tomorrow and nothing here would notice. A wall clock does not care how many terms the
+#: sum has. The healthy path measures 0.10-0.12 s, so 2.0 s is ~20x headroom and never
+#: fires when Qdrant is well.
+IDS_DEADLINE_S = 2.0
 
 #: How long a failed (or too slow) inventory lookup keeps the enrichment switched off.
 #: Not an env knob on purpose: a knob here would have to be mirrored name-for-name on
@@ -178,34 +186,59 @@ def indexed_ids(cfg) -> set | None:
 
     None is a complete answer, not a failure: it only costs the better half of the
     message ("already indexed, search it" instead of "index it"). A worse message beats a
-    hook that blew its deadline, so anything that raises, and anything slower than
-    `SLOW_S`, degrades to None AND arms the breaker so the next blocked read does not pay
-    to rediscover it.
+    hook that blew its deadline, so anything that raises — and anything still running when
+    `IDS_DEADLINE_S` expires — degrades to None AND arms the breaker, so the next blocked
+    read does not pay to rediscover it.
+
+    ABANDONED, NOT CANCELLED. There is no way to interrupt a blocking socket read from
+    outside, so the deadline is enforced by joining a DAEMON worker with a timeout: on
+    expiry we stop waiting and walk away, and being a daemon is what lets the interpreter
+    exit while it is still in flight. Checking the clock AFTER the work returned — which is
+    what this did before — only ever bounds the NEXT invocation, never the one that is
+    already over its budget.
     """
     breaker = Breaker(STATE_DIR / "bigfile-docs-breaker", BREAKER_SECONDS)
     if breaker.is_open() is not None:
         return None
-    started = time.monotonic()
+    done: dict = {}
+    worker = threading.Thread(target=_collect_ids, args=(cfg, done), daemon=True)
+    worker.start()
+    worker.join(IDS_DEADLINE_S)
+    if "ids" not in done:
+        # Either still running at the deadline, or it raised. Both mean the same thing to
+        # the read that is waiting on us, and both deserve the same cooldown.
+        breaker.arm()
+
+        return None
+    breaker.clear()
+
+    return done["ids"]
+
+
+def _collect_ids(cfg, done: dict) -> None:
+    """The round trip itself, on a worker thread. Reports only by landing a key in `done`.
+
+    Swallows everything: this thread may still be running after `indexed_ids` has given up
+    on it, and an exception raised then would print a traceback to stderr for a result
+    nobody is listening for any more.
+    """
     try:
         index = core.DocIndex(core.build_qdrant(cfg, timeout=QDRANT_TIMEOUT_S),
+                              # The embedder and reranker carry build_docs' own 60 s and
+                              # 15 s timeouts. Harmless TODAY because `list_docs` touches
+                              # neither — but they are two unbounded waits sitting inside a
+                              # step that must finish in two seconds, and the day a listing
+                              # grows an embedding call they become the trap. The wall
+                              # clock above is what keeps that from being a regression.
                               core.build_embedder(cfg), core.build_reranker(cfg),
                               cfg.require_docs_collection(), cfg.require_library_collection(),
                               cfg.vector_size)
         # `doc_id` is the key `list_docs` publishes, confirmed against a live listing
         # rather than assumed: {'doc_id', 'scope', 'chunks', 'path', 'mode', 'indexed_at',
         # 'expires_at_ts', 'src_mtime', 'src_size', 'src_digest', 'ttl_seconds'}.
-        ids = {d["doc_id"] for d in index.list_docs(scope="all")}
+        done["ids"] = {d["doc_id"] for d in index.list_docs(scope="all")}
     except BaseException:      # noqa: BLE001 — a lost nicety may never cost the read
-        breaker.arm()
-
-        return None
-    if time.monotonic() - started > SLOW_S:
-        breaker.arm()
-
-        return ids
-    breaker.clear()
-
-    return ids
+        pass
 
 
 def deny(reason: str) -> None:

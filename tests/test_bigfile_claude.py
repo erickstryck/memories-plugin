@@ -84,6 +84,11 @@ import contextlib          # noqa: E402
 import io                  # noqa: E402
 import types               # noqa: E402
 import unittest.mock       # noqa: E402
+import http.server        # noqa: E402
+import subprocess         # noqa: E402
+import threading          # noqa: E402
+import time               # noqa: E402
+
 
 from core.docs import doc_id_for  # noqa: E402
 
@@ -137,6 +142,64 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 1_000_000) -> str
         adapter.main()
 
     return out.getvalue()
+
+
+#: The real hook, run as a real process. Anything read at IMPORT time — both env knobs
+#: are — can only be exercised this way; an in-process patch would test a value the module
+#: never read.
+HOOK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "hooks", "bigfile.py")
+
+
+def hook_env(**overrides) -> dict:
+    """A hermetic environment for a hook subprocess.
+
+    Nothing here may reach the operator's world: `QCTX_CONFIG` points at a file that will
+    never exist (so the environment is the whole config), `QCTX_STATE_DIR` is a fresh temp
+    directory (so the breaker never touches ~/.memories-plugin), and Qdrant points at a
+    port nobody listens on — refused instantly, which is the degraded path these tests
+    WANT unless one of them stands a server up itself.
+    """
+    state = tempfile.mkdtemp()
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}
+    env.update({
+        "QCTX_CONFIG": os.path.join(state, "config.json"),
+        "QCTX_STATE_DIR": state,
+        "QCTX_QDRANT_URL": "http://127.0.0.1:1",
+        "QCTX_EMBED_URL": "http://127.0.0.1:1/v1/embeddings",
+        "QCTX_EMBED_MODEL": "test-embed",
+        "QCTX_MEMORY_COLLECTION": "t_mem",
+        "QCTX_DOCS_COLLECTION": "t_tmp",
+        "QCTX_LIBRARY_COLLECTION": "t_lib",
+        "QCTX_CONTEXT_WINDOW": "1000000",
+    })
+    env.update(overrides)
+
+    return env
+
+
+def run_hook(path: str, transcript: str, env: dict):
+    """(elapsed, stdout, returncode) for the real hook process."""
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, HOOK], input=a_read_payload(path, transcript),
+                          env=env, capture_output=True, text=True, timeout=30)
+
+    return time.monotonic() - started, done.stdout, done.returncode
+
+
+def a_usage(used: int) -> dict:
+    """An assistant turn reporting exactly `used` tokens of context."""
+    return {"message": {"role": "assistant", "model": "claude-opus-5",
+                        "usage": {"input_tokens": used, "cache_creation_input_tokens": 0,
+                                  "cache_read_input_tokens": 0}}}
+
+
+#: Isolates the FLOOR: 790k used of 1M plus 20k costs 810k, past the 800k the floor allows,
+#: while 20k stays under 40% of the 210k free. Same arithmetic as the core's own isolator.
+FLOOR_ONLY = (a_usage(790_000), 4 * 20_000)
+#: Isolates the SHARE: 604,023 used of 1M leaves 396k free; 171k is 43% of it, over the 40%
+#: share, while 775k of 1M keeps 22% and never reaches the floor.
+SHARE_ONLY = (a_usage(604_023), 4 * 171_000)
 
 
 class TestTheOrderThatProtectsTheCommonPath(unittest.TestCase):
@@ -204,6 +267,190 @@ class TestMainFailsOpen(unittest.TestCase):
         payload = a_read_payload(a_file_of(A_BIG_FILE), a_transcript([ASSISTANT]))
         self.assertEqual(run_main(payload, spy, loader=explode), "")
         self.assertEqual(spy.calls, 0)
+
+
+class SlowQdrant(http.server.BaseHTTPRequestHandler):
+    """A REAL Qdrant, answering every endpoint `list_docs` touches, correctly, but slowly.
+
+    Correctly is the load-bearing half. A server that 500s would also make the hook finish
+    fast — by failing — and would prove nothing about the deadline. So the fast variant of
+    the same server has to produce the "already indexed" message, which is only reachable
+    when every one of the six round trips was understood and answered.
+    """
+
+    delay = 0.0
+    doc_id = ""
+
+    def log_message(self, *a):
+        pass                                   # keep the test output clean
+
+    def _answer(self, payload):
+        time.sleep(self.delay)
+        raw = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        # `ensure` asks for the collection. Reporting no declared vector size is what makes
+        # the client accept it as compatible instead of trying to create it.
+        self._answer({"result": {"config": {"params": {"vectors": {}}}, "points_count": 1}})
+
+    def do_PUT(self):
+        self._answer({"result": True})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        if self.path.endswith("/points/scroll"):
+            self._answer({"result": {"points": [{"id": 1, "payload": {
+                "doc_id": self.doc_id,
+                "metadata": {"path": "/x", "mode": "snapshot", "indexed_at": "now"},
+            }}], "next_page_offset": None}})
+        else:
+            self._answer({"result": {"status": "ok"}})       # sweep's delete_by_filter
+
+
+class TestTheEnrichmentCannotBlowTheHookDeadline(unittest.TestCase):
+    """`timeout: 5` in hooks.json is a hard budget, and a per-call timeout cannot defend it.
+
+    `list_docs("all")` is a structural minimum of SIX sequential round trips. Measured
+    before the wall clock existed, against this very server at 1.2 s per call: every
+    per-call ceiling respected, and the hook took 7.267 s against a 5 s budget. The count
+    of round trips is knowledge that rots; a wall clock does not care how many there are.
+    """
+
+    def _serve(self, delay, doc_id):
+        handler = type("H", (SlowQdrant,), {"delay": delay, "doc_id": doc_id})
+        # A server that stays QUIET about the broken pipe it is guaranteed to see: the
+        # abandoned worker's socket dies with the hook process, which is the deadline
+        # working, not a fault. Left alone it prints a traceback into the suite's output.
+        quiet = type("QuietServer", (http.server.ThreadingHTTPServer,),
+                     {"handle_error": lambda self, request, addr: None})
+        server = quiet(("127.0.0.1", 0), handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _run_the_hook(self, delay):
+        """Returns (elapsed, stdout, returncode) for the REAL hook process."""
+        path = a_file_of(A_BIG_FILE)
+        url = self._serve(delay, doc_id_for(path))
+
+        return run_hook(path, a_transcript([ASSISTANT]), hook_env(QCTX_QDRANT_URL=url))
+
+    def test_a_slow_but_healthy_qdrant_cannot_blow_the_deadline(self):
+        elapsed, out, code = self._run_the_hook(delay=1.2)
+        self.assertEqual(code, 0, "the hook must exit 0 on every path")
+        self.assertLess(elapsed, 3.5,
+                        f"took {elapsed:.3f}s of the 5s budget; six 1.2s round trips "
+                        f"unbounded would be ~7.3s")
+        reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("index it with docs_index", reason,
+                      "abandoning the lookup costs the better message, never the block")
+
+    def test_the_same_server_answered_fast_delivers_the_better_message(self):
+        """The control, and it is what makes the test above mean anything: the same server
+        that was too slow is UNDERSTOOD when it is quick, so the slow run degraded because
+        of the clock and not because the fake spoke a language the client rejects."""
+        elapsed, out, code = self._run_the_hook(delay=0.0)
+        self.assertEqual(code, 0)
+        self.assertLess(elapsed, 3.5, f"took {elapsed:.3f}s")
+        reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("already indexed", reason)
+        self.assertIn("docs_search", reason)
+
+
+class TestTheTwoThresholdsAreRealKnobs(unittest.TestCase):
+    """Both are read at IMPORT time and handed to `decide` — and until T6 puts this file
+    under the knob scan, nothing else would notice if either stopped arriving there.
+
+    Each fixture trips exactly ONE criterion, so loosening one knob can only be observed
+    through the criterion it governs. A fixture that tripped both would let a dead knob
+    look alive because the other criterion kept blocking.
+    """
+
+    def _decision(self, fixture, **env):
+        usage, size = fixture
+        elapsed, out, code = run_hook(a_file_of(size), a_transcript([usage]),
+                                      hook_env(**env))
+        self.assertEqual(code, 0, "the hook must exit 0 on every path")
+
+        return "deny" if out.strip() else "allow"
+
+    def test_the_floor_knob_moves_the_decision(self):
+        self.assertEqual(self._decision(FLOOR_ONLY), "deny")
+        self.assertEqual(self._decision(FLOOR_ONLY, QCTX_BIGFILE_FLOOR_PCT="0.001"), "allow")
+
+    def test_the_share_knob_moves_the_decision(self):
+        self.assertEqual(self._decision(SHARE_ONLY), "deny")
+        self.assertEqual(self._decision(SHARE_ONLY, QCTX_BIGFILE_SHARE_PCT="0.9"), "allow")
+
+    def test_the_legacy_names_are_accepted_too(self):
+        self.assertEqual(self._decision(FLOOR_ONLY, BIGFILE_FLOOR_PCT="0.001"), "allow")
+        self.assertEqual(self._decision(SHARE_ONLY, BIGFILE_SHARE_PCT="0.9"), "allow")
+
+    def test_a_malformed_knob_falls_back_instead_of_killing_the_hook(self):
+        """These are read ABOVE main()'s catch-all, where a raise is not a fail-open — it
+        is a non-zero exit and a traceback on a hook that runs before every file read."""
+        garbage = {"QCTX_BIGFILE_FLOOR_PCT": "20%", "QCTX_BIGFILE_SHARE_PCT": "banana"}
+        self.assertEqual(self._decision(FLOOR_ONLY, **garbage), "deny")
+        self.assertEqual(self._decision(SHARE_ONLY, **garbage), "deny")
+
+    def test_both_passes_of_decide_are_given_the_knobs(self):
+        """The silent regression this exists for: dropping `floor_pct=`/`share_pct=` from
+        either call leaves every test above green — the module defaults happen to match —
+        and the knobs quietly stop working. So assert the ARGUMENTS, not the outcome."""
+        seen = []
+        real = adapter.bigfile.decide
+
+        def recording(path, budget, **kw):
+            seen.append(kw)
+
+            return real(path, budget, **kw)
+
+        spy = Spy(set())
+        with unittest.mock.patch.object(adapter.bigfile, "decide", recording):
+            run_main(a_read_payload(a_file_of(A_BIG_FILE), a_transcript([ASSISTANT])), spy)
+        self.assertEqual(len(seen), 2, "the two-pass order is what this rides on")
+        for call in seen:
+            self.assertIn("floor_pct", call, "decide() was called without the floor knob")
+            self.assertIn("share_pct", call, "decide() was called without the share knob")
+            self.assertEqual(call["floor_pct"], adapter.FLOOR_PCT)
+            self.assertEqual(call["share_pct"], adapter.SHARE_PCT)
+
+
+#: Violates ONLY `userType`: an internal turn that is otherwise a perfect user turn.
+AGENT_TURN = {"userType": "agent", "entrypoint": "cli",
+              "message": {"role": "user", "content": "leia --full"}}
+#: Violates ONLY `entrypoint`: a real external user, arriving through something that is
+#: not the interactive CLI.
+SDK_TURN = {"userType": "external", "entrypoint": "sdk",
+            "message": {"role": "user", "content": "leia --full"}}
+
+
+class TestTheOtherTwoHalvesOfTheRealTurnFilter(unittest.TestCase):
+    """`toolUseResult` already had a test that bites; these two did not.
+
+    ONE condition violated per fixture, never two — a fixture that broke both would go
+    green with either check deleted and prove neither of them. Each transcript ends with
+    the impostor and keeps a genuine, marker-free user turn behind it, so the marker can
+    only be found by accepting the impostor.
+    """
+
+    def test_an_internal_turn_does_not_carry_the_escape(self):
+        t = a_transcript([REAL_TURN, ASSISTANT, AGENT_TURN])
+        self.assertFalse(adapter.escape_requested(t),
+                         "userType=agent is not the human overruling the guard")
+
+    def test_a_turn_from_another_entrypoint_does_not_carry_the_escape(self):
+        t = a_transcript([REAL_TURN, ASSISTANT, SDK_TURN])
+        self.assertFalse(adapter.escape_requested(t),
+                         "entrypoint=sdk is not the interactive CLI the marker is typed in")
 
 
 if __name__ == "__main__":
