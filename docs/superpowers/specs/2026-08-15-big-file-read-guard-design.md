@@ -94,7 +94,24 @@ deve marcar o número com `≈`.
   janela); `provider_models_cache.json` não menciona janela; `context_length` vive só no
   compressor, em processo.
 
-Daí a decisão: **tabela como palpite, config do usuário vence**.
+Daí a decisão: **tabela como TETO, config do usuário vence**.
+
+> **EMENDA de 2026-08-16, depois da T4.** A decisão original dizia "tabela como palpite", e
+> isso estava errado de um jeito que só apareceu quando o adaptador rodou de verdade: um
+> palpite *pequeno demais* não enfraquece a guarda, ele a **inverte**. Medido no adaptador da
+> T4, com esta máquina e sem override: `window_for('claude-opus-5')` = 200k numa sessão de 1M,
+> `used` = 989.479, logo `free` = 0, e o hook real **negou um arquivo de 4 KB**. Fail-open
+> virou fail-closed.
+>
+> A assimetria é o argumento inteiro: palpite grande demais só faz a guarda **dormir**;
+> pequeno demais produz a única falha que esta feature não pode produzir. Então a tabela
+> deixa de ser a janela *nominal* do modelo e passa a ser o **teto** — a maior janela que
+> qualquer variante daquele nome pode ter (`claude-opus-5` → 1M) — e `used >= window` passa a
+> significar "o palpite foi refutado", caindo para janela desconhecida.
+>
+> Custo aceito: quem roda uma sessão de 200k fica com guarda quase inerte até declarar
+> `context_window`. Inerte até configurar é o modo de falha que este design já escolheu;
+> jaula não é.
 
 ## Arquitetura
 
@@ -196,6 +213,7 @@ de ler arquivos sem dizer por quê — pior que o problema que a guarda resolve.
 | transcript ausente ou ilegível | libera |
 | `state.db` travado (o hermes escreve nele ao vivo) | libera, sem espera longa |
 | janela desconhecida (modelo fora da tabela, sem config) | libera — nunca bloquear com base em palpite |
+| `used >= window` (o palpite foi refutado pelos fatos) | libera — a janela real é maior do que a tabela supõe |
 | `stat` do arquivo falha | libera; a leitura falhará com mensagem melhor |
 | qualquer exceção inesperada | libera |
 

@@ -27,6 +27,13 @@
 
 ### Task 1: A janela de contexto — tabela com config sobrescrevendo
 
+> **EMENDA de 2026-08-16 — leia antes do código abaixo.** Esta task foi implementada como
+> escrita e está commitada (`7cf1746`), mas a T4 provou por execução que a semântica da tabela
+> estava errada: `MODEL_WINDOWS` guarda **tetos**, não janelas nominais, e `used >= window`
+> significa palpite refutado (⇒ janela desconhecida ⇒ libera). O bloco de código abaixo é o
+> registro histórico do que foi executado, não o alvo atual. Ver a emenda no spec e a ruling no
+> ledger. A correção vive na Task 4-fix.
+
 **Files:**
 - Create: `core/windows.py`
 - Modify: `core/config.py` (ENV_ALIASES, DEFAULTS, dataclass `Config`)
