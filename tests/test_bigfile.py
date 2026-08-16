@@ -62,12 +62,36 @@ class TestTheTwoCriteria(unittest.TestCase):
         v = bigfile.decide(path, Budget(window=0, used=0, exact=False))
         self.assertFalse(v.block)
 
-    def test_used_above_window_does_not_divide_by_a_negative(self):
-        """Defensive: the hermes estimate can drift above a mis-declared window."""
+    def test_used_at_or_above_the_window_means_the_window_was_wrong(self):
+        """A session cannot use more of the window than the window holds, so this does not
+        describe a full context — it REFUTES the number. Measured before this rule existed:
+        `window_for('claude-opus-5')` returned 200k in a real 1M session whose `used` was
+        989,479, `free` collapsed to 0, and the guard denied a 4 KB file. Erring large
+        costs a sleeping guard; erring small cost a cage.
+        """
         path = a_file(4000)
-        v = bigfile.decide(path, Budget(window=100, used=500, exact=False))
-        self.assertTrue(v.block)
-        self.assertGreaterEqual(v.free, 0)
+        for used in (100, 500):          # exactly at the window, and past it
+            with self.subTest(used=used):
+                v = bigfile.decide(path, Budget(window=100, used=used, exact=False))
+                self.assertFalse(v.block, "a refuted window must allow, never block")
+                self.assertGreaterEqual(v.free, 0)
+
+    def test_the_floor_blocks_alone_with_the_window_intact(self):
+        """THE ISOLATOR for the final-remainder floor, and it has to be its own fixture.
+
+        `test_the_final_remainder_floor_blocks` trips BOTH criteria at once (F4), and the
+        test that used to isolate the floor did it by driving `free` to 0 — which now
+        returns early as a refuted window. So the isolation is rebuilt with the window
+        intact: 790k used of 1M, a file worth 20k tokens. After the read that is 810k of
+        1M, past the 800k the floor allows; and 20k is well under 40% of the 210k free, so
+        the share cannot be what fired.
+        """
+        path = a_file(4 * 20_000)                             # 20k tokens
+        b = Budget(window=1_000_000, used=790_000, exact=True)
+        self.assertLess(b.used, b.window, "the window must NOT be refuted here")
+        self.assertGreater(790_000 + 20_000, 1_000_000 * 0.8, "the floor must fire")
+        self.assertLessEqual(20_000, 210_000 * 0.4, "the share must NOT fire")
+        self.assertTrue(bigfile.decide(path, b).block)
 
 
 class TestTheNumbersInTheMessage(unittest.TestCase):

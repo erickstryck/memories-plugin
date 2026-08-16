@@ -97,9 +97,20 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
     free = max(0, budget.window - budget.used)
     after = budget.used + cost
 
-    if budget.window <= 0:
-        # We could not learn the window. Allowing is mandatory: blocking here would mean
-        # blocking on a guess, and the window is not derivable from disk on either host.
+    if budget.window <= 0 or budget.used >= budget.window:
+        # THE TWO WAYS OF NOT KNOWING THE WINDOW, and they sit together because they end
+        # the same way: allow.
+        #
+        # `window <= 0` — we could not learn it at all. Blocking here would mean blocking
+        # on a guess, and the window is not derivable from disk on either host.
+        #
+        # `used >= window` — we thought we knew it and the facts REFUTED us. A session
+        # cannot consume more of the window than the window holds, so a `used` at or above
+        # it does not describe a full session; it proves the number came from
+        # `windows.MODEL_WINDOWS` guessing low for a variant that outgrew its bare name.
+        # Measured before this rule existed: a real 1M session read as 200_000/989,479,
+        # `free` collapsed to 0, and the guard denied a 4 KB file — fail open inverted into
+        # fail closed. Erring large costs a sleeping guard; erring small costs a cage.
         return Verdict(False, "", cost, free)
 
     floor_hit = after > budget.window * (1 - floor_pct)
@@ -112,15 +123,14 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
         return Verdict(False, "", cost, free)
 
     about = "≈" if not budget.exact else ""
-    if free:
-        pct = int(round(cost / free * 100))
-        left = f"{pct}% of the {about}{free:,} you have left"
-    else:
-        # free == 0: "100% of the 0 you have left" is grammatically odd and no test pins
-        # it, but it is still confusing — there is no "0 you have left" to take a share of.
-        # Say plainly that nothing remains instead of forcing a percentage out of it.
-        left = "nothing left in the window"
-    head = f"reading this file would cost {about}{cost:,} tokens, {left}"
+    # `free > 0` is guaranteed here, not hoped for: `used >= window` returned above, so
+    # reaching this line means `used < window`. The branch that used to phrase `free == 0`
+    # as "nothing left in the window" went with it — that state can no longer reach the
+    # message, and a branch no call can enter is a branch that rots and lies about what
+    # was verified.
+    pct = int(round(cost / free * 100))
+    head = (f"reading this file would cost {about}{cost:,} tokens, "
+            f"{pct}% of the {about}{free:,} you have left")
 
     from core.docs import doc_id_for          # local: keeps the pure path import-light
     doc_id = doc_id_for(path)
