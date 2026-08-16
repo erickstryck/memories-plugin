@@ -212,6 +212,7 @@ Recognized variables (canonical first, legacy aliases accepted):
 | `docs_collection` | `QCTX_DOCS_COLLECTION`, `DOCS_COLLECTION` |
 | `library_collection` | `QCTX_LIBRARY_COLLECTION`, `LIBRARY_COLLECTION` |
 | `vector_size` | `QCTX_VECTOR_SIZE`, `VECTOR_SIZE` |
+| `context_window` | `QCTX_CONTEXT_WINDOW` |
 
 The two API keys are the only settings that **cannot** go into the config file:
 `config set` refuses them and points at the environment variable instead. A plaintext
