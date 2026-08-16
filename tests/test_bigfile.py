@@ -100,6 +100,22 @@ class TestSpecialCases(unittest.TestCase):
     def test_a_text_file_is_indexable(self):
         self.assertTrue(bigfile.is_indexable(a_file(100)))
 
+    def test_a_high_entropy_file_with_no_null_byte_is_not_indexable(self):
+        """The incident `is_probably_binary` was written for: 20 KB of high random bytes
+        with no NUL produced chunks of U+FFFD, spending embedding calls on noise. A NUL
+        scan alone waves this through; the shared policy in `core.chunk` does not."""
+        fd, path = tempfile.mkstemp(suffix=".bin")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(bytes((b or 1) for b in os.urandom(20_000)))   # no zero bytes
+        self.assertFalse(bigfile.is_indexable(path))
+
+    def test_decide_allows_a_no_null_high_entropy_file_instead_of_telling_it_to_index_noise(self):
+        fd, path = tempfile.mkstemp(suffix=".bin")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(bytes((b or 1) for b in os.urandom(1_200_000)))   # no zero bytes
+        v = bigfile.decide(path, Budget(window=200_000, used=190_000, exact=True))
+        self.assertFalse(v.block)
+
     def test_an_already_indexed_file_is_told_to_SEARCH_not_to_reindex(self):
         """Reindexing 258 chunks the archive already holds is waste, and the model would
         do it because the message told it to."""

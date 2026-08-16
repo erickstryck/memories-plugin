@@ -12,6 +12,8 @@ never. That is what makes it testable with a fabricated Budget and no infrastruc
 import os
 from dataclasses import dataclass
 
+from core.chunk import is_probably_binary
+
 #: Fraction of the window that must REMAIN after the read.
 FLOOR_PCT = 0.20
 #: Fraction of the free space a single file may take.
@@ -54,15 +56,19 @@ ESCAPE_MARKER = "--full"
 def is_indexable(path: str) -> bool:
     """Whether `docs_index` could do anything with this file.
 
-    A NUL byte in the first few KB is the classic text/binary test, and it is enough: the
-    question is not "is this valid UTF-8" but "would slicing it into chunks produce
-    something searchable".
+    Reads a bounded sample and delegates the binary/text call to `chunk.is_probably_binary`
+    — the same policy `docs_index` itself applies to the file — instead of re-deciding it
+    here. A NUL byte alone is not enough: high-entropy content with no NUL decodes into a
+    wall of U+FFFD replacement characters, which is exactly the measured incident that
+    policy exists to catch (see `chunk.is_probably_binary`'s docstring). Duplicating a
+    weaker check here would let this guard wave through a file `docs_index` then rejects.
     """
     try:
         with open(path, "rb") as fh:
-            return b"\x00" not in fh.read(_SNIFF_BYTES)
+            sample = fh.read(_SNIFF_BYTES)
     except OSError:
         return False
+    return not is_probably_binary(sample.decode("utf-8", errors="replace"))
 
 
 def cost_of(path: str) -> int:
