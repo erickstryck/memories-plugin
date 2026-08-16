@@ -32,10 +32,20 @@ not make the guard sharper; it makes it a cage on the variant that outgrew the n
 #: window. `context_window` in the config still wins, and is the only way to get the guard
 #: to fire early for someone genuinely on a small variant.
 #:
-#: Each value is established from the claude v2.1.233 binary, not from recollection:
-#:   * `claude-opus-5` and `claude-sonnet-5` — the binary ships `claude-opus-5[1m]` and
-#:     `sonnet-5[1m]` as model ids, so a 1M variant of each exists.
-#:   * `claude-haiku-4-5` — the binary's own "cannot ever be 1M" predicate enumerates it:
+#: Each value comes from the claude v2.1.233 binary, not from recollection — but the three
+#: rows do NOT rest on equally strong evidence, and saying so is the point:
+#:   * `claude-opus-5` — the binary ships `claude-opus-5[1m]` as a model id. A 1M variant
+#:     demonstrably EXISTS. Strongest of the three.
+#:   * `claude-sonnet-5` — WEAKER, and deliberately kept at 1M anyway. There is NO
+#:     `claude-sonnet-5[1m]` id in the binary (the only sonnet `[1m]` ids are
+#:     `sonnet-4-5-20250929[1m]` and `sonnet-4-6[1m]`; all 64 mentions of sonnet-5 are of
+#:     the bare name). What is true is weaker: sonnet-5 is NOT in `rHt`, the binary's
+#:     "can never be 1M" predicate, and eligibility is then decided at RUNTIME by
+#:     `oA(t)?.context?.supports_1m_beta` — data this file cannot see. So nothing rules a
+#:     1M sonnet-5 out, and under the ceiling rule "not ruled out" is exactly what erring
+#:     large means. Do not upgrade this justification to "the binary ships the id": it
+#:     does not, and an earlier version of this comment claimed it did.
+#:   * `claude-haiku-4-5` — strong again, and in the opposite direction: `rHt` enumerates it:
 #:     `e.includes("claude-3-") || e==="claude-opus-4-0" || e==="claude-opus-4-1" ||
 #:     e==="claude-opus-4-5" || e==="claude-haiku-4-5"`. Being named there is what makes
 #:     200k a ceiling for it rather than a guess.
