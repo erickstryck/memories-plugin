@@ -51,6 +51,32 @@ from core.knobs import env_num  # noqa: E402
 #: Enough for the last usage block and the last user turn, never the whole file.
 TAIL_BYTES = 256 * 1024
 
+#: Lines ONE `Read` loads when the request carries no `limit`. Read out of the claude
+#: v2.1.233 binary (`wCr=2000`, used as "Reads up to ${wCr} lines by default"), not from
+#: the tool's prose. It is the ceiling that makes `Read(a_684KB_file, limit=50)` cost what
+#: it actually costs instead of the whole file — the block-on-a-wrong-number failure this
+#: guard exists to avoid, in new clothes.
+#:
+#: NOT the only ceiling the host has: the same code path also truncates by a TOKEN cap
+#: (`truncatedByTokenCap` in the binary), whose value is not readable this cheaply. Missing
+#: it can only make the price too HIGH on a file of very long lines — the direction that
+#: still needs watching, and strictly better than the whole-file price this replaced.
+DEFAULT_READ_LINES = 2000
+
+
+def _read_lines(tool_input: dict) -> int:
+    """How many lines this particular request can pull.
+
+    A malformed `limit` falls back to the default rather than raising: `main()` would turn
+    a raise into an allow anyway, but an allow decided by a typo is not a decision.
+    """
+    try:
+        limit = int(tool_input.get("limit") or 0)
+    except (TypeError, ValueError):
+        return DEFAULT_READ_LINES
+
+    return limit if limit > 0 else DEFAULT_READ_LINES
+
 
 #: The two thresholds of `core.bigfile.decide`, read HERE and not there: the core stays
 #: pure and environment-free, and the adapter is what knows it is running on a host. The
@@ -137,7 +163,8 @@ def deny(reason: str) -> None:
 
 def _run() -> None:
     data = json.load(sys.stdin)
-    path = (data.get("tool_input") or {}).get("file_path") or ""
+    tool_input = data.get("tool_input") or {}
+    path = tool_input.get("file_path") or ""
     transcript = data.get("transcript_path") or ""
     if not path or not transcript:
         return
@@ -149,7 +176,8 @@ def _run() -> None:
     budget = budget_from(transcript, lambda model: windows.window_for(model, cfg))
 
     # PASS ONE: no `indexed_ids`, no network. This is the path every read takes.
-    verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT)
+    verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
+                             read_lines=_read_lines(tool_input))
     if not verdict.block:
         return
 
@@ -166,7 +194,8 @@ def _run() -> None:
     from core.inventory import indexed_ids
 
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
-                             floor_pct=FLOOR_PCT, share_pct=SHARE_PCT)
+                             floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
+                             read_lines=_read_lines(tool_input))
     if verdict.block:
         deny(verdict.reason)
 

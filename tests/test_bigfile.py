@@ -165,5 +165,133 @@ class TestSpecialCases(unittest.TestCase):
         self.assertIn("--full", v.reason)
 
 
+# --- The price has to match what the read actually loads --------------------------------
+import builtins          # noqa: E402
+import unittest.mock     # noqa: E402
+
+
+def a_file_of_lines(count: int, width: int) -> str:
+    """`count` lines of `width` bytes each, newline included in the width."""
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(("y" * (width - 1) + "\n") * count)
+
+    return path
+
+
+#: 100,000 used of a 100,000-token window leaves 39,598 free; the share criterion trips at
+#: 15,839 tokens (63,357 bytes). The file below is 400,000 bytes, so at FULL price it blocks
+#: with room to spare, and every test here is about how much of it one read really pulls.
+A_TIGHT_BUDGET = Budget(window=100_000, used=60_402, exact=True)
+
+
+class TestThePriceIsWhatOneReadLoads(unittest.TestCase):
+    """Pricing the whole file made `Read(a_684KB_file, limit=50)` cost 171k tokens and get
+    BLOCKED, when the read would have loaded about 500. That is a block based on a number
+    that was simply wrong — the one failure this feature must never produce.
+
+    ONE rule does all of it: `min(file size, lines the request can pull * bytes per line)`.
+    """
+
+    def test_without_a_ceiling_the_whole_file_is_the_price(self):
+        path = a_file_of_lines(4_000, 100)
+        v = bigfile.decide(path, A_TIGHT_BUDGET)
+        self.assertTrue(v.block)
+        self.assertEqual(v.cost, 100_000, "400,000 bytes at 4 bytes/token")
+
+    def test_a_limited_read_is_priced_at_what_it_loads(self):
+        path = a_file_of_lines(4_000, 100)
+        v = bigfile.decide(path, A_TIGHT_BUDGET, read_lines=50)
+        self.assertFalse(v.block, "50 lines of 100 bytes is 1,250 tokens, not 100,000")
+        self.assertLess(v.cost, 2_000)
+
+    def test_a_limit_bigger_than_the_file_is_still_the_whole_file(self):
+        """The case that killed the simpler rule. "Any explicit limit allows" would wave
+        `limit=1000000` through, and `limit=1000000` IS the whole file."""
+        path = a_file_of_lines(4_000, 100)
+        v = bigfile.decide(path, A_TIGHT_BUDGET, read_lines=1_000_000)
+        self.assertTrue(v.block)
+        self.assertEqual(v.cost, 100_000)
+
+    def test_a_file_with_no_newline_at_all_falls_back_to_the_whole_file(self):
+        """A minified bundle is one enormous line: a line-limited read of it loads all of
+        it. With no newline in the sample the average becomes the sample itself, and the
+        minimum lands back on the file."""
+        path = a_file(400_000)
+        v = bigfile.decide(path, A_TIGHT_BUDGET, read_lines=50)
+        self.assertTrue(v.block)
+        self.assertEqual(v.cost, 100_000)
+
+    def test_a_byte_ceiling_caps_it_too(self):
+        """hermes truncates a read at ~100k CHARS regardless of lines, so the price stops
+        there even when the line ceiling would allow more."""
+        path = a_file_of_lines(4_000, 100)
+        v = bigfile.decide(path, A_TIGHT_BUDGET, read_lines=4_000, read_bytes=100_000)
+        self.assertTrue(v.block)
+        self.assertEqual(v.cost, 25_000, "100,000 bytes at 4 bytes/token")
+
+    def test_the_refinement_can_only_lower_the_price(self):
+        """Which is what makes the size-only first pass a safe filter: a file too small to
+        block at full price cannot block at a fraction of it."""
+        path = a_file_of_lines(4_000, 100)
+        full = bigfile.decide(path, A_TIGHT_BUDGET).cost
+        for lines in (1, 50, 4_000, 10**9):
+            with self.subTest(lines=lines):
+                self.assertLessEqual(bigfile.decide(path, A_TIGHT_BUDGET,
+                                                    read_lines=lines).cost, full)
+
+
+class TestTheFileIsOpenedAtMostOnce(unittest.TestCase):
+    """The sample serves BOTH uses — the binary verdict and the line length. Two opens of
+    the same file in a guard that runs before every read is a regression, so this counts
+    them instead of trusting the shape of the code."""
+
+    def _opens_during(self, decide_kwargs, path):
+        opened = []
+        real = builtins.open
+
+        def counting(target, *a, **kw):
+            if target == path:
+                opened.append(target)
+
+            return real(target, *a, **kw)
+
+        with unittest.mock.patch.object(builtins, "open", counting):
+            bigfile.decide(path, A_TIGHT_BUDGET, **decide_kwargs)
+
+        return len(opened)
+
+    def test_a_blocking_decision_opens_it_exactly_once(self):
+        path = a_file_of_lines(4_000, 100)
+        self.assertEqual(self._opens_during({"read_lines": 4_000}, path), 1)
+
+    def test_an_allowed_decision_never_opens_it_at_all(self):
+        """The common path is "small file, allow", and it must not pay even 8 KB of I/O."""
+        path = a_file_of_lines(10, 100)
+        self.assertEqual(self._opens_during({}, path), 0)
+
+
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                 "root reads a mode-000 file anyway, so the probe would prove nothing")
+class TestAnUnreadableFileStillGetsAnAnswer(unittest.TestCase):
+    """The property Task 2 established by execution, kept explicit now that the price also
+    has a half that DOES read: `cost_of` still goes through `stat` alone, and `decide` still
+    answers instead of raising when the file cannot be opened."""
+
+    def _unreadable(self, size):
+        path = a_file(size)
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o600)
+
+        return path
+
+    def test_cost_of_still_never_opens_the_file(self):
+        self.assertEqual(bigfile.cost_of(self._unreadable(4_000)), 1_000)
+
+    def test_decide_allows_it_rather_than_raising(self):
+        v = bigfile.decide(self._unreadable(400_000), A_TIGHT_BUDGET, read_lines=50)
+        self.assertFalse(v.block, "a file we cannot even sample is one we cannot advise on")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

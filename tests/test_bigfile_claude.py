@@ -495,5 +495,81 @@ class TestTheCommonPathNeverLoadsTheNetworkModule(unittest.TestCase):
                         "the control failed: the probe cannot tell loaded from not loaded")
 
 
+def a_file_of_lines(count: int, width: int) -> str:
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(("y" * (width - 1) + "\n") * count)
+
+    return path
+
+
+def a_read_payload_with(path: str, transcript: str, **tool_input) -> str:
+    payload = json.loads(a_read_payload(path, transcript))
+    payload["tool_input"].update(tool_input)
+
+    return json.dumps(payload)
+
+
+#: 3.2 MB in 8,000 lines of 400 bytes. Sized so the DEFAULT read blocks: the host stops at
+#: 2,000 lines, which is ~800,000 bytes — 200,000 tokens against the 158,400 that
+#: ASSISTANT's 604,023-of-1M budget leaves as the share ceiling. Fifty of those lines are
+#: ~5,100 tokens, and nothing blocks.
+A_BIG_MANY_LINED_FILE = (8_000, 400)
+
+
+class TestThePriceFollowsTheRequestsLimit(unittest.TestCase):
+    """`Read(a_684KB_file, limit=50)` used to be priced at the whole file and blocked, when
+    the read loads about 500 tokens. Blocking on a number that is simply wrong is the one
+    failure this guard must never produce."""
+
+    def test_a_limited_read_is_allowed_where_the_whole_file_would_block(self):
+        path = a_file_of_lines(*A_BIG_MANY_LINED_FILE)
+        transcript = a_transcript([ASSISTANT])
+        spy = Spy(set())
+        self.assertNotEqual(run_main(a_read_payload(path, transcript), spy), "",
+                            "the control: without a limit this file must still block")
+        spy = Spy(set())
+        self.assertEqual(run_main(a_read_payload_with(path, transcript, limit=50), spy), "")
+        self.assertEqual(spy.calls, 0, "an allowed read must not pay for the ids either")
+
+    def test_a_limit_bigger_than_the_file_still_blocks(self):
+        """The case the simpler "any explicit limit allows" rule would have got wrong."""
+        path = a_file_of_lines(*A_BIG_MANY_LINED_FILE)
+        out = run_main(a_read_payload_with(path, a_transcript([ASSISTANT]), limit=1_000_000),
+                       Spy(set()))
+        self.assertIn("docs_index", json.loads(out)["hookSpecificOutput"]
+                                        ["permissionDecisionReason"])
+
+    def test_both_passes_of_decide_are_given_the_ceiling(self):
+        """Dropping `read_lines=` from the SECOND call would leave the block message quoting
+        a price the decision was not made at. Assert the argument, not just the outcome."""
+        seen = []
+        real = adapter.bigfile.decide
+
+        def recording(path, budget, **kw):
+            seen.append(kw)
+
+            return real(path, budget, **kw)
+
+        path = a_file_of_lines(*A_BIG_MANY_LINED_FILE)
+        with unittest.mock.patch.object(adapter.bigfile, "decide", recording):
+            run_main(a_read_payload_with(path, a_transcript([ASSISTANT]), limit=3_000),
+                     Spy(set()))
+        self.assertEqual(len(seen), 2, "the two-pass order is what this rides on")
+        for call in seen:
+            self.assertEqual(call.get("read_lines"), 3_000,
+                             "a limit that still blocks: it has to reach BOTH calls, or "
+                             "the message quotes a price the decision was not made at")
+
+    def test_a_request_without_a_limit_uses_the_hosts_own_default(self):
+        self.assertEqual(adapter._read_lines({}), adapter.DEFAULT_READ_LINES)
+
+    def test_a_malformed_limit_falls_back_instead_of_raising(self):
+        for bad in ("many", None, 0, -3, [1]):
+            with self.subTest(limit=bad):
+                self.assertEqual(adapter._read_lines({"limit": bad}),
+                                 adapter.DEFAULT_READ_LINES)
+
+
 if __name__ == "__main__":
     unittest.main()

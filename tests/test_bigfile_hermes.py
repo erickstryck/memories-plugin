@@ -684,5 +684,78 @@ class TestTheCommonPathNeverLoadsTheNetworkModule(unittest.TestCase):
                         "the control failed: the probe cannot tell loaded from not loaded")
 
 
+def a_file_of_lines(count: int, width: int) -> str:
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(("y" * (width - 1) + "\n") * count)
+
+    return path
+
+
+def a_read_payload_with(path: str, session: str = "s1", **tool_input) -> str:
+    payload = json.loads(a_read_payload(path, session))
+    payload["tool_input"].update(tool_input)
+
+    return json.dumps(payload)
+
+
+#: 4,000 lines of 400 bytes. Against SHARE_ONLY's 60,402 used of a 100,000 window, one
+#: default read (the ~100k-char truncation, which bites before the 2,000-line ceiling here)
+#: is 25,000 tokens against a 15,839 share ceiling — a block. Fifty lines are ~5,100.
+A_BIG_MANY_LINED_FILE = (4_000, 400)
+
+
+class TestThePriceFollowsWhatOneReadLoads(unittest.TestCase):
+    """`read_file` truncates at ~100k chars and takes a `limit`; pricing the whole file
+    charged a limited read for bytes it never loads, and blocking on a wrong number is the
+    one failure this guard must not produce."""
+
+    def test_a_limited_read_is_allowed_where_the_default_read_would_block(self):
+        chars, _ = SHARE_ONLY
+        db = a_session_using(chars)
+        path = a_file_of_lines(*A_BIG_MANY_LINED_FILE)
+        with unittest.mock.patch.object(adapter, "state_db_path", lambda: db):
+            code, out = run_main(a_read_payload(path), Spy(set()))
+            self.assertEqual(code, adapter.BLOCK_EXIT_CODE,
+                             "the control: unlimited, this read must still block")
+            spy = Spy(set())
+            self.assertEqual(run_main(a_read_payload_with(path, limit=50), spy), (0, ""))
+        self.assertEqual(spy.calls, 0, "an allowed read must not pay for the ids either")
+
+    def test_the_char_ceiling_prices_a_read_that_asks_for_every_line(self):
+        """`limit=1000000` is the whole file, and the whole file is not what one call
+        loads: the ~100k-char truncation still caps it. Both ceilings, one rule."""
+        chars, _ = SHARE_ONLY
+        db = a_session_using(chars)
+        seen = []
+        real = adapter.bigfile.decide
+
+        def recording(path, budget, **kw):
+            seen.append(kw)
+
+            return real(path, budget, **kw)
+
+        path = a_file_of_lines(*A_BIG_MANY_LINED_FILE)
+        with unittest.mock.patch.object(adapter, "state_db_path", lambda: db), \
+             unittest.mock.patch.object(adapter.bigfile, "decide", recording):
+            code, out = run_main(a_read_payload_with(path, limit=1_000_000), Spy(set()))
+        self.assertEqual(code, adapter.BLOCK_EXIT_CODE)
+        self.assertEqual(len(seen), 2, "the two-pass order is what this rides on")
+        for call in seen:
+            self.assertEqual(call.get("read_lines"), 1_000_000)
+            self.assertEqual(call.get("read_bytes"), adapter.READ_CHAR_CEILING)
+        self.assertIn("25,000 tokens", json.loads(out)["reason"],
+                      "the message must quote the price the decision was made at")
+
+    def test_a_request_without_a_limit_uses_the_hosts_own_default(self):
+        self.assertEqual(adapter._read_lines({}), adapter.DEFAULT_READ_LINES)
+
+    def test_a_malformed_limit_falls_back_instead_of_raising(self):
+        for bad in ("many", None, 0, -3, [1]):
+            with self.subTest(limit=bad):
+                self.assertEqual(adapter._read_lines({"limit": bad}),
+                                 adapter.DEFAULT_READ_LINES)
+
+
 if __name__ == "__main__":
     unittest.main()

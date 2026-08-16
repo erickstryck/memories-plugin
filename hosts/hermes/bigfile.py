@@ -83,6 +83,34 @@ BLOCK_EXIT_CODE = 2
 FLOOR_PCT = env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
 SHARE_PCT = env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
 
+#: What ONE `read_file` can put in the context, measured in the installed v0.20.1:
+#: `_DEFAULT_MAX_READ_CHARS = 100_000` (`tools/file_tools.py:65`, applied through
+#: `_get_max_read_chars`) and a line ceiling of 2000 that is both the schema's default and
+#: its maximum. Two ceilings, and the price takes the smaller of what they allow and what
+#: the file holds — pricing the whole file made a limited read cost what it never loads,
+#: which is a block based on a wrong number, the one failure this guard must not produce.
+#:
+#: `file_read_max_chars` in config.yaml can RAISE the char budget. An operator who raises it
+#: makes this number too small, which under-prices, which lets a read through — the safe
+#: direction, and the one this design already accepts everywhere else.
+READ_CHAR_CEILING = 100_000
+DEFAULT_READ_LINES = 2000
+
+
+def _read_lines(tool_input: dict) -> int:
+    """How many lines this particular request can pull.
+
+    A malformed `limit` falls back to the default rather than raising: `main()` would turn a
+    raise into an allow anyway, but an allow decided by a typo is not a decision.
+    """
+    try:
+        limit = int(tool_input.get("limit") or 0)
+    except (TypeError, ValueError):
+        return DEFAULT_READ_LINES
+
+    return limit if limit > 0 else DEFAULT_READ_LINES
+
+
 #: Short on purpose: hermes writes to this database live, and this runs before every read.
 #: It is the ceiling on how long a locked database may cost us before we fail open.
 SQLITE_TIMEOUT_S = 0.5
@@ -183,7 +211,8 @@ def escape_requested(db_path: str, session_id: str) -> bool:
 def _run() -> str:
     """The reason to block with, or "" to allow. Prints nothing: emission belongs to main()."""
     data = json.load(sys.stdin)
-    path = (data.get("tool_input") or {}).get("path") or ""
+    tool_input = data.get("tool_input") or {}
+    path = tool_input.get("path") or ""
     session_id = data.get("session_id") or ""
     db_path = state_db_path()
     if not path or not session_id:
@@ -196,7 +225,9 @@ def _run() -> str:
     budget = budget_from(db_path, session_id, lambda model: windows.window_for(model, cfg))
 
     # PASS ONE: no `indexed_ids`, no network. This is the path every read takes.
-    verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT)
+    verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
+                             read_lines=_read_lines(tool_input),
+                             read_bytes=READ_CHAR_CEILING)
     if not verdict.block:
         return ""
 
@@ -213,7 +244,9 @@ def _run() -> str:
     from core.inventory import indexed_ids
 
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
-                             floor_pct=FLOOR_PCT, share_pct=SHARE_PCT)
+                             floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
+                             read_lines=_read_lines(tool_input),
+                             read_bytes=READ_CHAR_CEILING)
 
     return verdict.reason if verdict.block else ""
 
