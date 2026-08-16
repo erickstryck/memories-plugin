@@ -84,5 +84,46 @@ class TestTheNumbersInTheMessage(unittest.TestCase):
         self.assertNotIn("≈", v.reason)
 
 
+from core import docs as core_docs
+
+
+class TestSpecialCases(unittest.TestCase):
+    def test_a_binary_file_is_allowed_because_indexing_it_is_not_an_option(self):
+        """`docs_index` slices TEXT. Telling the model to index a binary is wrong advice,
+        and blocking without an alternative is just a wall."""
+        fd, path = tempfile.mkstemp(suffix=".bin")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(b"\x00\x01\x02" * 400_000)
+        v = bigfile.decide(path, Budget(window=200_000, used=190_000, exact=True))
+        self.assertFalse(v.block)
+
+    def test_a_text_file_is_indexable(self):
+        self.assertTrue(bigfile.is_indexable(a_file(100)))
+
+    def test_an_already_indexed_file_is_told_to_SEARCH_not_to_reindex(self):
+        """Reindexing 258 chunks the archive already holds is waste, and the model would
+        do it because the message told it to."""
+        path = a_file(4 * 171_000)
+        known = {core_docs.doc_id_for(path)}
+        v = bigfile.decide(path, Budget(window=1_000_000, used=604_023, exact=True),
+                           indexed_ids=known)
+        self.assertTrue(v.block)
+        self.assertIn("already indexed", v.reason)
+        self.assertIn(core_docs.doc_id_for(path), v.reason)
+
+    def test_a_file_not_yet_indexed_is_told_to_INDEX(self):
+        path = a_file(4 * 171_000)
+        v = bigfile.decide(path, Budget(window=1_000_000, used=604_023, exact=True),
+                           indexed_ids=set())
+        self.assertTrue(v.block)
+        self.assertIn("docs_index", v.reason)
+
+    def test_the_message_names_the_escape(self):
+        """A block with no way out is a cage. The message has to carry its own key."""
+        path = a_file(4 * 171_000)
+        v = bigfile.decide(path, Budget(window=1_000_000, used=604_023, exact=True))
+        self.assertIn("--full", v.reason)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

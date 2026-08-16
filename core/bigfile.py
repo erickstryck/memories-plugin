@@ -42,6 +42,29 @@ class Verdict:
     free: int
 
 
+#: Enough bytes to catch a NUL without paying for the file.
+_SNIFF_BYTES = 8192
+
+#: The literal the user types to force the read through. A marker and not a natural phrase
+#: on purpose: "read it whole" false-positives easily ("read the whole paragraph"), and
+#: `--full` is only ever typed deliberately.
+ESCAPE_MARKER = "--full"
+
+
+def is_indexable(path: str) -> bool:
+    """Whether `docs_index` could do anything with this file.
+
+    A NUL byte in the first few KB is the classic text/binary test, and it is enough: the
+    question is not "is this valid UTF-8" but "would slicing it into chunks produce
+    something searchable".
+    """
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" not in fh.read(_SNIFF_BYTES)
+    except OSError:
+        return False
+
+
 def cost_of(path: str) -> int:
     """Tokens the file would cost, from its SIZE — the file is never read.
 
@@ -53,9 +76,17 @@ def cost_of(path: str) -> int:
         return 0
 
 
-def decide(path: str, budget: Budget, *,
+def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
            floor_pct: float = FLOOR_PCT, share_pct: float = SHARE_PCT) -> Verdict:
-    """Block when either criterion fires, whichever comes first."""
+    """Block when either criterion fires, whichever comes first.
+
+    `indexed_ids` is a set of doc ids ALREADY FETCHED by the caller — this function never
+    reaches Qdrant itself. Knowing whether a file is indexed costs a round trip, and this
+    guard runs before every file read; the common case is "small file, allow", so paying
+    that round trip up front would tax the path that never needed it. The adapter fetches
+    `indexed_ids` only after a first `decide(..., indexed_ids=None)` call has already said
+    it would block — which is rare — and calls again just to enrich the message.
+    """
     cost = cost_of(path)
     free = max(0, budget.window - budget.used)
     after = budget.used + cost
@@ -70,9 +101,28 @@ def decide(path: str, budget: Budget, *,
     if not (floor_hit or share_hit):
         return Verdict(False, "", cost, free)
 
+    if not is_indexable(path):
+        # Nothing to offer instead, so blocking would only take away an option.
+        return Verdict(False, "", cost, free)
+
     about = "≈" if not budget.exact else ""
-    pct = int(round(cost / free * 100)) if free else 100
-    reason = (f"reading this file would cost {about}{cost:,} tokens, "
-              f"{pct}% of the {about}{free:,} you have left")
+    if free:
+        pct = int(round(cost / free * 100))
+        left = f"{pct}% of the {about}{free:,} you have left"
+    else:
+        # free == 0: "100% of the 0 you have left" is grammatically odd and no test pins
+        # it, but it is still confusing — there is no "0 you have left" to take a share of.
+        # Say plainly that nothing remains instead of forcing a percentage out of it.
+        left = "nothing left in the window"
+    head = f"reading this file would cost {about}{cost:,} tokens, {left}"
+
+    from core.docs import doc_id_for          # local: keeps the pure path import-light
+    doc_id = doc_id_for(path)
+    if indexed_ids and doc_id in indexed_ids:
+        what = f"it is already indexed as {doc_id} — search it with docs_search"
+    else:
+        what = "index it with docs_index and search the parts that answer"
+
+    reason = f"{head}. Instead, {what}. To read it anyway, put {ESCAPE_MARKER} in your request."
 
     return Verdict(True, reason, cost, free)
