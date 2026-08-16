@@ -191,6 +191,33 @@ Abre o `state.db` **somente-leitura, com timeout curto**, soma as mensagens ativ
 último turno do usuário, chama `decide`, e devolve `{"decision":"block","reason":…}` com
 **exit 2**.
 
+### Divergências declaradas entre os dois adaptadores
+
+`core/bigfile.py` decide igual para os dois. O que difere está nos adaptadores, e **cada
+diferença abaixo é FORÇADA pelo host** — nenhuma é preferência de quem escreveu. Esta seção
+mora no spec, e não num relatório de task, porque `.superpowers/sdd/` é gitignored: a tabela
+de onde se compara os dois hosts não pode desaparecer no próximo clone.
+
+A tabela não é decorativa: `tests/test_host_equivalence.py::TestEveryDivergenceOfTheGuardsIsDeclaredInTheSPEC`
+DERIVA das duas fontes as constantes de módulo, as variáveis de ambiente lidas e as chaves de
+`tool_input`, e exige que tudo que exista em um só lado esteja nomeado aqui. Acrescentar um teto
+a um adaptador sem escrever a linha correspondente deixa a suíte vermelha.
+
+| O quê | `hooks/bigfile.py` (claude-code) | `hosts/hermes/bigfile.py` | O que força |
+|---|---|---|---|
+| Fonte do orçamento | cauda do transcript JSONL, bloco `usage` MEDIDO | `state.db`, soma dos corpos de `messages` com `(len+3)//4` | medido: `messages.token_count` é NULL em 59 de 59 linhas do banco vivo, e `session_model_usage` é cumulativo, não o contexto atual |
+| `Budget.exact` | `True` | `False` — a mensagem sai com `≈` | a estimativa SUBESTIMA (não vê system prompt, ferramentas, skills, nem as colunas irmãs `reasoning`/`tool_calls`/`api_content`); número que parece preciso e é palpite é pior que palpite que se declara |
+| Protocolo de bloqueio | `{"hookSpecificOutput": {…"permissionDecision": "deny"…}}` em stdout, exit 0 | `{"decision":"block","reason":…}` em stdout **e** `BLOCK_EXIT_CODE` = 2 | contratos de host diferentes, ambos lidos do binário/fonte instalado; no hermes os dois juntos porque stdout truncado ainda bloqueia pelo código e código ilegível ainda bloqueia pela razão |
+| Chave do caminho no payload | `tool_input.file_path` | `tool_input.path` | `agent/shell_hooks.py::_serialize_payload` renomeia `args`→`tool_input`, e `READ_FILE_SCHEMA` de `tools/file_tools.py` exige `path`. Ler a chave errada não é erro visível: o guarda não vê caminho nenhum e LIBERA tudo, calado |
+| Filtro de turno real do usuário | `userType=external` + `entrypoint=cli` + ausência de `toolUseResult` | nenhum | medido: no hermes o resultado de ferramenta é `role='tool'` (21 linhas no banco vivo) e as 11 linhas `role='user'` são todas humanas. No claude-code resultado de ferramenta e texto de skill injetado carregam `role=user`, e sem o filtro qualquer saída de ferramenta contendo `--full` destrancaria o guarda |
+| Como a leitura de contexto é limitada | `TAIL_BYTES` = 256 KB explícitos (o transcript desta sessão tinha 15,8 MB) | nenhum `LIMIT` no `select … where active=1`; apoia-se em o hermes virar `active=0` ao compactar | mesmo fim, mecanismos diferentes. NÃO é desempenho: medido a 100 MB de linhas `active=1` e ainda ~40 ms. É um invariante do host em que este arquivo se apoia sem verificar |
+| Teto de UMA leitura (o que entra em `decide`) | só `read_lines` (2000, lido do binário v2.1.233) | `read_lines` (2000) **e** `read_bytes` = `READ_CHAR_CEILING` = 100.000 | `tools/file_tools.py:65` (`_DEFAULT_MAX_READ_CHARS`) trunca por CARACTERES; o `Read` do claude-code não tem esse teto legível. **Consequência aceita, e NÃO é um caso de canto — foi medida:** os dois hosts só precificam igual quando UMA leitura carrega no máximo 100.000 caracteres, ou seja arquivo abaixo de ~100 KB, ou linhas com média abaixo de ~50 bytes. Acima disso o hermes está preso em 25.000 tokens e o claude-code não: 4.000 linhas de 100 B (400 KB) dão 202.271 contra 100.000, e 4.000 de 400 B dão 819.200 contra 100.000. Em quase todo arquivo grande o bastante para interessar à guarda os dois **podem decidir DIFERENTE**. É por isso que a equivalência se afirma como "mesmo `Budget` E mesmo CUSTO → mesmo veredito", nunca como "mesmo arquivo → mesmo veredito". Alinhar os tetos faria o teste passar mentindo sobre o host |
+| Localização do estado do host | nada: `transcript_path` vem no payload | `QCTX_HERMES_STATE_DB`, senão `HERMES_HOME`, senão `~/.hermes` | o hermes não põe o banco no payload; o caminho tem de ser resolvido, e `hermes_constants.py::get_hermes_home` é a resolução que o próprio host usa |
+| Timeout de I/O local | — | `SQLITE_TIMEOUT_S` = 0,5 s, com `mode=ro` | o hermes escreve no `state.db` AO VIVO e isto roda antes de cada leitura; um guarda que esperasse pelo lock seria uma interrupção auto-infligida. Do outro lado não há banco vivo nenhum |
+| Bootstrap de `sys.path` | não precisa: hooks rodam como processo próprio | `REPO_ROOT` inserido em `sys.path` no topo do módulo | o loader do hermes pré-executa cada `*.py` irmão ANTES do `__init__.py`, registrando em `sys.modules` primeiro e engolindo a falha em `logger.debug`; sem o bootstrap o provider inteiro não carrega e a única pista é uma linha de debug |
+| Knobs de sintonia (`QCTX_BIGFILE_FLOOR_PCT`, `QCTX_BIGFILE_SHARE_PCT`) | idênticos | idênticos | é a promessa ao deployer, e a varredura de knobs de `tests/test_hermes_provider.py::KNOB_SOURCES` cobre os dois arquivos para que continue verdadeira |
+| A decisão (`core.bigfile.decide`) | idêntica | idêntica | é o que a equivalência cobra, e a única camada em que ela é verdadeira |
+
 ### A palavra de escape
 
 Marcador literal, default `--full`, configurável. **Não** frase natural: *"leia inteiro"*

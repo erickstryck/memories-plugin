@@ -1327,5 +1327,151 @@ class TestBothHostsDegradeInTheSameWORDS(unittest.TestCase):
                              f"{label}: 'skipped' hides that the re-rank FAILED")
 
 
+# --- The two file-read guards, and where their differences are allowed to live -----------
+# `.superpowers/sdd/` is gitignored, so the divergence table that lived in a task report was
+# invisible to the next clone. These tests move the burden of proof: the table is in the
+# SPEC, and every difference the two adapters actually carry in their source must be NAMED
+# there. Derived from the sources, never restated here — a host-only constant added tomorrow
+# fails this instead of waiting for somebody to remember the table exists.
+import ast   # noqa: E402
+import re    # noqa: E402
+
+SPEC = REPO / "docs" / "superpowers" / "specs" / "2026-08-15-big-file-read-guard-design.md"
+CLAUDE_GUARD = REPO / "hooks" / "bigfile.py"
+HERMES_GUARD = REPO / "hosts" / "hermes" / "bigfile.py"
+
+#: The heading the derivations below read. Named, not guessed: if it is renamed, the guard
+#: on the guard below fails loudly instead of every check silently passing over "".
+DIVERGENCE_HEADING = "### Divergências declaradas entre os dois adaptadores"
+
+
+def divergence_section() -> str:
+    """The spec's declared-divergence section, heading to the next heading of any level."""
+    text = SPEC.read_text()
+    start = text.find(DIVERGENCE_HEADING)
+    if start < 0:
+        return ""
+    rest = text[start + len(DIVERGENCE_HEADING):]
+    end = re.search(r"^#{1,3} ", rest, re.M)
+
+    return rest[:end.start()] if end else rest
+
+
+def module_constants(path: Path) -> set:
+    """Module-level UPPER_CASE assignments — one adapter's host-forced settings.
+
+    Module level and not every assignment: what a host FORCES on the adapter is decided
+    once, at import, and that is exactly the set that must be explainable by the host.
+    """
+    return {t.id for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.Assign)
+            for t in node.targets
+            if isinstance(t, ast.Name) and t.id.isupper() and not t.id.startswith("_")}
+
+
+def env_names(path: Path) -> set:
+    """Environment variables one adapter READS — from the AST, not from a text scan.
+
+    A text scan reports the names quoted in prose too, and both files explain each other's
+    knobs in their docstrings; that would make every divergence look shared.
+    """
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        reads_env = (isinstance(f, ast.Name) and f.id in ("env", "env_num")) or (
+            isinstance(f, ast.Attribute) and f.attr == "get"
+            and isinstance(f.value, ast.Attribute) and f.value.attr == "environ")
+        if not reads_env:
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                    and re.fullmatch(r"[A-Z][A-Z0-9_]*", arg.value):
+                found.add(arg.value)
+
+    return found
+
+
+def tool_input_keys(path: Path) -> set:
+    """The keys one adapter pulls out of the host's `tool_input`."""
+    return set(re.findall(r'tool_input\.get\("([a-z_]+)"\)', path.read_text()))
+
+
+class TestEveryDivergenceOfTheGuardsIsDeclaredInTheSPEC(unittest.TestCase):
+    """The two file-read guards differ, and every difference is FORCED by its host.
+
+    That is a claim, and until now it lived in a task report under `.superpowers/sdd/`,
+    which is gitignored — so the one artefact a reader would compare the hosts from does
+    not survive a clone. The table moved to the spec, and these tests are what stop it
+    from drifting: the DIFFERENCES ARE DERIVED FROM THE TWO SOURCES, and each one must be
+    named in the spec's section. Add a ceiling to one adapter and this goes red naming it.
+
+    What this does NOT prove: that a row in the table is still true. A divergence removed
+    in code leaves a stale row, and no derivation from source can see prose that describes
+    something absent. The direction that matters is covered — silence is what costs the
+    next reader, not a leftover line.
+    """
+
+    def test_the_spec_has_the_section_at_all(self):
+        """The guard on the guard: every check below reads this section, and a section
+        that cannot be found is an empty string every `assertIn` passes over."""
+        section = divergence_section()
+        self.assertTrue(section.strip(), f"{DIVERGENCE_HEADING} is not in {SPEC.name}")
+        for name in ("hooks/bigfile.py", "hosts/hermes/bigfile.py"):
+            self.assertIn(name, section, "the section does not say which files it compares")
+
+    def test_the_derivations_see_both_adapters(self):
+        """The second guard on the guard: a derivation that came back empty would make
+        every difference below the empty set, and prove nothing at all."""
+        for label, fn in (("constants", module_constants), ("env names", env_names),
+                          ("tool_input keys", tool_input_keys)):
+            for path in (CLAUDE_GUARD, HERMES_GUARD):
+                with self.subTest(derivation=label, source=path.name):
+                    self.assertTrue(fn(path), f"the {label} scan went blind on {path}")
+
+    def test_every_host_only_constant_is_explained_in_the_spec(self):
+        """`TAIL_BYTES` on one side and `READ_CHAR_CEILING`, `SQLITE_TIMEOUT_S`,
+        `BLOCK_EXIT_CODE`, `REPO_ROOT` on the other are not preferences — each exists
+        because its host leaves no other way. The spec is where that is said."""
+        section = divergence_section()
+        claude, hermes = module_constants(CLAUDE_GUARD), module_constants(HERMES_GUARD)
+        only = (claude - hermes) | (hermes - claude)
+        self.assertTrue(only, "the two adapters suddenly share every constant — check the "
+                              "derivation before believing it")
+        for name in sorted(only):
+            with self.subTest(constant=name):
+                self.assertIn(name, section,
+                              f"{name} exists in only one guard and the spec never says "
+                              f"why the other does not need it")
+
+    def test_every_host_only_environment_variable_is_explained_in_the_spec(self):
+        """The knobs must be the SAME on both hosts — that is what a deployer is promised.
+        One that is not shared is a promise with an exception, and an undocumented
+        exception is the deployer discovering it by having it not work."""
+        section = divergence_section()
+        claude, hermes = env_names(CLAUDE_GUARD), env_names(HERMES_GUARD)
+        self.assertEqual(claude - hermes, set(),
+                         "claude-code reads an environment variable hermes does not; if "
+                         "that is deliberate it belongs in the table, not in a surprise")
+        for name in sorted(hermes - claude):
+            with self.subTest(env=name):
+                self.assertIn(name, section, f"{name} is read on one host only")
+
+    def test_the_payload_key_the_two_hosts_disagree_on_is_declared(self):
+        """The same read arrives as `file_path` on one host and `path` on the other, and a
+        guard that reads the wrong key sees no path and allows EVERYTHING — silently."""
+        section = divergence_section()
+        claude, hermes = tool_input_keys(CLAUDE_GUARD), tool_input_keys(HERMES_GUARD)
+        differing = (claude - hermes) | (hermes - claude)
+        self.assertTrue(differing, "both guards now read the same tool_input keys — either "
+                                   "a host changed or the derivation broke")
+        for key in sorted(differing):
+            with self.subTest(key=key):
+                self.assertIn(f"tool_input.{key}", section,
+                              f"the guards disagree on tool_input.{key} and the spec is "
+                              f"silent about it")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
