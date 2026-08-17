@@ -37,6 +37,28 @@ CSV, an extensive code file, a long report.
 Say so in one line when you index instead of reading, so the user knows you do not have
 the whole file in context.
 
+## When the read comes back refused
+
+A `Read` (`read_file` on hermes) can be **refused** with a message about what it would cost
+in context. That is this plugin's big-file guard — `hooks/bigfile.py` on claude-code,
+`hosts/hermes/bigfile.py` on hermes — and not a broken tool, a missing file or a permission
+problem. Retrying the same call returns the same refusal.
+
+The message names the one thing to do instead: index the file and search it, or search it
+because it is already indexed. Do that, and say in one line that you did.
+
+Three things worth knowing so you do not work around it by accident:
+
+- It prices **one read**, not the file — so a bounded read (`offset`/`limit`) of a region a
+  search pointed you at is charged for what it actually loads, and normally passes.
+- Paging through the whole file in slices is not a way around it: every slice you load adds
+  to the context in use, and the guard starts refusing as it fills.
+- `--full` is the **user's** escape word. It is read from the last user turn only, so
+  writing it in your own output does nothing at all. If the file really has to be read
+  whole, say why and let the user decide. The word is configurable
+  (`QCTX_BIGFILE_ESCAPE`), and the refusal message always names the one in force — quote it
+  from there rather than from here.
+
 ## Searching
 
 ```bash

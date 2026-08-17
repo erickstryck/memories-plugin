@@ -41,6 +41,18 @@ DOTENV="$HERMES_HOME/.env"
 PLUGINS="$HERMES_HOME/plugins"
 LINK="$PLUGINS/memories"
 TARGET="$ROOT/hosts/hermes"
+ALLOWLIST="$HERMES_HOME/shell-hooks-allowlist.json"
+# The big-file read guard, which is NOT installed by the symlink: the memory provider is
+# discovered by directory scan, a shell hook is named by absolute command in config.yaml.
+# DERIVED from $ROOT like every other path here — a path written into the script is the
+# path of whoever wrote it, and this one has to survive a clone anywhere.
+#
+# The path is double-quoted inside the YAML value because hermes runs the command through
+# `shlex.split(os.path.expanduser(command))` (`agent/shell_hooks.py`), so a checkout under a
+# directory with a space in it would otherwise be split into two arguments. `hooks/hooks.json`
+# quotes the sibling hook for the same reason.
+GUARD="$TARGET/bigfile.py"
+GUARD_CMD="python3 \"$GUARD\""
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 usage() {
@@ -238,14 +250,18 @@ fi
 say ""
 say "=== configuration ==="
 
-read_memory_key() {
-  python3 - "$CONFIG" "$1" <<'PY' 2>/dev/null || true
+read_memory_key() { read_key memory "$1"; }
+
+# $1 is the top-level block, $2 the key under it. `memory:` is not the only block this
+# script has to read: the guard's fallback window is resolved from `model.default`.
+read_key() {
+  python3 - "$CONFIG" "$1" "$2" <<'PY' 2>/dev/null || true
 import re, sys
 try:
     src = open(sys.argv[1], encoding="utf-8").read()
 except OSError:
     sys.exit(0)
-want, inside, indent = sys.argv[2], False, None
+block, want, inside, indent = sys.argv[2], sys.argv[3], False, None
 #: The LAST direct child wins, not the first. That is what a YAML parser resolves a duplicate
 #: key to (PyYAML keeps the last and does not complain), and hermes reads this file with
 #: yaml.safe_load. Reading the first would let a file holding BOTH
@@ -253,7 +269,7 @@ want, inside, indent = sys.argv[2], False, None
 #: which is exactly the corruption the post-write verification exists to catch.
 found = None
 for line in src.splitlines():
-    if re.match(r"^memory:\s*(#.*)?$", line):
+    if re.match(r"^%s:\s*(#.*)?$" % re.escape(block), line):
         inside = True
         continue
     if inside:
@@ -369,6 +385,237 @@ if [ -n "$current" ] && [ "$current" != memories ]; then
   fi
 fi
 
+# ------------------------------------------------------------- the big-file read guard
+say ""
+say "=== the big-file read guard ==="
+
+# The `hooks:` block, read the way hermes' own parser reads it. Measured in the installed
+# v0.20.1: `agent/shell_hooks.py::_parse_hooks_block` opens with
+# `if not isinstance(hooks_cfg, dict): return []` and then iterates `hooks_cfg.items()` as
+# EVENT NAME -> LIST of entries. A block written as a sequence of `{event, command}` mappings
+# — the shape that reads naturally and that this feature's plan specified — parses to zero
+# hooks and logs NOTHING on that path. Which is why the shape is reported and never assumed.
+read_hooks() {
+  python3 - "$CONFIG" <<'PY' 2>/dev/null || true
+import re, sys
+
+
+def unquote(value):
+    """Only a value quoted at BOTH ends. The command this script writes ends in a quote
+    (`python3 "/path/bigfile.py"`) and a naive strip would eat it, so a registered guard
+    would never compare equal to the one we would install."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+
+    return value
+
+
+try:
+    src = open(sys.argv[1], encoding="utf-8").read()
+except OSError:
+    print("shape\tnone")
+    raise SystemExit
+
+lines = src.splitlines()
+start = None
+for i, line in enumerate(lines):
+    if re.match(r"^hooks:\s*(#.*)?$", line):
+        start = i                  # the LAST one wins, as PyYAML resolves a duplicate key
+if start is None:
+    print("shape\tnone")
+    raise SystemExit
+
+body = []
+for line in lines[start + 1:]:
+    if line.strip() and not line[0].isspace():
+        break
+    body.append(line)
+
+first = next((l for l in body if l.strip()), "")
+if re.match(r"^\s*-\s", first):
+    print("shape\tseq")            # hermes reads no hook at all from this
+    raise SystemExit
+print("shape\tmap")
+
+#: A DIRECT child of `hooks:` and nothing deeper. `hooks:` has reserved sub-keys that are
+#: not events — `outbound` and `output_spill`, skipped by name in `_parse_hooks_block` —
+#: and a `pre_tool_call:` under one of those is somebody else's configuration. Matching it
+#: at any indent would report a guard where hermes reads none, and (in the rewriter below)
+#: install one into a section nothing looks at.
+child = len(first) - len(first.lstrip())
+event = None
+for i, line in enumerate(body):
+    m = re.match(r"^(\s+)pre_tool_call:\s*(#.*)?$", line)
+    if m and len(m.group(1)) == child:
+        event = i
+if event is None:
+    # `pre_tool_call: <scalar>` is a different failure from absent: hermes logs
+    # "hooks.%s must be a list of hook definitions" and registers nothing.
+    scalar = any(len(m.group(1)) == child for m
+                 in (re.match(r"^(\s+)pre_tool_call:\s*\S", l) for l in body) if m)
+    print("event\tnotalist" if scalar else "event\tnone")
+    raise SystemExit
+
+indent = len(body[event]) - len(body[event].lstrip())
+region = []
+for line in body[event + 1:]:
+    if line.strip() and len(line) - len(line.lstrip()) <= indent:
+        break
+    region.append(line)
+if not any(re.match(r"^\s*-\s", l) for l in region if l.strip()):
+    print("event\tnotalist" if any(l.strip() for l in region) else "event\tempty")
+    raise SystemExit
+print("event\tlist")
+
+entries = []
+for line in region:
+    item = re.match(r"^\s*-\s*(.*)$", line)
+    if item:
+        entries.append({})
+        rest = item.group(1)
+    else:
+        rest = line.strip()
+    pair = re.match(r"^([A-Za-z0-9_]+):\s*(.*?)\s*$", rest)
+    if entries and pair:
+        entries[-1][pair.group(1)] = unquote(pair.group(2))
+for entry in entries:
+    print("entry\t%s\t%s" % (entry.get("matcher") or "", entry.get("command") or ""))
+PY
+}
+
+# Which entry is OURS: any pre_tool_call hook running a `hosts/hermes/bigfile.py`, whatever
+# checkout it points at — a guard pointing at a deleted worktree is the failure worth
+# naming, and matching only on the exact command would report it as "not installed".
+guard_state() {
+  hooks_out="$(read_hooks)"
+  hooks_shape="$(printf '%s\n' "$hooks_out" | awk -F'\t' '$1=="shape"{print $2}')"
+  guard_entry="$(printf '%s\n' "$hooks_out" \
+                 | awk -F'\t' '$1=="entry" && index($3, "hosts/hermes/bigfile.py"){print; exit}')"
+  guard_matcher="$(printf '%s' "$guard_entry" | cut -f2)"
+  guard_cmd="$(printf '%s' "$guard_entry" | cut -f3)"
+}
+guard_state
+
+if [ "$hooks_shape" = seq ]; then
+  warn "the hooks: block in $CONFIG is a LIST, and hermes reads no hook at all from it."
+  say  "        _parse_hooks_block wants a MAPPING of event name to a list of entries and"
+  say  "        returns [] for anything else, silently. Fix it by hand, in this shape:"
+  say  "            hooks:"
+  say  "              pre_tool_call:"
+  say  "                - matcher: read_file"
+  say  "                  command: $GUARD_CMD"
+elif [ -z "$guard_entry" ]; then
+  note "big-file guard: not registered -> pre_tool_call, matcher read_file, $GUARD"
+elif [ "$guard_cmd" != "$GUARD_CMD" ]; then
+  warn "the big-file guard is registered, but it runs $guard_cmd"
+  say  "        This checkout would install $GUARD_CMD"
+  say  "        Nothing here rewrites an existing hook entry — an entry you wrote is yours."
+  say  "        Edit it by hand if that path is stale: a guard pointing at a removed"
+  say  "        worktree fails open on every read and says nothing."
+else
+  ok "big-file guard registered: pre_tool_call -> $GUARD"
+fi
+
+if [ -n "$guard_entry" ] && [ "$hooks_shape" != seq ]; then
+  # The matcher is not a detail, and this is measured: `write_file` and `patch` take a
+  # `path` argument too, so a matcher-less pre_tool_call hook gets an opinion about WRITES,
+  # which a read-cost guard has no business blocking. `ShellHookSpec.matches` compiles it as
+  # a regex and falls back to literal equality, so `read_file` means exactly that tool.
+  if [ -z "$guard_matcher" ]; then
+    warn "the big-file guard is registered with no matcher — it will also see write_file and"
+    say  "        patch, which take a \`path\` too, and it has no business blocking a WRITE."
+  elif [ "$guard_matcher" != read_file ]; then
+    warn "the big-file guard's matcher is '$guard_matcher', not read_file — it will fire on"
+    say  "        every tool whose name that regex matches, write_file and patch included."
+  fi
+
+  # Registered is not wired: `register_from_config` skips any hook whose (event, command)
+  # pair is missing from the allowlist unless a TTY approves it, and a gateway hermes has no
+  # TTY. This script does NOT write that file — it records the user's consent, and forging
+  # consent to run a command is not a thing an install script gets to do.
+  if [ -f "$ALLOWLIST" ] && [ -n "$(python3 - "$ALLOWLIST" "$guard_cmd" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except Exception:                      # noqa: BLE001 - absence and garbage read alike
+    raise SystemExit
+approvals = data.get("approvals") if isinstance(data, dict) else None
+for entry in approvals or []:
+    if (isinstance(entry, dict) and entry.get("event") == "pre_tool_call"
+            and entry.get("command") == sys.argv[2]):
+        print("yes")
+        break
+PY
+)" ]; then
+    ok "the guard command is approved in shell-hooks-allowlist.json"
+  else
+    warn "the guard command is NOT in $ALLOWLIST yet, so hermes will ask once at the TTY"
+    say  "        before it runs. A hermes with no TTY (systemd, the gateway) skips the hook"
+    say  "        instead, with only a log line: start one interactively once and approve it,"
+    say  "        or set hooks_auto_accept: true / HERMES_ACCEPT_HOOKS=1."
+  fi
+fi
+
+# WHETHER THE WINDOW IS DECLARED, and this is the half that decides whether the guard can
+# do anything at all. `core/windows.py` holds CEILINGS per model NAME — the largest window
+# any variant of that name can have — because the same bare name ships as a 200k and a 1M
+# variant and nothing readable at hook time tells them apart. Erring large only makes the
+# guard sleep; erring small would make it block on a guess, the one failure this feature
+# must never produce. So: inert until configured is the accepted cost, and it is only
+# acceptable while it is VISIBLE. A silently inert guard is indistinguishable from a working
+# one, and the user finds out on the day it did not protect them.
+model_default="$(read_key model default)"
+window_out="$(python3 - "$ROOT" "$model_default" <<'PY' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+model = sys.argv[2] if len(sys.argv) > 2 else ""
+
+
+def declared(**kwargs):
+    """0 for anything unreadable: `load()` raises on a malformed number, and this line is a
+    report, not a gate."""
+    try:
+        import core
+        return int(getattr(core.load(**kwargs), "context_window", 0) or 0)
+    except Exception:                  # noqa: BLE001 - reported as "not declared"
+        return 0
+
+
+try:
+    from core.windows import MODEL_WINDOWS
+except Exception:                      # noqa: BLE001
+    MODEL_WINDOWS = {}
+print(declared())
+print(declared(env={}))
+print(int(MODEL_WINDOWS.get(model.strip(), 0)))
+print(", ".join(sorted(MODEL_WINDOWS)))
+PY
+)"
+win_shell="$(printf '%s\n' "$window_out" | sed -n 1p)"
+win_file="$(printf '%s\n' "$window_out" | sed -n 2p)"
+win_ceiling="$(printf '%s\n' "$window_out" | sed -n 3p)"
+win_table="$(printf '%s\n' "$window_out" | sed -n 4p)"
+
+if [ "${win_shell:-0}" != 0 ]; then
+  ok "context window declared: $win_shell tokens — the guard measures every read against it"
+  if [ "${win_file:-0}" = 0 ]; then
+    warn "…but only in this shell. It is not a secret, so put it where a systemd/gateway"
+    say  "        hermes will find it:   qctx config set context-window $win_shell"
+  fi
+elif [ "${win_ceiling:-0}" != 0 ]; then
+  warn "context_window is not declared, so the guard falls back to the ceiling for"
+  say  "        ${model_default:-<unset>}: $win_ceiling tokens, the LARGEST window any variant of that name"
+  say  "        can have. In a session smaller than that the guard stays nearly inert — it"
+  say  "        thinks there is room that is not there. Declare the real size to sharpen it:"
+  say  "            qctx config set context-window <tokens>   (or export QCTX_CONTEXT_WINDOW)"
+else
+  warn "context_window is not declared and no ceiling is known for model"
+  say  "        '${model_default:-<unset>}' — the window resolves to UNKNOWN, and an unknown window"
+  say  "        allows every read. The guard is installed and inert."
+  say  "        The table knows: ${win_table:-<empty>}"
+  say  "            qctx config set context-window <tokens>   (or export QCTX_CONTEXT_WINDOW)"
+fi
+
 if [ "$failed" -ne 0 ]; then
   say ""
   say "checks failed — nothing was changed."
@@ -380,6 +627,9 @@ say ""
 say "=== what changes ==="
 say "  $LINK -> $TARGET   (symlink; one source of truth)"
 say "  $CONFIG: memory.provider: ${current:-<unset>} -> memories"
+if [ -z "$guard_entry" ] && [ "$hooks_shape" != seq ]; then
+  say "  $CONFIG: hooks.pre_tool_call += matcher read_file -> $GUARD"
+fi
 say ""
 say "  UNCHANGED: every Qdrant collection, the 1423 points in hermes_memory, the"
 say "  ${current:-previous} provider's own directory (disabled by configuration, not deleted),"
@@ -491,6 +741,144 @@ else
   rm -f "$tmp"; fail "could not rewrite config.yaml — set memory.provider by hand"
 fi
 
+# INDEPENDENT again, and re-read rather than trusting the state the checks section saw: the
+# step above rewrote this same file.
+guard_state
+if [ "$hooks_shape" = seq ]; then
+  fail "the hooks: block is a LIST, so the big-file guard was NOT registered"
+  say  "        Rewriting that block into the mapping hermes parses would move every hook it"
+  say  "        holds, so this refuses instead. Add the entry by hand:"
+  say  "            hooks:"
+  say  "              pre_tool_call:"
+  say  "                - matcher: read_file"
+  say  "                  command: $GUARD_CMD"
+elif [ -n "$guard_entry" ] && [ "$guard_cmd" != "$GUARD_CMD" ]; then
+  warn "the big-file guard already runs $guard_cmd — left exactly as it is"
+else
+  tmp="$(mktemp)"
+  if python3 - "$CONFIG" "$GUARD_CMD" > "$tmp" <<'PY'
+import re, sys
+
+path, cmd = sys.argv[1], sys.argv[2]
+src = open(path, encoding="utf-8").read()
+lines = src.splitlines(keepends=True)
+
+
+def bare(line):
+    return line.rstrip("\n")
+
+
+def entry(item_indent):
+    """The entry hermes parses: an item of the list under an EVENT NAME key.
+
+    `timeout: 5` is deliberate and not decoration — `DEFAULT_TIMEOUT_SECONDS` is 60 in the
+    installed shell_hooks.py, and sixty seconds in front of every file read is a hang, not a
+    guard. Five is what `hooks/hooks.json` gives the same hook on the other host.
+
+    `fail_closed` is left at its default of false ON PURPOSE: this guard fails OPEN, and a
+    crashed guard must never be what stops someone reading a file.
+    """
+    return (f"{item_indent}- matcher: read_file\n"
+            f"{item_indent}  command: {cmd}\n"
+            f"{item_indent}  timeout: 5\n")
+
+
+def emit(text=None):
+    sys.stdout.write(text if text is not None else "".join(lines))
+    raise SystemExit
+
+
+start = None
+for i, line in enumerate(lines):
+    if re.match(r"^hooks:\s*(#.*)?$", bare(line)):
+        start = i                     # the LAST one, the one PyYAML would resolve to
+if start is None:
+    if lines and not lines[-1].endswith("\n"):
+        lines.append("\n")
+    lines.append("hooks:\n  pre_tool_call:\n" + entry("    "))
+    emit()
+
+end = start + 1
+while end < len(lines):
+    stripped = bare(lines[end])
+    if stripped.strip() and not stripped[0].isspace():
+        break
+    end += 1
+body = lines[start + 1:end]
+
+# Two shapes this refuses to touch rather than repair, and the reason is the same for both:
+# the repair would move or drop hooks the user wrote. Exit 3 is reported by the caller.
+first = bare(next((l for l in body if l.strip()), ""))
+if re.match(r"^\s*-\s", first):
+    sys.exit(3)                       # `hooks:` is a sequence
+
+# Only a DIRECT child of `hooks:` is an event list. `outbound:` and `output_spill:` are
+# reserved sub-sections there, and a `pre_tool_call:` nested under one of them belongs to
+# somebody else — appending to it would install the guard where hermes never looks and
+# leave every later check reporting success.
+child = re.match(r"^(\s*)", first).group(1)
+event = None
+for i, line in enumerate(body):
+    m = re.match(r"^(\s+)pre_tool_call:\s*(#.*)?$", bare(line))
+    if m and m.group(1) == child:
+        event = i
+    scalar = re.match(r"^(\s+)pre_tool_call:\s*\S", bare(line))
+    if scalar and scalar.group(1) == child:
+        sys.exit(3)                   # `pre_tool_call: <scalar>`
+if event is None:
+    lines[start + 1:start + 1] = [f"{child}pre_tool_call:\n" + entry(child + "  ")]
+    emit()
+
+indent = len(bare(body[event])) - len(bare(body[event]).lstrip())
+region = []
+for line in body[event + 1:]:
+    stripped = bare(line)
+    if stripped.strip() and len(stripped) - len(stripped.lstrip()) <= indent:
+        break
+    region.append(line)
+
+items = [l for l in region if re.match(r"^\s*-\s", bare(l))]
+if not items and any(l.strip() for l in region):
+    sys.exit(3)                       # something under the key that is not a list
+if any(cmd in bare(l) for l in region):
+    emit(src)                         # already registered: idempotent, byte for byte
+
+item_indent = re.match(r"^(\s*)-", bare(items[0])).group(1) if items else " " * (indent + 2)
+at = start + 1 + event + 1 + len(region)
+while region and not region[-1].strip():   # land inside the list, not after a blank line
+    region.pop()
+    at -= 1
+lines[at:at] = [entry(item_indent)]
+emit()
+PY
+  then
+    if mv "$tmp" "$CONFIG"; then
+      # Re-read, for the same reason `memory.provider` is re-read: the rewriter exiting 0
+      # says a file was produced, not that hermes will find a hook in it.
+      if [ "$(read_hooks | awk -F'\t' -v cmd="$GUARD_CMD" \
+              '$1=="entry" && $3==cmd {print $2; exit}')" = read_file ]; then
+        ok "big-file guard registered: pre_tool_call, matcher read_file -> $GUARD"
+      else
+        # Both states that reach here, because there are two and the message used to name
+        # only one: no entry at all, or an entry that runs this command under a DIFFERENT
+        # matcher — which fires on write_file and patch and never on a read.
+        fail "the big-file guard did not take: no pre_tool_call entry with matcher read_file runs $GUARD_CMD"
+        say  "        Restore $CONFIG.bak-$STAMP and add the entry by hand."
+      fi
+    else
+      rm -f "$tmp"; fail "could not replace $CONFIG — the big-file guard is not registered"
+    fi
+  else
+    rm -f "$tmp"
+    fail "could not register the big-file guard in $CONFIG"
+    say  "        Its hooks: block is not a shape this can extend safely. By hand:"
+    say  "            hooks:"
+    say  "              pre_tool_call:"
+    say  "                - matcher: read_file"
+    say  "                  command: $GUARD_CMD"
+  fi
+fi
+
 # The apply block sets `failed` on its own failure paths and NOTHING looked at it again:
 # scripts/cutover.sh printed FAIL, then the success banner, then exited 0. A script whose
 # job is to report state must not report success it did not establish.
@@ -508,8 +896,11 @@ say "  1. Close every hermes session and start a NEW one from a fresh terminal, 
 say "     credentials exported (set -a; . ~/.secrets; set +a)."
 say "  2. Confirm the provider is the new one:"
 say "       hermes memory status      # 'memories', available"
-say "  3. The old points remain reachable read-only, outside automatic recall:"
+say "  3. The first file read of that new session asks you to approve the big-file guard"
+say "     at the TTY. Approving records it in $ALLOWLIST;"
+say "     until then hermes skips the hook, and a hermes with no TTY skips it silently."
+say "  4. The old points remain reachable read-only, outside automatic recall:"
 say "       qctx memory search-collections \"<topic>\" --collections hermes_memory"
-say "  4. To go back: restore $CONFIG.bak-$STAMP and remove $LINK."
+say "  5. To go back: restore $CONFIG.bak-$STAMP and remove $LINK."
 
 exit "$failed"

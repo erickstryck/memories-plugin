@@ -195,3 +195,37 @@ class FakeReranker:
         pairs = sorted(enumerate(scores[:len(documents)]), key=lambda p: -p[1])
 
         return pairs, {"ok": True, "error": None, "was_logit": self.was_logit}
+
+
+class RecordingVectorStore:
+    """A `FakeVectorStore` that remembers WHICH operations were asked of it.
+
+    Derived, not enumerated: `__getattr__` wraps whatever is asked for, so an operation
+    added to the contract tomorrow is recorded without this class being touched. That is the
+    point — the question it answers is "what did this code path do to the backend", and a
+    hand-written list of methods could only ever answer "did it do one of the things I
+    thought of".
+
+    `FakeVectorStore` keeps a `calls` list of its own, but only for the four operations its
+    other users assert on; a path that upserted would leave no trace in it.
+    """
+
+    def __init__(self):
+        self.inner = FakeVectorStore()
+        self.ops: list[str] = []
+
+    def __getattr__(self, name):
+        attr = getattr(self.inner, name)
+        if not callable(attr):
+            return attr
+
+        def recorded(*args, **kwargs):
+            self.ops.append(name)
+
+            return attr(*args, **kwargs)
+
+        return recorded
+
+    def points(self) -> int:
+        """How many points exist anywhere in it — zero is "nothing was indexed"."""
+        return sum(len(c["points"]) for c in self.inner.collections.values())

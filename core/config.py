@@ -39,6 +39,7 @@ ENV_ALIASES = {
     "docs_collection": ("QCTX_DOCS_COLLECTION", "DOCS_COLLECTION"),
     "library_collection": ("QCTX_LIBRARY_COLLECTION", "LIBRARY_COLLECTION"),
     "vector_size": ("QCTX_VECTOR_SIZE", "VECTOR_SIZE"),
+    "context_window": ("QCTX_CONTEXT_WINDOW",),
 }
 
 DEFAULTS = {
@@ -54,6 +55,7 @@ DEFAULTS = {
     "docs_collection": "memories_docs_tmp",
     "library_collection": "memories_docs_library",
     "vector_size": 1024,
+    "context_window": 0,
 }
 
 
@@ -75,6 +77,7 @@ class Config:
     docs_collection: str
     library_collection: str
     vector_size: int
+    context_window: int = 0
 
     def resolved_embed_url(self) -> str:
         """The full /embeddings URL.
@@ -185,6 +188,7 @@ def load(path: Path | None = None, env: dict | None = None) -> Config:
             value = from_file.get(field, DEFAULTS[field])
         values[field] = value
     values["vector_size"] = int(values["vector_size"])
+    values["context_window"] = int(values["context_window"])
 
     return Config(**values)
 

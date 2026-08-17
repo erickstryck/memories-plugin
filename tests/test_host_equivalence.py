@@ -1327,5 +1327,586 @@ class TestBothHostsDegradeInTheSameWORDS(unittest.TestCase):
                              f"{label}: 'skipped' hides that the re-rank FAILED")
 
 
+# --- The two file-read guards, and where their differences are allowed to live -----------
+# `.superpowers/sdd/` is gitignored, so the divergence table that lived in a task report was
+# invisible to the next clone. These tests move the burden of proof: the table is in the
+# SPEC, and every difference the two adapters actually carry in their source must be NAMED
+# there. Derived from the sources, never restated here — a host-only constant added tomorrow
+# fails this instead of waiting for somebody to remember the table exists.
+import ast   # noqa: E402
+import re    # noqa: E402
+
+SPEC = REPO / "docs" / "superpowers" / "specs" / "2026-08-15-big-file-read-guard-design.md"
+CLAUDE_GUARD = REPO / "hooks" / "bigfile.py"
+HERMES_GUARD = REPO / "hosts" / "hermes" / "bigfile.py"
+
+#: The heading the derivations below read. Named, not guessed: if it is renamed, the guard
+#: on the guard below fails loudly instead of every check silently passing over "".
+DIVERGENCE_HEADING = "### Divergências declaradas entre os dois adaptadores"
+
+
+def divergence_section() -> str:
+    """The spec's declared-divergence section, heading to the next heading of any level."""
+    text = SPEC.read_text()
+    start = text.find(DIVERGENCE_HEADING)
+    if start < 0:
+        return ""
+    rest = text[start + len(DIVERGENCE_HEADING):]
+    end = re.search(r"^#{1,3} ", rest, re.M)
+
+    return rest[:end.start()] if end else rest
+
+
+def module_constants(path: Path) -> set:
+    """Module-level UPPER_CASE assignments — one adapter's host-forced settings.
+
+    Module level and not every assignment: what a host FORCES on the adapter is decided
+    once, at import, and that is exactly the set that must be explainable by the host.
+    """
+    return {t.id for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.Assign)
+            for t in node.targets
+            if isinstance(t, ast.Name) and t.id.isupper() and not t.id.startswith("_")}
+
+
+def env_names(path: Path) -> set:
+    """Environment variables one adapter READS — from the AST, not from a text scan.
+
+    A text scan reports the names quoted in prose too, and both files explain each other's
+    knobs in their docstrings; that would make every divergence look shared.
+    """
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        reads_env = (isinstance(f, ast.Name) and f.id in ("env", "env_num")) or (
+            isinstance(f, ast.Attribute) and f.attr == "get"
+            and isinstance(f.value, ast.Attribute) and f.value.attr == "environ")
+        if not reads_env:
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                    and re.fullmatch(r"[A-Z][A-Z0-9_]*", arg.value):
+                found.add(arg.value)
+
+    return found
+
+
+def tool_input_keys(path: Path) -> set:
+    """The keys one adapter pulls out of the host's `tool_input`."""
+    return set(re.findall(r'tool_input\.get\("([a-z_]+)"\)', path.read_text()))
+
+
+class TestEveryDivergenceOfTheGuardsIsDeclaredInTheSPEC(unittest.TestCase):
+    """The two file-read guards differ, and every difference is FORCED by its host.
+
+    That is a claim, and until now it lived in a task report under `.superpowers/sdd/`,
+    which is gitignored — so the one artefact a reader would compare the hosts from does
+    not survive a clone. The table moved to the spec, and these tests are what stop it
+    from drifting: the DIFFERENCES ARE DERIVED FROM THE TWO SOURCES, and each one must be
+    named in the spec's section. Add a ceiling to one adapter and this goes red naming it.
+
+    What this does NOT prove: that a row in the table is still true. A divergence removed
+    in code leaves a stale row, and no derivation from source can see prose that describes
+    something absent. The direction that matters is covered — silence is what costs the
+    next reader, not a leftover line.
+    """
+
+    def test_the_spec_has_the_section_at_all(self):
+        """The guard on the guard: every check below reads this section, and a section
+        that cannot be found is an empty string every `assertIn` passes over."""
+        section = divergence_section()
+        self.assertTrue(section.strip(), f"{DIVERGENCE_HEADING} is not in {SPEC.name}")
+        for name in ("hooks/bigfile.py", "hosts/hermes/bigfile.py"):
+            self.assertIn(name, section, "the section does not say which files it compares")
+
+    def test_the_derivations_see_both_adapters(self):
+        """The second guard on the guard: a derivation that came back empty would make
+        every difference below the empty set, and prove nothing at all."""
+        for label, fn in (("constants", module_constants), ("env names", env_names),
+                          ("tool_input keys", tool_input_keys)):
+            for path in (CLAUDE_GUARD, HERMES_GUARD):
+                with self.subTest(derivation=label, source=path.name):
+                    self.assertTrue(fn(path), f"the {label} scan went blind on {path}")
+
+    def test_every_host_only_constant_is_explained_in_the_spec(self):
+        """`TAIL_BYTES` on one side and `READ_CHAR_CEILING`, `SQLITE_TIMEOUT_S`,
+        `BLOCK_EXIT_CODE`, `REPO_ROOT` on the other are not preferences — each exists
+        because its host leaves no other way. The spec is where that is said."""
+        section = divergence_section()
+        claude, hermes = module_constants(CLAUDE_GUARD), module_constants(HERMES_GUARD)
+        only = (claude - hermes) | (hermes - claude)
+        self.assertTrue(only, "the two adapters suddenly share every constant — check the "
+                              "derivation before believing it")
+        for name in sorted(only):
+            with self.subTest(constant=name):
+                self.assertIn(name, section,
+                              f"{name} exists in only one guard and the spec never says "
+                              f"why the other does not need it")
+
+    def test_every_host_only_environment_variable_is_explained_in_the_spec(self):
+        """The knobs must be the SAME on both hosts — that is what a deployer is promised.
+        One that is not shared is a promise with an exception, and an undocumented
+        exception is the deployer discovering it by having it not work."""
+        section = divergence_section()
+        claude, hermes = env_names(CLAUDE_GUARD), env_names(HERMES_GUARD)
+        self.assertEqual(claude - hermes, set(),
+                         "claude-code reads an environment variable hermes does not; if "
+                         "that is deliberate it belongs in the table, not in a surprise")
+        for name in sorted(hermes - claude):
+            with self.subTest(env=name):
+                self.assertIn(name, section, f"{name} is read on one host only")
+
+    def test_the_payload_key_the_two_hosts_disagree_on_is_declared(self):
+        """The same read arrives as `file_path` on one host and `path` on the other, and a
+        guard that reads the wrong key sees no path and allows EVERYTHING — silently."""
+        section = divergence_section()
+        claude, hermes = tool_input_keys(CLAUDE_GUARD), tool_input_keys(HERMES_GUARD)
+        differing = (claude - hermes) | (hermes - claude)
+        self.assertTrue(differing, "both guards now read the same tool_input keys — either "
+                                   "a host changed or the derivation broke")
+        for key in sorted(differing):
+            with self.subTest(key=key):
+                self.assertIn(f"tool_input.{key}", section,
+                              f"the guards disagree on tool_input.{key} and the spec is "
+                              f"silent about it")
+
+
+# --- The equivalence itself, and the one layer at which it is true ------------------------
+# The plan for this task asked for "same file and same Budget -> same Verdict on both hosts".
+# That is FALSE today, and not by defect: each host now passes its OWN read ceiling into
+# `decide`, and hermes' extra byte ceiling makes it price a file of long lines LOWER than
+# claude-code does. So the claim is asserted where it holds — same Budget AND same cost ->
+# same verdict — and the ceiling difference is tested as the declared divergence it is.
+from tests import test_bigfile_claude as claude_fixtures   # noqa: E402
+from tests import test_bigfile_hermes as hermes_fixtures   # noqa: E402
+from core.bigfile import Budget, decide                    # noqa: E402
+
+#: 171k tokens at the core's 4 chars/token, and no newline anywhere — the file the spec's own
+#: worked example is about.
+A_BIG_FILE = 4 * 171_000
+#: Small enough that BOTH hosts' ceilings fall back to the file itself, which is the regime
+#: where the two hosts price identically and the equivalence claim is about something.
+A_FILE_UNDER_EVERY_CEILING = 40_000
+#: Two ORDINARY text files, and the point is that they are ordinary. Under a 2,000-line
+#: ceiling one read pulls 819,200 and 202,271 bytes; under hermes' 100,000-CHARACTER ceiling
+#: it pulls 100,000 in both cases. Neither has long lines — 400 and 100 bytes — because the
+#: divergence is not about long lines: it is about any read that would pull more than 100 KB,
+#: which is 2,000 lines averaging over ~50 bytes, or any big file with few newlines.
+A_FILE_ONE_READ_CANNOT_SWALLOW = (4_000, 400)
+AN_EVERYDAY_BIG_FILE = (4_000, 100)
+
+
+def a_flat_file(chars: int) -> str:
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w") as fh:
+        fh.write("x" * chars)
+
+    return path
+
+
+def ceilings_claude_code_applies() -> dict:
+    """The read ceilings `hooks/bigfile.py` hands to `decide`, taken from the ADAPTER.
+
+    Captured by running the guard rather than restated here, and that is the whole value of
+    it: a test that wrote `read_bytes=None` itself would keep passing with the two hosts'
+    ceilings swapped, and would be proving its own literal.
+    """
+    guard = claude_fixtures.adapter
+    seen = []
+    real = guard.bigfile.decide
+
+    def recording(path, budget, **kw):
+        seen.append(kw)
+
+        return real(path, budget, **kw)
+
+    payload = claude_fixtures.a_read_payload(
+        a_flat_file(400), claude_fixtures.a_transcript([claude_fixtures.ASSISTANT]))
+    with unittest.mock.patch.object(guard.bigfile, "decide", recording):
+        claude_fixtures.run_main(payload, claude_fixtures.Spy(set()))
+
+    return {k: seen[0].get(k) for k in ("read_lines", "read_bytes")}
+
+
+def ceilings_hermes_applies() -> dict:
+    """The same, for `hosts/hermes/bigfile.py`, driven through ITS host's payload and db."""
+    guard = hermes_fixtures.adapter
+    seen = []
+    real = guard.bigfile.decide
+
+    def recording(path, budget, **kw):
+        seen.append(kw)
+
+        return real(path, budget, **kw)
+
+    db = hermes_fixtures.a_session_using(400)
+    payload = hermes_fixtures.a_read_payload(a_flat_file(400))
+    with unittest.mock.patch.object(guard, "state_db_path", lambda: db), \
+         unittest.mock.patch.object(guard.bigfile, "decide", recording):
+        hermes_fixtures.run_main(payload, hermes_fixtures.Spy(set()))
+
+    return {k: seen[0].get(k) for k in ("read_lines", "read_bytes")}
+
+
+class TestBothHostsGuardTheSameWay(unittest.TestCase):
+    """The same Budget and the same COST must produce the same Verdict on both hosts.
+
+    The hosts MEASURE differently — claude-code exactly, hermes by estimate — and that
+    asymmetry is deliberate and documented. What must not differ is the DECISION, and the
+    only thing allowed to differ is the wording, which must say the number is a guess.
+
+    Read the qualifier: same Budget AND same cost. The two hosts do not always reach the
+    same cost, because each applies its own host's read ceiling — that is the class below,
+    and it is a declared divergence, not a break in this one.
+    """
+
+    def test_identical_budgets_give_identical_verdicts(self):
+        path = a_flat_file(A_BIG_FILE)
+        for label, ceilings in (("no ceiling", {}),
+                                ("claude-code's", ceilings_claude_code_applies()),
+                                ("hermes'", ceilings_hermes_applies())):
+            for used, window in ((604_023, 1_000_000), (10_000, 1_000_000),
+                                 (190_000, 200_000)):
+                exact = decide(path, Budget(window=window, used=used, exact=True), **ceilings)
+                approx = decide(path, Budget(window=window, used=used, exact=False),
+                                **ceilings)
+                with self.subTest(ceilings=label, used=used):
+                    self.assertEqual(exact.block, approx.block,
+                                     "the decision must not depend on how the number was "
+                                     "obtained")
+                    self.assertEqual(exact.cost, approx.cost)
+
+    def test_only_the_wording_marks_the_estimate(self):
+        """A number that looks precise and is a guess is worse than a guess that admits it."""
+        path = a_flat_file(A_BIG_FILE)
+        exact = decide(path, Budget(window=1_000_000, used=604_023, exact=True))
+        approx = decide(path, Budget(window=1_000_000, used=604_023, exact=False))
+        self.assertTrue(exact.block and approx.block, "the fixture stopped blocking")
+        self.assertNotIn("≈", exact.reason)
+        self.assertIn("≈", approx.reason)
+        self.assertNotEqual(exact.reason, approx.reason,
+                            "the estimate is being presented as a measurement")
+
+    def test_where_the_ceilings_agree_the_two_hosts_agree_on_everything_but_wording(self):
+        """The claim at the host layer, with each adapter's REAL ceilings: on a file below
+        the tightest of them both hosts reach the same cost, and there the verdicts must be
+        identical — block, allow and the number quoted."""
+        path = a_flat_file(A_FILE_UNDER_EVERY_CEILING)
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        for used, window, expected in ((190_000, 200_000, True), (10_000, 1_000_000, False)):
+            c = decide(path, Budget(window=window, used=used, exact=True), **claude)
+            h = decide(path, Budget(window=window, used=used, exact=False), **hermes)
+            with self.subTest(used=used):
+                self.assertEqual(c.cost, h.cost, "the precondition of the claim is gone: "
+                                                 "the two hosts priced the same file apart")
+                self.assertEqual(c.block, h.block)
+                self.assertEqual(c.block, expected, "the fixture stopped exercising what "
+                                                    "it was chosen for")
+
+
+class TestEachHostAppliesItsOwnReadCeiling(unittest.TestCase):
+    """The declared divergence, and the reason the equivalence above carries a qualifier.
+
+    One `Read` on claude-code stops at 2,000 lines. One `read_file` on hermes stops at 2,000
+    lines OR ~100,000 characters, whichever comes first (`tools/file_tools.py:65`), and the
+    second ceiling is the one that bites.
+
+    MEASURED, because the size of this is easy to understate: the two hosts price a file
+    identically only while one read stays under 100,000 characters — a file below ~100 KB, or
+    lines averaging under ~50 bytes. Past that, hermes is pinned at 25,000 tokens and
+    claude-code is not: 4,000 lines of 100 bytes is 202,271 against 100,000, and 4,000 of 400
+    is 819,200 against 100,000. So this is not a corner case about exotic files; on nearly
+    every file big enough to concern the guard at all, the two hosts may legitimately take
+    different decisions.
+
+    Aligning the ceilings would make a "same file, same verdict" test pass, and it would be
+    a lie about the host: the guard would be pricing a read that neither host performs.
+    """
+
+    def test_each_adapter_hands_decide_its_own_hosts_ceilings(self):
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        self.assertEqual(claude["read_lines"], hermes["read_lines"],
+                         "the LINE ceiling is 2,000 on both hosts and is not a divergence")
+        self.assertIsNone(claude["read_bytes"],
+                          "claude-code has no readable byte ceiling; passing one prices a "
+                          "truncation the host does not perform")
+        self.assertEqual(hermes["read_bytes"], hermes_fixtures.adapter.READ_CHAR_CEILING,
+                         "hermes truncates by characters and the price must know it")
+
+    #: (shape, window, used). Each budget is chosen so the SIZE-ONLY first pass already
+    #: blocks, and that is not tuning: `decide` refines the price only on the rare path it
+    #: reaches after deciding to block, so a budget the file sails through never computes
+    #: the number this test is about — both hosts would report the size-only price and the
+    #: divergence would be invisible.
+    STRADDLING = ((A_FILE_ONE_READ_CANNOT_SWALLOW, 1_000_000, 604_023),
+                  (AN_EVERYDAY_BIG_FILE, 200_000, 100_000))
+
+    def test_past_the_character_ceiling_the_two_hosts_price_and_decide_apart(self):
+        """Both fixtures are ordinary text — 400-byte lines and 100-byte lines — and that
+        IS the assertion: same file, same Budget, one host blocks and the other allows, on
+        files nobody would call exotic. Declared, and tested so nobody 'fixes' it quietly
+        by aligning the two ceilings, which would price a read neither host performs."""
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        for shape, window, used in self.STRADDLING:
+            path = hermes_fixtures.a_file_of_lines(*shape)
+            c = decide(path, Budget(window=window, used=used, exact=True), **claude)
+            h = decide(path, Budget(window=window, used=used, exact=False), **hermes)
+            with self.subTest(lines=shape[0], width=shape[1]):
+                self.assertGreater(c.cost, h.cost,
+                                   "hermes' character ceiling stopped biting; if the host "
+                                   "changed, the spec's divergence table changes with it")
+                self.assertTrue(c.block,
+                                "the control: without a byte ceiling this read is too big")
+                self.assertFalse(h.block, "hermes loads a fraction of it and must not block")
+
+
+README = REPO / "README.md"
+SKILL = REPO / "skills" / "doc-index" / "SKILL.md"
+HOOKS_JSON = REPO / "hooks" / "hooks.json"
+CUTOVER = REPO / "scripts" / "hermes_cutover.sh"
+
+
+class TestBothHostsActuallyREGISTERTheGuard(unittest.TestCase):
+    """A guard nothing calls is a guard that does not exist, and the two hosts are wired in
+    completely different places: a manifest this repo ships, and a line the cutover script
+    writes into the user's `config.yaml`.
+
+    The hermes half has its own suite (`tests/test_hermes_cutover.py`) because a script that
+    edits a live file has to be driven to be believed. This is the half that had nothing:
+    deleting the `PreToolUse` block from `hooks/hooks.json` left every test green, including
+    the one that reasons about "the timeout hooks.json gives it".
+    """
+
+    def entry(self):
+        manifest = json.loads(HOOKS_JSON.read_text())
+        for block in manifest.get("hooks", {}).get("PreToolUse", []):
+            for hook in block.get("hooks", []):
+                if "bigfile.py" in hook.get("command", ""):
+                    return block, hook
+
+        return None, None
+
+    def test_claude_code_calls_the_guard_before_a_read(self):
+        block, hook = self.entry()
+        self.assertIsNotNone(hook, "hooks.json registers no PreToolUse hook for bigfile.py")
+        self.assertEqual(block.get("matcher"), "Read",
+                         "a wider matcher hands the guard tools it must not block")
+        self.assertIn("CLAUDE_PLUGIN_ROOT", hook["command"],
+                      "the path has to come from the host, not from whoever wrote it")
+
+    def test_the_timeout_is_the_one_the_rest_of_the_suite_reasons_about(self):
+        """`tests/test_bigfile_claude.py` measures the deadline against "the 5s hooks.json
+        gives it". That number was in prose on both sides and asserted on neither."""
+        _, hook = self.entry()
+        self.assertEqual(hook["timeout"], 5)
+
+    def test_both_hosts_get_the_same_budget_and_the_same_tool(self):
+        """Same guard, same 5 seconds, and each host's own name for the read tool — `Read`
+        against `read_file`. The hermes side is written by the cutover script, so it is read
+        out of the script rather than out of a file only an install produces."""
+        _, hook = self.entry()
+        script = CUTOVER.read_text()
+        self.assertIn("matcher: read_file", script)
+        self.assertIn(f"timeout: {hook['timeout']}", script)
+        self.assertIn("hosts/hermes/bigfile.py", script)
+
+#: Named rather than guessed, for the reason `DIVERGENCE_HEADING` is: a renamed heading has
+#: to fail loudly here, not turn every check below into an `assertIn` over "".
+GUARD_HEADING = "### The big-file read guard"
+
+
+def guard_section() -> str:
+    """The README's guard section, heading to the next section of the level above."""
+    text = README.read_text()
+    start = text.find(GUARD_HEADING)
+    if start < 0:
+        return ""
+    rest = text[start + len(GUARD_HEADING):]
+    end = re.search(r"^## ", rest, re.M)
+
+    return rest[:end.start()] if end else rest
+
+
+class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
+    """Documentation is a claim like any other, and this repo has already paid for one: the
+    README said "both spellings" of a key the core accepted under three.
+
+    Every number below is DERIVED — from the core's constants, and from the ceilings each
+    adapter actually hands to `decide` — so a threshold retuned in code and left stale in
+    prose fails here. What it deliberately does not police is the prose itself: a sentence
+    can go out of date without a number moving, and no test can see that.
+    """
+
+    def test_the_section_is_there_at_all(self):
+        self.assertTrue(guard_section().strip(), f"{GUARD_HEADING} is not in README.md")
+
+    def test_it_documents_the_two_thresholds_the_core_decides_with(self):
+        from core import bigfile
+
+        section = guard_section()
+        for value in (bigfile.FLOOR_PCT, bigfile.SHARE_PCT):
+            with self.subTest(default=value):
+                self.assertIn(f"`{value:.2f}`", section, "the default is not the one shipped")
+                self.assertIn(f"{int(value * 100)}%", section,
+                              "the percentage the prose promises is not the one in the code")
+
+    def test_it_names_the_knobs_both_adapters_actually_read(self):
+        """Derived from the two adapters, so a knob renamed on one host cannot be documented
+        by the other's name — the divergence this repo has caught three times."""
+        knobs = {name for name in env_names(CLAUDE_GUARD) & env_names(HERMES_GUARD)
+                 if "BIGFILE" in name}
+        self.assertTrue(knobs, "the knob derivation went blind; nothing below proves anything")
+        section = guard_section()
+        for knob in knobs:
+            with self.subTest(knob=knob):
+                self.assertIn(knob, section)
+
+    def test_the_escape_marker_is_documented_on_both_surfaces(self):
+        """The README is for the user, who is the only one who can type it, and the SKILL is
+        for the model, which must not believe it can.
+
+        The marker is DERIVED from the two adapters — the only place a live one comes from
+        now that it is configurable — and not from a constant in the core, which no longer
+        has one: a default kept there would be a second owner of the marker, free to teach
+        what the detection rejects. The two adapters must also agree, or the documentation
+        would be true on one host only.
+        """
+        from tests.test_hermes_provider import all_knobs   # where the knob scan lives
+
+        markers = {default for rel in ("hooks/bigfile.py", "hosts/hermes/bigfile.py")
+                   for attr, _, _, default in all_knobs(rel) if attr == "ESCAPE_MARKER"}
+        self.assertEqual(len(markers), 1, f"the hosts default to different markers: {markers}")
+        marker = markers.pop()
+        self.assertIn(marker, guard_section())
+        self.assertIn(marker, SKILL.read_text())
+
+    def test_it_states_the_per_read_ceilings_the_adapters_apply(self):
+        """The "it prices the READ, not the file" claim is only useful with its numbers, and
+        those numbers come from the adapters, not from this test."""
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        section = guard_section()
+        self.assertIn(f"{claude['read_lines']:,} lines", section)
+        self.assertIn(f"{hermes['read_bytes']:,} characters", section)
+
+    def test_the_divergence_it_quotes_is_the_one_the_two_hosts_produce(self):
+        """The pair of numbers that makes "the hosts can decide differently" concrete. Both
+        are computed here from the same everyday file the equivalence tests use, so a host
+        ceiling that moves takes the README with it instead of leaving a false claim."""
+        path = hermes_fixtures.a_file_of_lines(*AN_EVERYDAY_BIG_FILE)
+        budget = Budget(window=200_000, used=100_000, exact=True)
+        claude = decide(path, budget, **ceilings_claude_code_applies())
+        hermes = decide(path, budget, **ceilings_hermes_applies())
+        section = guard_section()
+        self.assertNotEqual(claude.cost, hermes.cost, "the divergence itself is gone")
+        for cost in (claude.cost, hermes.cost):
+            with self.subTest(cost=cost):
+                self.assertIn(f"{cost:,}", section)
+
+    def test_it_points_at_the_spec_instead_of_copying_the_divergence_table(self):
+        """A second copy of that table is a second thing to keep true, and the spec's copy is
+        the one with a test on it."""
+        section = guard_section()
+        self.assertIn(SPEC.name, section)
+        self.assertNotIn(DIVERGENCE_HEADING, README.read_text())
+
+    def test_it_says_how_to_declare_the_window_the_hosts_cannot_read(self):
+        """The accepted cost of the ceiling table is a guard that sleeps until this is set.
+        Accepted only because it is VISIBLE — which is this paragraph and the cutover
+        script's report."""
+        section = guard_section()
+        self.assertIn("context_window", section)
+        self.assertIn("QCTX_CONTEXT_WINDOW", section)
+
+
+#: Every file the guard is made of, on both hosts. The property below is about the guard as
+#: a whole, so the list is the whole guard: a call added to any one of them is a call the
+#: model never asked for.
+GUARD_MODULES = (REPO / "core" / "bigfile.py", REPO / "core" / "inventory.py",
+                 CLAUDE_GUARD, HERMES_GUARD)
+
+#: The archive operations the guard is ALLOWED to name. Everything else a store exposes is
+#: presumed to act, which is the direction that ages well: a writing method added tomorrow is
+#: covered without anyone remembering this list, while a reading one added tomorrow costs one
+#: deliberate line here — visible in the diff, which is exactly where it belongs.
+#:
+#: `list_docs` is on this list because the guard genuinely needs it, and it is NOT free of
+#: side effects: it calls `ensure` on both scopes and `sweep` on the temporary one. What that
+#: costs the backend is not argued here, it is MEASURED — see
+#: `TestABlockedReadIndexesNothing` in each adapter's test file, which records every call the
+#: blocked path makes against a fake store.
+READING_METHODS = {"search", "list_docs", "find", "recall", "get", "list_page", "count"}
+
+
+def archive_write_methods() -> set:
+    """Everything `DocIndex` and `MemoryStore` can be asked to DO, minus the reads.
+
+    Derived from the classes rather than frozen as a list of names, because a frozen list
+    ages: `index_file` and `keep_file` were the two anybody would think to write down, and
+    the method that gets added next is precisely the one nobody would.
+    """
+    from core.docs import DocIndex
+    from core.memory import MemoryStore
+
+    return {name for cls in (DocIndex, MemoryStore) for name in dir(cls)
+            if not name.startswith("_") and callable(getattr(cls, name))
+            and name not in READING_METHODS}
+
+
+def called_names(path: Path) -> set:
+    """Every name this file CALLS — `x.foo()` and `foo()` alike, from the AST.
+
+    From the AST and not a text scan for the reason `env_names` gives: these files explain
+    in prose what they must not do, and a text scan would report the explanation."""
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            found.add(node.func.attr)
+        elif isinstance(node.func, ast.Name):
+            found.add(node.func.id)
+
+    return found
+
+
+class TestTheGuardDecidesAndDoesNotACT(unittest.TestCase):
+    """"The hook decides, it does not act. It indexes nothing." — the spec's Failure modes.
+
+    The requirement was met and held by NOTHING, which is the shape this whole review was
+    looking for. It is also the requirement a helpful refactor breaks in one line: blocked
+    the read, so index it for the user — and a guard that runs before every file read starts
+    firing hundreds of embedding chunks nobody asked for, on a file the user may have been
+    about to abandon.
+
+    Two tests, because neither mechanism covers the other. This one is STRUCTURAL and reads
+    the sources: the guard may not so much as name a writing operation. The execution half
+    lives in each adapter's own file, on the BLOCK path, which is where the temptation to
+    index would sit.
+    """
+
+    def test_the_derivation_sees_the_operations_that_would_matter(self):
+        """The guard on the guard: an empty write set would make every assertion below an
+        intersection with nothing, passing for a guard that indexed on every read."""
+        writes = archive_write_methods()
+        self.assertTrue(writes)
+        for named in ("index_file", "keep_file", "store", "delete", "drop"):
+            with self.subTest(method=named):
+                self.assertIn(named, writes)
+        for read in ("list_docs", "search"):
+            with self.subTest(method=read):
+                self.assertNotIn(read, writes, "a read the guard needs is being forbidden")
+
+    def test_no_file_of_the_guard_calls_anything_that_writes(self):
+        writes = archive_write_methods()
+        for path in GUARD_MODULES:
+            with self.subTest(module=path.name):
+                self.assertEqual(sorted(called_names(path) & writes), [],
+                                 f"{path} acts on the archive; the guard decides and the "
+                                 f"model acts, which is what keeps a blocked read from "
+                                 f"costing an indexing run nobody asked for")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

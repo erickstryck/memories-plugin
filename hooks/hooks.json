@@ -18,6 +18,19 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bigfile.py\"",
+            "shell": "bash",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

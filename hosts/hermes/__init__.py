@@ -577,6 +577,9 @@ class MemoriesProvider(_Base):
             "docs_collection": "Collection for temporary document chunks (TTL)",
             "library_collection": "Collection for permanently kept documents",
             "vector_size": "Embedding dimension; `qctx config detect` measures it",
+            "context_window": "Model's context window in tokens; overrides the built-in "
+                               "table when the bare model name is ambiguous (e.g. a 1M "
+                               "variant). 0 means unknown/use the table.",
         }
         out = []
         for f in dc_fields(Config):
@@ -586,7 +589,7 @@ class MemoriesProvider(_Base):
                 "description": described[f.name],
                 "secret": secret,
                 "required": f.name in ("qdrant_url", "memory_collection"),
-                "type": "integer" if f.name == "vector_size" else "text",
+                "type": "integer" if f.name in ("vector_size", "context_window") else "text",
             }
             default = DEFAULTS.get(f.name)
             if default not in ("", None):
