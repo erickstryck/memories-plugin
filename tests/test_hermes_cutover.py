@@ -10,6 +10,7 @@ Everything here runs against a FAKE `HERMES_HOME` in a temp directory, with `HOM
 there too, so no test can reach the real `~/.hermes`, `~/.config/memories-plugin` or the
 user's running sessions. The apply path is exercised ONLY against those fakes.
 """
+import json
 import os
 import re
 import shutil
@@ -761,6 +762,259 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         out = self.run_script("--apply")
         backup = next(iter(self.hermes.glob("config.yaml.bak-*")))
         self.assertLine(out, f"To go back: restore {backup} and remove {self.link()}")
+
+    # ------------------------------------------------------- the big-file guard, applied
+
+    def test_apply_registers_the_guard_under_the_event_KEY_hermes_parses(self):
+        """The shape is the whole test, and it is measured rather than styled.
+
+        `agent/shell_hooks.py::_parse_hooks_block` (v0.20.1, installed) starts with
+        `if not isinstance(hooks_cfg, dict): return []` and iterates `hooks_cfg.items()`
+        as event name -> LIST of entries. A `hooks:` written as a sequence of
+        `{event, matcher, command}` mappings — the shape this plan specified — parses to
+        ZERO hooks and logs nothing at all on that path: the guard is installed, reported
+        as installed, and never runs.
+        """
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        text = self.config_yaml.read_text()
+        self.assertIn("hooks:\n", text)
+        after = text.split("hooks:\n", 1)[1].splitlines()
+        first = next(line for line in after if line.strip())
+        self.assertEqual(first.strip(), "pre_tool_call:",
+                         f"`hooks:` must map event names to lists, got {first!r}")
+        self.assertRegex(text, r"\n {4}- matcher: read_file\n {6}command: ")
+        self.assertIn(f'command: python3 "{self.root}/hosts/hermes/bigfile.py"', text)
+
+    def test_apply_bounds_the_guards_runtime_instead_of_taking_the_host_default(self):
+        """`DEFAULT_TIMEOUT_SECONDS = 60` in the installed shell_hooks.py. Sixty seconds in
+        front of every file read is not a guard, it is a hang; the sibling host gives the
+        same hook 5 (`hooks/hooks.json`)."""
+        self.run_script("--apply")
+        self.assertIn("      timeout: 5\n", self.config_yaml.read_text())
+
+    def test_apply_is_idempotent_for_the_guard_too(self):
+        self.assertEqual(self.run_script("--apply").returncode, 0)
+        second = self.run_script("--apply")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        text = self.config_yaml.read_text()
+        self.assertEqual(text.count("bigfile.py"), 1, text)
+        self.assertEqual(text.count("pre_tool_call:"), 1, text)
+
+    def test_apply_appends_to_an_existing_event_list_and_keeps_the_other_hooks(self):
+        """A `hooks:` block already carrying entries is the normal case for anyone who has
+        used the feature, and losing one of them would be a silent removal of the user's
+        own tooling."""
+        self.config_yaml.write_text(
+            CONFIG_YAML
+            + "hooks:\n"
+              "  post_tool_call:\n"
+              "    - command: /usr/bin/true\n"
+              "  pre_tool_call:\n"
+              "    - matcher: terminal\n"
+              "      command: /usr/bin/false\n"
+        )
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        text = self.config_yaml.read_text()
+        self.assertIn("    - command: /usr/bin/true\n", text)
+        self.assertIn("      command: /usr/bin/false\n", text)
+        self.assertIn("bigfile.py", text)
+        self.assertEqual(text.count("pre_tool_call:"), 1, text)
+
+    def test_apply_does_not_mistake_a_DEEPER_pre_tool_call_for_the_event_key(self):
+        """`outbound:` is a real reserved sub-key of `hooks:` (`_parse_hooks_block` skips it
+        by name, alongside `output_spill`), and anything under it is not an event list.
+
+        Matching `pre_tool_call:` at any indent puts our entry inside that sub-section, where
+        hermes never looks — and then the re-read finds it with the same wrong rule and
+        reports success. A guard installed into a place nothing reads, reported as
+        installed, is the exact failure this whole feature is about.
+        """
+        self.config_yaml.write_text(
+            CONFIG_YAML
+            + "hooks:\n"
+              "  outbound:\n"
+              "    pre_tool_call:\n"
+              "      - command: /usr/bin/true\n"
+        )
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        text = self.config_yaml.read_text()
+        self.assertIn("      - command: /usr/bin/true\n", text)
+        self.assertRegex(text, r"\n  pre_tool_call:\n {4}- matcher: read_file\n",
+                         "the guard did not land on a direct child of hooks:")
+
+    def test_apply_refuses_a_hooks_block_it_cannot_extend_and_says_so(self):
+        """The sequence shape hermes silently ignores. Rewriting it into a mapping would
+        disable every hook the user has; leaving it and reporting `ok` would be the
+        already-paid-for defect. It refuses, loudly, and changes nothing in that block."""
+        broken = (CONFIG_YAML
+                  + "hooks:\n"
+                    "  - event: pre_tool_call\n"
+                    "    command: /usr/bin/true\n")
+        self.config_yaml.write_text(broken)
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertLine(out, "one or more steps FAILED")
+        text = self.config_yaml.read_text()
+        self.assertNotIn("bigfile.py", text)
+        self.assertIn("  - event: pre_tool_call\n", text)
+        # The independent step still ran: a refusal here is not an abort.
+        self.assertIn("provider: memories", text)
+
+    def test_apply_re_reads_the_guard_instead_of_trusting_the_rewrite(self):
+        """Same rule the provider write already lives by. `pre_tool_call:` mapped to a
+        scalar is a legal file that hermes parses to zero hooks (`hooks.%s must be a list`),
+        and appending to it is not possible — so the write cannot take, and the script has
+        to say that rather than print the line it hoped for."""
+        self.config_yaml.write_text(CONFIG_YAML + "hooks:\n  pre_tool_call: disabled\n")
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertLine(out, "big-file guard")
+        self.assertNoLine(out, "=== now ===")
+        self.assertNotIn("bigfile.py", self.config_yaml.read_text())
+
+    def test_the_real_hermes_config_is_never_touched_by_an_apply(self):
+        """The one file in this suite that a bug here would destroy for real. Asserted on
+        content AND mtime: a rewrite that produced identical bytes would still prove the
+        script had opened the user's live configuration."""
+        real = Path.home() / ".hermes" / "config.yaml"
+        if str(real).startswith(str(self.home)):     # pragma: no cover - HOME is faked
+            self.skipTest("HOME is already redirected; there is no real file to protect")
+        if not real.exists():
+            self.skipTest(f"no {real} on this machine")
+        before = (real.read_bytes(), real.stat().st_mtime_ns)
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((real.read_bytes(), real.stat().st_mtime_ns), before,
+                         f"{real} was modified by a test")
+
+
+class TestTheBigFileGuardCheck(CutoverCase):
+    """The guard is useless if hermes never calls it, and a cutover script that stays
+    silent about that is the defect this script already paid for once.
+
+    Two questions, and the second one exists because "installed" is not "working": is the
+    hook registered at all, and is the context window DECLARED — because without a declared
+    window the guard falls back to a table of per-name CEILINGS, and a ceiling that is too
+    large only makes the guard sleep. Silently inert is indistinguishable from working, and
+    the user finds out on the day it did not protect them.
+    """
+
+    def guard_command(self, root=REPO):
+        return f'python3 "{root}/hosts/hermes/bigfile.py"'
+
+    def with_hooks(self, command, matcher="read_file", event="pre_tool_call"):
+        entry = f"    - command: {command}\n"
+        if matcher is not None:
+            entry = f"    - matcher: {matcher}\n      command: {command}\n"
+        self.config_yaml.write_text(f"{CONFIG_YAML}hooks:\n  {event}:\n{entry}")
+
+    def test_the_report_says_whether_the_big_file_guard_is_registered(self):
+        out = self.run_script()
+        self.assertLine(out, "big-file guard")
+
+    def test_an_unregistered_guard_names_the_path_DERIVED_from_this_checkout(self):
+        """Run from a copy of the script in a temp directory: the path it prints can only
+        be right if it was derived from `$ROOT`, the way the provider symlink target
+        already is. A path typed into the script would be somebody's home directory."""
+        script = self.fake_root()
+        root = script.parent.parent
+        out = self.run_script(script=script)
+        self.assertLine(out, f"{root}/hosts/hermes/bigfile.py")
+
+    def test_a_guard_already_registered_is_reported_as_registered(self):
+        self.with_hooks(self.guard_command())
+        out = self.run_script()
+        self.assertLine(out, "big-file guard registered")
+
+    def test_a_guard_registered_with_no_matcher_is_reported_as_too_broad(self):
+        """Measured, and it is why the matcher is not a detail: `write_file` and `patch`
+        take a `path` argument too, so a matcher-less `pre_tool_call` hook gets an opinion
+        about WRITES, which this guard has no business blocking."""
+        self.with_hooks(self.guard_command(), matcher=None)
+        out = self.run_script()
+        self.assertLine(out, "registered with no matcher")
+        self.assertLine(out, "write_file")
+
+    def test_a_guard_pointing_at_another_checkout_is_reported_and_not_left_implicit(self):
+        self.with_hooks('python3 "/somewhere/else/hosts/hermes/bigfile.py"')
+        out = self.run_script()
+        self.assertLine(out, "/somewhere/else/hosts/hermes/bigfile.py")
+
+    def test_a_hooks_block_written_as_a_LIST_is_reported_as_inert(self):
+        """`_parse_hooks_block` returns [] for a non-dict without logging anything on that
+        path. Nothing else in the system would ever mention it."""
+        self.config_yaml.write_text(
+            f"{CONFIG_YAML}hooks:\n  - event: pre_tool_call\n    command: /usr/bin/true\n")
+        out = self.run_script()
+        self.assertLine(out, "WARN")
+        self.assertLine(out, "hermes reads no hook at all from it")
+
+    def test_a_guard_that_is_not_allowlisted_yet_is_reported(self):
+        """Registration is only half of it: `register_from_config` skips any hook whose
+        (event, command) pair is not in `shell-hooks-allowlist.json` unless a TTY approves
+        it. A gateway hermes has no TTY, so it skips the hook and logs a warning nobody
+        reads."""
+        self.with_hooks(self.guard_command())
+        out = self.run_script()
+        self.assertLine(out, "shell-hooks-allowlist.json")
+
+    def test_an_allowlisted_guard_is_reported_as_approved(self):
+        self.with_hooks(self.guard_command())
+        (self.hermes / "shell-hooks-allowlist.json").write_text(json.dumps(
+            {"approvals": [{"event": "pre_tool_call",
+                            "command": self.guard_command()}]}))
+        out = self.run_script()
+        self.assertLine(out, "approved in shell-hooks-allowlist.json")
+
+    def test_an_undeclared_context_window_says_which_ceiling_and_what_it_costs(self):
+        self.config_yaml.write_text(CONFIG_YAML.replace("MiniMax-M2.7", "claude-opus-5"))
+        out = self.run_script()
+        self.assertLine(out, "context_window is not declared")
+        self.assertLine(out, "ceiling")
+        self.assertLine(out, "QCTX_CONTEXT_WINDOW")
+
+    def test_the_ceiling_it_prints_is_the_one_the_TABLE_holds(self):
+        """Not a number typed into the script. The table is the single owner of these, and
+        a copy in a shell script is the kind of divergence this repo has paid for."""
+        from core.windows import MODEL_WINDOWS
+        self.config_yaml.write_text(CONFIG_YAML.replace("MiniMax-M2.7", "claude-opus-5"))
+        out = self.run_script()
+        self.assertLine(out, str(MODEL_WINDOWS["claude-opus-5"]))
+
+    def test_a_model_the_table_does_not_know_is_reported_as_no_guard_at_all(self):
+        """The measured hermes case, and the reason this line exists: the table holds
+        claude names, `model.default` on this machine is `MiniMax-M2.7`, so `window_for`
+        returns 0, and 0 ALLOWS. Reported, because a guard that never fires and never says
+        why is exactly what this feature promised not to be."""
+        out = self.run_script()
+        self.assertLine(out, "MiniMax-M2.7")
+        self.assertLine(out, "allows every read")
+
+    def test_a_declared_context_window_is_reported_as_declared(self):
+        out = self.run_script(env=self.env(QCTX_CONTEXT_WINDOW="123456"))
+        self.assertLine(out, "context window declared: 123456")
+
+    def test_a_context_window_only_in_the_shell_is_reported_as_a_gateway_gap(self):
+        """The same question the credentials section asks, for the same reason: a
+        systemd/gateway hermes inherits no interactive shell, and `context_window` is not a
+        secret, so it can and should live in the file both hosts read."""
+        out = self.run_script(env=self.env(QCTX_CONTEXT_WINDOW="123456"))
+        self.assertLine(out, "qctx config set context-window")
+
+    def test_a_context_window_in_the_config_file_does_not_warn(self):
+        self.qctx_config.write_text(self.qctx_config.read_text()
+                                    .replace("{", '{"context_window": 654321, ', 1))
+        out = self.run_script()
+        self.assertLine(out, "context window declared: 654321")
+        self.assertNoLine(out, "qctx config set context-window")
+
+    def test_the_dry_run_says_the_hook_is_part_of_what_changes(self):
+        out = self.run_script()
+        self.assertLine(out, "DRY RUN")
+        self.assertLine(out, "pre_tool_call")
 
 
 if __name__ == "__main__":

@@ -1662,5 +1662,105 @@ class TestEachHostAppliesItsOwnReadCeiling(unittest.TestCase):
                 self.assertFalse(h.block, "hermes loads a fraction of it and must not block")
 
 
+README = REPO / "README.md"
+SKILL = REPO / "skills" / "doc-index" / "SKILL.md"
+
+#: Named rather than guessed, for the reason `DIVERGENCE_HEADING` is: a renamed heading has
+#: to fail loudly here, not turn every check below into an `assertIn` over "".
+GUARD_HEADING = "### The big-file read guard"
+
+
+def guard_section() -> str:
+    """The README's guard section, heading to the next section of the level above."""
+    text = README.read_text()
+    start = text.find(GUARD_HEADING)
+    if start < 0:
+        return ""
+    rest = text[start + len(GUARD_HEADING):]
+    end = re.search(r"^## ", rest, re.M)
+
+    return rest[:end.start()] if end else rest
+
+
+class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
+    """Documentation is a claim like any other, and this repo has already paid for one: the
+    README said "both spellings" of a key the core accepted under three.
+
+    Every number below is DERIVED — from the core's constants, and from the ceilings each
+    adapter actually hands to `decide` — so a threshold retuned in code and left stale in
+    prose fails here. What it deliberately does not police is the prose itself: a sentence
+    can go out of date without a number moving, and no test can see that.
+    """
+
+    def test_the_section_is_there_at_all(self):
+        self.assertTrue(guard_section().strip(), f"{GUARD_HEADING} is not in README.md")
+
+    def test_it_documents_the_two_thresholds_the_core_decides_with(self):
+        from core import bigfile
+
+        section = guard_section()
+        for value in (bigfile.FLOOR_PCT, bigfile.SHARE_PCT):
+            with self.subTest(default=value):
+                self.assertIn(f"`{value:.2f}`", section, "the default is not the one shipped")
+                self.assertIn(f"{int(value * 100)}%", section,
+                              "the percentage the prose promises is not the one in the code")
+
+    def test_it_names_the_knobs_both_adapters_actually_read(self):
+        """Derived from the two adapters, so a knob renamed on one host cannot be documented
+        by the other's name — the divergence this repo has caught three times."""
+        knobs = {name for name in env_names(CLAUDE_GUARD) & env_names(HERMES_GUARD)
+                 if "BIGFILE" in name}
+        self.assertTrue(knobs, "the knob derivation went blind; nothing below proves anything")
+        section = guard_section()
+        for knob in knobs:
+            with self.subTest(knob=knob):
+                self.assertIn(knob, section)
+
+    def test_the_escape_marker_is_documented_on_both_surfaces(self):
+        """The README is for the user, who is the only one who can type it, and the SKILL is
+        for the model, which must not believe it can."""
+        from core import bigfile
+
+        self.assertIn(bigfile.ESCAPE_MARKER, guard_section())
+        self.assertIn(bigfile.ESCAPE_MARKER, SKILL.read_text())
+
+    def test_it_states_the_per_read_ceilings_the_adapters_apply(self):
+        """The "it prices the READ, not the file" claim is only useful with its numbers, and
+        those numbers come from the adapters, not from this test."""
+        claude, hermes = ceilings_claude_code_applies(), ceilings_hermes_applies()
+        section = guard_section()
+        self.assertIn(f"{claude['read_lines']:,} lines", section)
+        self.assertIn(f"{hermes['read_bytes']:,} characters", section)
+
+    def test_the_divergence_it_quotes_is_the_one_the_two_hosts_produce(self):
+        """The pair of numbers that makes "the hosts can decide differently" concrete. Both
+        are computed here from the same everyday file the equivalence tests use, so a host
+        ceiling that moves takes the README with it instead of leaving a false claim."""
+        path = hermes_fixtures.a_file_of_lines(*AN_EVERYDAY_BIG_FILE)
+        budget = Budget(window=200_000, used=100_000, exact=True)
+        claude = decide(path, budget, **ceilings_claude_code_applies())
+        hermes = decide(path, budget, **ceilings_hermes_applies())
+        section = guard_section()
+        self.assertNotEqual(claude.cost, hermes.cost, "the divergence itself is gone")
+        for cost in (claude.cost, hermes.cost):
+            with self.subTest(cost=cost):
+                self.assertIn(f"{cost:,}", section)
+
+    def test_it_points_at_the_spec_instead_of_copying_the_divergence_table(self):
+        """A second copy of that table is a second thing to keep true, and the spec's copy is
+        the one with a test on it."""
+        section = guard_section()
+        self.assertIn(SPEC.name, section)
+        self.assertNotIn(DIVERGENCE_HEADING, README.read_text())
+
+    def test_it_says_how_to_declare_the_window_the_hosts_cannot_read(self):
+        """The accepted cost of the ceiling table is a guard that sleeps until this is set.
+        Accepted only because it is VISIBLE — which is this paragraph and the cutover
+        script's report."""
+        section = guard_section()
+        self.assertIn("context_window", section)
+        self.assertIn("QCTX_CONTEXT_WINDOW", section)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

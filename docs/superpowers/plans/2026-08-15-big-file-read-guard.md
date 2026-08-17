@@ -1170,6 +1170,27 @@ hooks:
     command: python3 /home/erick/dev/memories-plugin/hosts/hermes/bigfile.py
 ```
 
+> **EMENDA de 2026-08-16, na implementação da T7 — o YAML acima está ERRADO e não registra
+> nada.** Medido no hermes instalado (v0.20.1, `agent/shell_hooks.py::_parse_hooks_block`):
+> a primeira linha é `if not isinstance(hooks_cfg, dict): return []`, e em seguida ele itera
+> `hooks_cfg.items()` como **nome do evento -> LISTA de entradas**. Um `hooks:` escrito como
+> sequência de `{event, command}` resolve para ZERO hooks e **não loga nada** nesse caminho:
+> a guarda fica instalada, reportada como instalada, e nunca roda. Nem `event` é campo de
+> entrada — o evento é a CHAVE. A forma que o host lê é esta, e é a que o script escreve:
+>
+> ```yaml
+> hooks:
+>   pre_tool_call:
+>     - matcher: read_file
+>       command: python3 "<raiz do checkout>/hosts/hermes/bigfile.py"
+>       timeout: 5
+> ```
+>
+> `timeout: 5` porque `DEFAULT_TIMEOUT_SECONDS` do host é **60**, e sessenta segundos na
+> frente de cada leitura de arquivo é travamento, não guarda (é o mesmo 5 que o
+> `hooks/hooks.json` dá ao irmão). `fail_closed` fica no default `false` de propósito: esta
+> guarda falha ABERTA. O caminho é DERIVADO de `$ROOT`, como o alvo do symlink já era.
+
 - [ ] **Step 4: Rode e veja passar; depois a suíte**
 
 Run: `find . -name __pycache__ -type d -prune -exec rm -rf {} + ; python3 -m unittest discover -s tests 2>&1 | tail -3`

@@ -103,6 +103,7 @@ The same core serves two hosts, with the same operations and the same configurat
 | install | `claude plugin marketplace add .` | a symlink into `$HERMES_HOME/plugins/memories` |
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
+| big-file guard | `PreToolUse` hook on `Read` | `pre_tool_call` shell hook, matcher `read_file` |
 | operations | `qctx` CLI + two skills | 15 model-invokable tools + the same CLI |
 | what the model is told | the two skills | `system_prompt_block()`, from the same `core/prompts.py` |
 | configuration | `~/.config/memories-plugin/config.json` | the same file |
@@ -164,6 +165,82 @@ returns `None`, and hermes warns only when the provider is not `None`.
 
 Every write it makes to `config.yaml` is verified by re-reading the key afterwards. The
 rewriter exiting 0 says the file was replaced, not that `memory.provider` is now `memories`.
+
+### The big-file read guard
+
+Reading a large file into the context is the one mistake advice cannot prevent, because the
+model does not know the size before it calls the tool. The incident that produced this
+guard is the one in the spec: a 586 KB / 15,593-line JSON, read whole, **~171k tokens**,
+where a five-chunk search over the indexed version costs ~6k.
+
+So the read is refused before it happens, with a message that says what to do instead. Two
+criteria, whichever fires first, both relative to what is LEFT of the window rather than to
+the size of the file:
+
+| | blocks when | default | knob |
+|---|---|---|---|
+| final remainder | the read would leave less than 20% of the window free | `0.20` | `QCTX_BIGFILE_FLOOR_PCT` |
+| one file's share | the read costs more than 40% of what is free | `0.40` | `QCTX_BIGFILE_SHARE_PCT` |
+
+**It does not index anything. It says what to index, and the model indexes** — a blocked
+read must not silently fire off hundreds of embedding chunks nobody asked for. If the file
+is already in an archive the message says so and points at `docs search` instead of `index`.
+A file that cannot be indexed at all (a binary) is **allowed**: refusing it would leave no
+way forward.
+
+To read it anyway, put `--full` in your own message. It is scoped to that one turn and
+evaporates with the next prompt, by construction — the hook reads the last user turn, so
+there is nothing to switch back off and no way to leave the guard disabled by forgetting.
+That is exactly why it is not an environment variable.
+
+**Declare `context_window`, or the guard mostly sleeps.** Neither host exposes the window
+size where a hook can read it, and the model name does not settle it: the 1M and the 200k
+variants of a model ship under the same bare name. `core/windows.py` therefore holds a
+**ceiling** per name — the largest window any variant of that name can have — and treats
+`used >= window` as its guess being refuted, which falls back to "unknown window", which
+allows. Erring large only makes the guard sleep; erring small would make it block on a
+guess, which is the one failure this design refuses to produce. The consequence is honest
+and worth planning for: in a 200k session, or under any model the table does not know at
+all, the guard is nearly inert until you say
+
+```bash
+qctx config set context-window 200000      # or export QCTX_CONTEXT_WINDOW
+```
+
+`./scripts/hermes_cutover.sh` reports whether that value is declared, and what ceiling it
+would fall back to if not.
+
+**The price is the price of the READ, not of the file.** One call loads at most 2,000 lines
+(and on hermes at most 100,000 characters as well), so that is what it is charged. A 3.2 MB
+file of 8,000 lines costs ~200k tokens, not ~800k. The honest consequence: the guard fires
+LATER than "this file is 3 MB" would lead you to expect.
+
+**Paging is not a hole in it**, and does not need fixing. Reading a file in slices drains
+the window in cheap pieces — but `used` grows with every one of them, and the two criteria
+start firing on their own as it does. It self-corrects.
+
+**One known case errs toward blocking too much**, measured: a file whose first line is
+enormous and whose remaining lines are short is priced by its TOTAL size, because the 8 KB
+sample the estimator reads contains no line break at all and cannot tell that the rest of
+the file has any. It is not a regression — it is what every file cost before the estimator
+learned about line limits — but it is the only known case that errs in the dangerous
+direction, and correcting it would cost a second read of the file on every tool call.
+
+**The two hosts can decide differently on the same file.** They price a read identically
+only while one read stays under 100,000 characters — roughly, a file under ~100 KB, or
+lines averaging under ~50 bytes. One read of a 400 KB file of 100-byte lines pulls 202,271
+characters on claude-code against hermes' 100,000: **50,567 tokens against 25,000**, and on
+a tight budget one blocks while the other allows. That is forced by the hosts (`tools/file_tools.py` truncates a `read_file` by
+characters; claude-code's `Read` has no comparable readable ceiling), not chosen here, and
+every such difference is listed in the divergence table in
+`docs/superpowers/specs/2026-08-15-big-file-read-guard-design.md`, which
+`tests/test_host_equivalence.py` derives from the two adapters and requires to be complete.
+What both hosts DO guarantee is the decision itself: same budget and same cost, same
+verdict.
+
+Every failure of the guard — an unreadable transcript, a locked `state.db`, an unknown
+window, a `stat` that fails, any unexpected exception — **allows** the read. A guard that
+breaks has to get out of the way, never become a cage.
 
 ## Configuration
 
@@ -341,6 +418,11 @@ text and returns the same block, from the same `core/blocks.py`, and the checkpo
 along in that same return value on the Nth turn rather than in a second call. Two hosts,
 one renderer — which is what `tests/test_host_equivalence.py` is there to keep true.
 
+`bigfile.py` is the exception to that last paragraph: it is the one hook hermes DOES have
+to register, because a tool guard is not something a memory provider can offer. It runs
+before every file read on both hosts — `PreToolUse` on `Read`, `pre_tool_call` with matcher
+`read_file` — and it is described under [the big-file read guard](#the-big-file-read-guard).
+
 ## Language
 
 Code, comments and user-facing messages are in English. Two things stay in Portuguese
@@ -356,10 +438,11 @@ on purpose, and both are data rather than prose:
 
 ## Status
 
-Done and tested: the core, the CLI, the three archives, the guided diagnostics, both
+Done and tested: the core, the CLI, the three archives, the guided diagnostics, all three
 hooks, both skills and the plugin manifest for claude-code; the provider, its 15 tools,
-the shared configuration wizard and the install script for hermes-agent. 476 offline tests
-and 17 integration tests against a real Qdrant and real models.
+the shared configuration wizard and the install script for hermes-agent; and the big-file
+read guard on both hosts. 685 offline tests and 17 integration tests against a real Qdrant
+and real models.
 
 Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the
 two differ and the install is what runs. The adapter implements every method that version
