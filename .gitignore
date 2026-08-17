@@ -8,3 +8,7 @@ config.json
 # no secret goes into the repo
 *.secret
 *.key
+
+# Worktrees live here (the bigfile-guard feature created one before this was ignored).
+# An unignored worktree directory can commit an entire second checkout into the repo.
+.claude/worktrees/
