@@ -1,10 +1,10 @@
 """The operations the MODEL may invoke, as hermes tool schemas.
 
-Fifteen of the CLI's twenty. The five left out are `setup` (interactive, wants a TTY) and
-`config show/set/detect` plus `collections` — configuration belongs to the operator, and a
-`config set` tool would let the model point the archive somewhere else mid-conversation.
-The CLI still carries all twenty in both hosts; this is only about what the model reaches
-on its own.
+Nineteen of the CLI's twenty-four. The five left out are `setup` (interactive, wants a TTY)
+and `config show/set/detect` plus `collections` — configuration belongs to the operator, and
+a `config set` tool would let the model point the archive somewhere else mid-conversation.
+The CLI still carries all twenty-four in both hosts; this is only about what the model
+reaches on its own.
 
 Every handler returns a JSON STRING, and no handler raises. hermes surfaces a raise as a
 crashed turn; a JSON error is something the model can read and react to. The string part is
@@ -44,6 +44,7 @@ if REPO_ROOT not in sys.path:
 
 import core  # noqa: E402
 import core.docs  # noqa: E402
+import core.repos  # noqa: E402
 
 #: Filled by `hosts/hermes/__init__.py` at import time — see `bind_tuning`.
 _TUNING = None
@@ -230,6 +231,10 @@ def _docs(cfg):
     return core.build_docs(_configured(cfg))
 
 
+def _repos(cfg):
+    return core.build_repos(_configured(cfg))
+
+
 # ---- memory ----------------------------------------------------------------
 
 
@@ -357,6 +362,45 @@ def _docs_drop(args: dict, cfg) -> str:
                                        _choice(args, "scope", core.docs.SCOPES, "all"),
                                        purge_tmp=_bool(args, "purge_tmp"),
                                        expired=_bool(args, "expired")))
+
+
+# ---- repositories ----------------------------------------------------------
+#
+# Four handlers that decide NOTHING. The scope resolution, the confirmation and the
+# translation of one user-facing `limit` into `search`'s two knobs all live in
+# `core.repos.RepoIndex`, which the CLI's `cmd_repos_*` handlers call too — so the two hosts
+# cannot answer the same request differently, which is this plugin's central requirement.
+
+
+def _repos_list(args: dict, cfg) -> str:
+    return _ok(_repos(cfg).list_request())
+
+
+def _repos_search(args: dict, cfg) -> str:
+    query = _require(args, "query")
+    repo, across = _text(args, "repo"), _bool(args, "across")
+    limit = _int(args, "limit", 8)                      # the CLI's own default
+    out = _repos(cfg).search_request(query, repo=repo, across=across, limit=limit)
+
+    # The SAME conversion the CLI's `--json` applies, from the core: `_ok`'s `default=str`
+    # would otherwise render each `RepoHit` as its repr.
+    return _ok(core.repos.search_payload(out))
+
+
+def _repos_add(args: dict, cfg) -> str:
+    repo = _require(args, "repo")
+    paths = _object(args, "paths", required=True)
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        raise ToolArgError("'paths' must be an array of file paths, "
+                           f"got {type(paths).__name__}")
+
+    return _ok(_repos(cfg).add_files(repo, paths))
+
+
+def _repos_drop(args: dict, cfg) -> str:
+    repo = _require(args, "repo")
+
+    return _ok(_repos(cfg).drop_request(repo, _bool(args, "yes")))
 
 
 # ---- schemas ---------------------------------------------------------------
@@ -691,6 +735,81 @@ SCHEMAS = [
             "required": [],
         },
     },
+    # -- repositories --
+    {
+        "name": "repos_list",
+        "description": ("List the indexed repositories, with their labels, checkouts and "
+                        "when each was last indexed. Use it to find out which repository "
+                        "names repos_search accepts, or before indexing a working copy "
+                        "again. Repositories whose chunks have no registry entry are "
+                        "reported separately — they can only be removed by name."),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "repos_search",
+        "description": ("Search indexed source code and get back file locations to read, "
+                        "not snapshots to quote. Use it to find where something is "
+                        "implemented in a repository that is not open in front of you. It "
+                        "searches THE REPOSITORY OF THE CURRENT WORKING DIRECTORY by "
+                        "default; name another with `repo`, or set `across` to search every "
+                        "indexed one. It refuses rather than widening silently when the "
+                        "working directory belongs to no indexed repository."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "What you are looking for, in prose."},
+                "repo": {"type": "string",
+                         "description": "The repository to search, as shown by repos_list. "
+                                        "Omit to use the one this working directory "
+                                        "belongs to."},
+                "across": {"type": "boolean",
+                           "description": "Search EVERY indexed repository instead of one. "
+                                          "Results come back grouped by repository."},
+                "limit": {"type": "integer",
+                          "description": "Scoped: max hits (default 8). With across: max "
+                                         "repositories, each with up to 3 hits."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "repos_add",
+        "description": ("Index the given files under a repository, replacing any previous "
+                        "version of each one. Use it to keep a repository's archive current "
+                        "after edits, or to add files a bulk index did not cover. It indexes "
+                        "EXACTLY the paths given — it never walks a directory — and a file "
+                        "it cannot read is reported and skipped, not fatal to the batch."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string",
+                         "description": "The repository name, as shown by repos_list."},
+                "paths": {"type": "array", "items": {"type": "string"},
+                          "description": "The files to index, as paths on this machine."},
+            },
+            "required": ["repo", "paths"],
+        },
+    },
+    {
+        "name": "repos_drop",
+        "description": ("Delete a repository's archive permanently: its chunks, its registry "
+                        "entry and the local bindings of every checkout. There is no undo "
+                        "and no sweep that restores it, so it is REFUSED unless `yes` is "
+                        "true. Use it to remove an archive that is obsolete, or to clear a "
+                        "repository reported as divergent by repos_list."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string",
+                         "description": "The repository to delete, as shown by repos_list."},
+                "yes": {"type": "boolean",
+                        "description": "Confirms the permanent deletion. Without it nothing "
+                                       "is removed and the call comes back as an error."},
+            },
+            "required": ["repo", "yes"],
+        },
+    },
 ]
 
 ROUTES = {
@@ -709,6 +828,10 @@ ROUTES = {
     "docs_list": _docs_list,
     "docs_refresh": _docs_refresh,
     "docs_drop": _docs_drop,
+    "repos_list": _repos_list,
+    "repos_search": _repos_search,
+    "repos_add": _repos_add,
+    "repos_drop": _repos_drop,
 }
 
 

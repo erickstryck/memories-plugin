@@ -56,6 +56,20 @@ class RepoHit:
     stale: str | None    # the reason, when the file changed since it was indexed
 
 
+def search_payload(result: dict) -> dict:
+    """The JSON form of a `search` result: hits as objects, never as their repr.
+
+    Both hosts need it and neither should invent it. `RepoHit` is a dataclass, so a plain
+    `json.dumps(..., default=str)` — which is what both hosts' JSON writers do with an object
+    they do not know — renders a hit as `RepoHit(score=0.41, repo='alpha', …)`: a string no
+    caller can address a file by, and a shape no consumer can parse. One conversion, in the
+    core, so the two hosts cannot answer the same search with two different JSON documents.
+    """
+    return {**result,
+            "groups": [{"repo": g["repo"], "hits": [vars(h) for h in g["hits"]]}
+                       for g in result.get("groups", [])]}
+
+
 class RepoIndex:
     def __init__(self, qdrant: ports.VectorStore, embedder: ports.EmbeddingModel,
                  repos_collection: str, registry_collection: str, vector_size: int):
@@ -268,6 +282,41 @@ class RepoIndex:
         return {"scope": "across" if across else "repo", "repo": None if across else repo,
                 "groups": groups, "truncated": truncated}
 
+    def search_request(self, query: str, repo: str | None = None, across: bool = False,
+                       limit: int = 8, cwd: str | None = None) -> dict:
+        """The search BOTH HOSTS call: resolve the scope, translate the limit, then search.
+
+        It lives here rather than in the two adapters for the reason `DocIndex.drop_request`
+        does: everything below is a DECISION, and a decision taken twice is a decision the
+        two hosts are free to take differently — which is the divergence this plugin's
+        equivalence requirement exists to forbid.
+
+        THE SCOPE IS RESOLVED FROM THE WORKING DIRECTORY, and REFUSED when there is none.
+        Falling back to a search across every repository would be exactly the noise the
+        scoped default was chosen to avoid, and it would be silent, which is worse than
+        wrong. The refusal names both remedies, because either one may be what was meant.
+
+        ONE LIMIT, TWO KNOBS. `search` keeps both of its honest knobs — `limit` trims GROUPS,
+        `group_size` caps hits inside a group — because both are real and the core should not
+        pretend otherwise. A caller has ONE number in mind. On a scoped search there is only
+        ever one group, so `limit` trims nothing and the answer stops at `group_size` however
+        large a number was typed; the caller's number therefore becomes `group_size` there.
+        Across, it stays `limit`, which is how many repositories come back.
+        """
+        if not repo and not across:
+            from . import bindings
+
+            root = bindings.git_root(cwd if cwd is not None else os.getcwd())
+            repo = (bindings.get(root) if root else None) or None
+            if not repo:
+                raise RepoError(
+                    "not inside an indexed repository — name one with --repo <name> "
+                    "(repo=\"<name>\" as a tool argument), or search every one with --all "
+                    "(across=true)")
+        knob = {"limit": limit} if across else {"group_size": limit}
+
+        return self.search(query, repo=repo, across=across, **knob)
+
     def _to_hit(self, raw: dict) -> RepoHit:
         payload = raw.get("payload") or {}
         md = payload.get("metadata") or {}
@@ -288,7 +337,34 @@ class RepoIndex:
                                  md.get("src_digest")),
         )
 
+    def list_request(self) -> dict:
+        """What a LISTING is, on either host: the registered repos AND the divergent ones.
+
+        The two calls are one operation because leaving the second one out is precisely what
+        makes a divergent repo invisible — chunks, no entry, and therefore no name to drop it
+        by. Shared so that one host cannot quietly answer with half of it.
+        """
+        return {"repos": self.list_repos(), "divergent": self.divergent_repos()}
+
     # ---- deleting -----------------------------------------------------------
+
+    def drop_request(self, repo: str, confirmed: bool) -> dict:
+        """The guarded deletion BOTH HOSTS call: refuses unless it was confirmed.
+
+        The archive this removes is permanent by design and there is no sweep to undo it, so
+        the confirmation is the only thing between a mistyped name and a lost index. It sits
+        here, next to the deletion, and not in each adapter, because a guard that lives in
+        the adapters is a guard the second host can be written without — and the tool surface
+        is the host where a MODEL, not a person, chooses the arguments.
+        """
+        if not repo:
+            raise RepoError("a repository name is required")
+        if not confirmed:
+            raise RepoError(
+                f"this permanently deletes the archive of {repo!r} and there is no undo. "
+                f"Confirm it explicitly: --yes on the CLI, \"yes\": true as a tool argument.")
+
+        return self.drop_repo(repo)
 
     def drop_repo(self, repo: str) -> dict:
         """Deletes a repository: chunks, then the entry, then the local bindings.

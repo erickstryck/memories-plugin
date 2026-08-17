@@ -127,5 +127,13 @@ class TestFailureDoesNotOpen(unittest.TestCase):
                     ix.search("invoice", repo="quiet")
 
 
+class TestTheDocumentArchivesAreUntouched(unittest.TestCase):
+    def test_the_repos_collection_is_not_one_of_the_docs_scopes(self):
+        """A regression here floods every existing `docs search --scope all` with tens of
+        thousands of code chunks — shipped behaviour, silently degraded."""
+        from core.docs import SCOPES
+        self.assertEqual(set(SCOPES), {"all", "tmp", "library"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

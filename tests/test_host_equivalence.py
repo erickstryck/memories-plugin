@@ -1052,6 +1052,22 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
         for name in self.NOT_FOR_THE_MODEL:
             self.assertNotIn(name, self.tool_names)
 
+    def test_both_hosts_expose_the_same_repository_operations(self):
+        """Equivalence is this plugin's central requirement. A verb on one host and not the
+        other is exactly the divergence this file exists to catch."""
+        from hosts.hermes import tools as hermes_tools
+
+        cli_verbs = {"list", "search", "add", "drop"}
+        # SCHEMAS is the surface the host actually consumes
+        # (hosts/hermes/__init__.py:251 deep-copies it); dispatch() routes the calls.
+        hermes_names = {t["name"] for t in hermes_tools.SCHEMAS
+                        if t["name"].startswith("repos_")}
+        self.assertEqual({n.split("repos_", 1)[1] for n in hermes_names}, cli_verbs)
+        # And the same set from the CLI's own walk, so this cannot pass by both sides
+        # being wrong in the same way: the verbs above are asserted to be REAL.
+        self.assertEqual({n.split("repos_", 1)[1] for n in self.cli_names
+                          if n.startswith("repos_")}, cli_verbs)
+
 
 class TestTheToolsDoWhatTheCLIDoes(unittest.TestCase):
     """Semantic parity, because name parity is not it.
@@ -1295,6 +1311,117 @@ def core_module():
     import core
 
     return core
+
+
+class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
+    """Name parity is checked above; this is the other half.
+
+    Four operations, each driven through the CLI handler and through the hermes tool over
+    the SAME `RepoIndex`, comparing what came back or what landed. The decisions the two
+    would otherwise be free to take apart are the ones that live in the core here — the
+    scope resolution, the confirmation, and the translation of one user-facing `limit` into
+    `search`'s two knobs — so this test is what proves neither host reimplemented them.
+    """
+
+    def setUp(self):
+        import tempfile as _tempfile
+        from core.repos import RepoIndex
+        from tests.fakes import FakeEmbedder, FakeVectorStore
+        os.environ["QCTX_STATE_DIR"] = _tempfile.mkdtemp()
+        self.cli = load_cli()
+        emb = FakeEmbedder(dim=8)
+        self.ix = RepoIndex(FakeVectorStore(), emb, "repos", "reg", emb.dim)
+        self.cfg = core_module().Config(
+            qdrant_url="http://localhost:1", qdrant_api_key="", api_base_url="",
+            api_key="", embed_url="http://localhost:1/embeddings", rerank_url="",
+            embed_model="m", rerank_model="", memory_collection="mem",
+            docs_collection="tmp", library_collection="lib", repos_collection="repos",
+            repos_registry_collection="reg", vector_size=emb.dim)
+        self.paths = []
+        for name in ("alpha", "beta"):
+            self.ix.register(name, name.title(), [], f"/tmp/{name}")
+            self.paths.append(self._a_file())
+
+    def _a_file(self) -> str:
+        import tempfile as _tempfile
+        fd, path = _tempfile.mkstemp(suffix=".py")
+        with os.fdopen(fd, "w") as fh:
+            fh.write("".join(f"invoice line {i} charge total billing\n" for i in range(400)))
+
+        return path
+
+    def _through_the_cli(self, handler, **kw):
+        import io
+        import unittest.mock
+        from contextlib import redirect_stdout
+
+        class Args:
+            def __init__(self, **over):
+                self.json = True
+                self.repo = None
+                self.across = False
+                self.limit = 8
+                self.yes = False
+                self.__dict__.update(over)
+
+        out = io.StringIO()
+        with unittest.mock.patch.object(self.cli.core, "build_repos", lambda cfg: self.ix), \
+             redirect_stdout(out):
+            handler(Args(**kw), self.cfg)
+
+        return json.loads(out.getvalue())
+
+    def _through_the_tool(self, name, **args):
+        import unittest.mock
+        from hosts.hermes import tools
+        with unittest.mock.patch.object(core_module(), "build_repos", lambda cfg: self.ix):
+            return json.loads(tools.dispatch(name, args, cfg=self.cfg))
+
+    def test_add_indexes_the_same_files_from_both_hosts(self):
+        cli = self._through_the_cli(self.cli.cmd_repos_add, repo="alpha",
+                                    paths=[self.paths[0]])
+        tool = self._through_the_tool("repos_add", repo="alpha", paths=[self.paths[0]])
+        self.assertEqual(cli["chunks"], tool["chunks"])
+        self.assertEqual((cli["repo"], cli["files"]), (tool["repo"], tool["files"]))
+
+    def test_list_reports_the_same_repositories_and_the_same_divergence(self):
+        self.ix.add_files("alpha", [self.paths[0]])
+        self.ix.add_files("ghost", [self.paths[1]])
+        cli = self._through_the_cli(self.cli.cmd_repos_list)
+        tool = self._through_the_tool("repos_list")
+        self.assertEqual(cli, tool)
+        self.assertEqual(cli["divergent"], ["ghost"],
+                         "a repo that cannot be listed cannot be dropped by name either")
+
+    def test_one_limit_delivers_the_same_number_of_hits_on_both_hosts(self):
+        """The knob translation is the divergence risk here: `limit` trims groups and
+        `group_size` caps hits inside one, so a host that passed the user's number to the
+        wrong knob would answer the same request with a different number of hits."""
+        self.ix.add_files("alpha", [self.paths[0]])
+        self.ix.add_files("beta", [self.paths[1]])
+        cli = self._through_the_cli(self.cli.cmd_repos_search, query="invoice",
+                                    repo="alpha", limit=6)
+        tool = self._through_the_tool("repos_search", query="invoice", repo="alpha", limit=6)
+        self.assertEqual(len(cli["groups"][0]["hits"]), 6)
+        self.assertEqual(len(cli["groups"][0]["hits"]), len(tool["groups"][0]["hits"]))
+
+    def test_neither_host_drops_an_archive_without_the_confirmation(self):
+        self.ix.add_files("alpha", [self.paths[0]])
+        answer = self._through_the_tool("repos_drop", repo="alpha")
+        self.assertIn("error", answer)
+        self.assertIsNotNone(self.ix.get_repo("alpha"),
+                             "the tool dropped an archive nobody confirmed")
+        with self.assertRaises(Exception):
+            self._through_the_cli(self.cli.cmd_repos_drop, repo="alpha")
+        self.assertIsNotNone(self.ix.get_repo("alpha"))
+
+    def test_a_confirmed_drop_reports_the_same_three_keys_on_both_hosts(self):
+        self.ix.add_files("alpha", [self.paths[0]])
+        self.ix.add_files("beta", [self.paths[1]])
+        cli = self._through_the_cli(self.cli.cmd_repos_drop, repo="alpha", yes=True)
+        tool = self._through_the_tool("repos_drop", repo="beta", yes=True)
+        self.assertEqual(set(cli), set(tool))
+        self.assertEqual(set(cli), {"repo", "unbound", "already_gone"})
 
 
 

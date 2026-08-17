@@ -19,10 +19,16 @@ the logic lives in `core/`; this file only translates arguments.
     qctx docs list [--scope ...]
     qctx docs refresh [--scope library|tmp]      reindexes what changed on disk
     qctx docs drop <doc-id> [--scope ...] | --purge-tmp | --expired
+    qctx repos list                              every indexed repository
+    qctx repos search <question> [--repo R | --all] [--limit N]
+    qctx repos add <repo> <path> [<path>...]     indexes exactly these files
+    qctx repos drop <repo> --yes                 permanent, no undo
 
 Three archives, three lifecycles: MEMORY holds curated facts and never expires;
 LIBRARY holds documents for reference and never expires; TEMPORARY holds a task's
-documents and expires. Distinct collections, by configuration.
+documents and expires. Distinct collections, by configuration. REPOSITORIES are a
+fourth: code chunks grouped by repo, with a registry of what exists, in two more
+collections of their own — see `core/repos.py` for why they are not the library.
 """
 import argparse
 import json
@@ -458,6 +464,74 @@ def cmd_docs_drop(args, cfg):
         print(f"doc_id {res['doc_id']} removed from {res['scope']}")
 
 
+# ---- repositories ----------------------------------------------------------
+#
+# Every handler here RENDERS and decides nothing: the scope resolution, the confirmation and
+# the translation of `--limit` into the search's two knobs all live in `core.repos`, because
+# the hermes tools offer the same four operations and a decision taken in an adapter is a
+# decision the two hosts are free to take differently.
+
+
+def cmd_repos_list(args, cfg):
+    out = core.build_repos(cfg).list_request()
+    if args.json:
+        output(out, True)
+
+        return
+    for r in out["repos"]:
+        print(f"{r['repo']:<24} {r.get('label', ''):<24} "
+              f"{len(r.get('checkouts') or [])} checkout(s)  {r.get('indexed_at', '?')}")
+    for name in out["divergent"]:
+        # Named out loud: it cannot be listed, so it cannot be dropped by name either.
+        print(f"{name:<24} (chunks with no registry entry — run `repos drop {name}`)")
+
+
+def cmd_repos_search(args, cfg):
+    out = core.build_repos(cfg).search_request(args.query, repo=args.repo,
+                                               across=args.across, limit=args.limit)
+    if args.json:
+        # The core's conversion, not `default=str`: a `RepoHit` rendered as its repr is a
+        # string nothing can address a file by. The hermes tool applies the same one.
+        output(core.repos.search_payload(out), True)
+
+        return
+    for group in out["groups"]:
+        print(f"\n=== {group['repo']}")
+        for hit in group["hits"]:
+            flag = f"  [{hit.stale}]" if hit.stale else ""
+            print(f"  {hit.score:.3f}  {hit.path}:{hit.start_line}-{hit.end_line}{flag}")
+    if out["truncated"]:
+        # Never a claim of absence: the groups beyond the ceiling were never judged.
+        print("\n(more repositories matched than --limit allowed — raise it to see them)")
+
+
+def cmd_repos_add(args, cfg):
+    out = core.build_repos(cfg).add_files(args.repo, args.paths)
+    if args.json:
+        output(out, True)
+
+        return
+    print(f"{out['files']} file(s), {out['chunks']} chunk(s) under {out['repo']}")
+    for path, why in out["skipped"]:
+        print(f"  skipped {path}: {why}")
+
+
+def cmd_repos_drop(args, cfg):
+    out = core.build_repos(cfg).drop_request(args.repo, args.yes)
+    if args.json:
+        output(out, True)
+
+        return
+    if out["already_gone"]:
+        # A different outcome, and it needs different words: no archive was deleted here —
+        # it was already gone, and what this run removed is what outlived it. Printing
+        # "dropped" would report a deletion that happened in some earlier, failed run.
+        print(f"{out['repo']}: the archive was already gone; cleared "
+              f"{len(out['unbound'])} stale binding(s)")
+    else:
+        print(f"dropped {out['repo']}; unbound {len(out['unbound'])} checkout(s)")
+
+
 # ---- parser ----------------------------------------------------------------
 
 def _propagate_json(parser: argparse.ArgumentParser) -> None:
@@ -596,6 +670,29 @@ def build_parser() -> argparse.ArgumentParser:
                    help="delete the entire temporary collection (library untouched)")
     p.add_argument("--expired", action="store_true")
     p.set_defaults(fn=cmd_docs_drop)
+
+    rep = sub.add_parser("repos", help="repository archives, grouped by repo")
+    repsub = rep.add_subparsers(dest="repos_cmd", required=True)
+
+    repsub.add_parser("list", help="every indexed repository").set_defaults(fn=cmd_repos_list)
+
+    p = repsub.add_parser("search", help="search one repository, or every one")
+    p.add_argument("query")
+    p.add_argument("--repo", help="the repository to search (default: the one you are in)")
+    p.add_argument("--all", action="store_true", dest="across",
+                   help="search every indexed repository")
+    p.add_argument("--limit", type=int, default=8)
+    p.set_defaults(fn=cmd_repos_search)
+
+    p = repsub.add_parser("add", help="index the given files under a repository")
+    p.add_argument("repo")
+    p.add_argument("paths", nargs="+")
+    p.set_defaults(fn=cmd_repos_add)
+
+    p = repsub.add_parser("drop", help="delete a repository archive, permanently")
+    p.add_argument("repo")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation")
+    p.set_defaults(fn=cmd_repos_drop)
 
     _propagate_json(ap)
 

@@ -86,3 +86,16 @@ def build_docs(cfg: Config) -> DocIndex:
     return DocIndex(build_qdrant(cfg), build_embedder(cfg), build_reranker(cfg),
                     cfg.require_docs_collection(), cfg.require_library_collection(),
                     cfg.vector_size)
+
+
+def build_repos(cfg: Config) -> RepoIndex:
+    """Assembles repository-archive access, for BOTH hosts.
+
+    One builder rather than one per adapter, like `build_docs`: the two hosts have to reach
+    the same two collections, and a second copy of "which collections a repository archive
+    is made of" is how they start reaching different ones. No re-ranker — the repository
+    search returns locations to read, not a ranked verdict to trust.
+    """
+    return RepoIndex(build_qdrant(cfg), build_embedder(cfg),
+                     cfg.require_repos_collection(),
+                     cfg.require_repos_registry_collection(), cfg.vector_size)
