@@ -83,7 +83,8 @@ def a_config(**over) -> core.Config:
                   api_base_url="http://localhost:1/v1", api_key="", embed_url="",
                   rerank_url="", embed_model="m", rerank_model="",
                   memory_collection="mem", docs_collection="tmp",
-                  library_collection="lib", vector_size=8)
+                  library_collection="lib", repos_collection="repos",
+                  repos_registry_collection="reg", vector_size=8)
     values.update(over)
 
     return core.Config(**values)
@@ -215,6 +216,7 @@ class TestDispatch(unittest.TestCase):
         cfg = core.Config(qdrant_url="", qdrant_api_key="", api_base_url="", api_key="",
                           embed_url="", rerank_url="", embed_model="m", rerank_model="r",
                           memory_collection="", docs_collection="d", library_collection="l",
+                          repos_collection="repos", repos_registry_collection="reg",
                           vector_size=1024)
         out = tools.dispatch("memory_recall", {"query": "anything"}, cfg=cfg)
         payload = json.loads(out)

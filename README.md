@@ -295,6 +295,8 @@ Recognized variables (canonical first, legacy aliases accepted):
 | `memory_collection` | `QCTX_MEMORY_COLLECTION`, `COLLECTION_NAME` |
 | `docs_collection` | `QCTX_DOCS_COLLECTION`, `DOCS_COLLECTION` |
 | `library_collection` | `QCTX_LIBRARY_COLLECTION`, `LIBRARY_COLLECTION` |
+| `repos_collection` | `QCTX_REPOS_COLLECTION`, `REPOS_COLLECTION` |
+| `repos_registry_collection` | `QCTX_REPOS_REGISTRY_COLLECTION`, `REPOS_REGISTRY_COLLECTION` |
 | `vector_size` | `QCTX_VECTOR_SIZE`, `VECTOR_SIZE` |
 | `context_window` | `QCTX_CONTEXT_WINDOW` |
 

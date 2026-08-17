@@ -138,6 +138,7 @@ class TestDerivedUrl(unittest.TestCase):
         base = dict(qdrant_url="", qdrant_api_key="", api_base_url="", api_key="",
                     embed_url="", rerank_url="", embed_model="m", rerank_model="r",
                     memory_collection="", docs_collection="d", library_collection="l",
+                    repos_collection="repos", repos_registry_collection="reg",
                     vector_size=1024)
         base.update(kw)
 
@@ -164,7 +165,8 @@ class TestCollectionCollision(unittest.TestCase):
         return cfgmod.Config(qdrant_url="q", qdrant_api_key="", api_base_url="b", api_key="",
                              embed_url="", rerank_url="", embed_model="m", rerank_model="r",
                              memory_collection=mem, docs_collection=docs,
-                             library_collection=lib, vector_size=1024)
+                             library_collection=lib, repos_collection="repos",
+                             repos_registry_collection="reg", vector_size=1024)
 
     def test_documents_in_the_memory_collection_is_refused(self):
         with self.assertRaises(cfgmod.ConfigError):

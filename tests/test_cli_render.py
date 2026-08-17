@@ -103,6 +103,7 @@ class TestRenderDiagnose(unittest.TestCase):
             qdrant_url="", qdrant_api_key="", api_base_url="", api_key="",
             embed_url="", rerank_url="", embed_model="m", rerank_model="r",
             memory_collection="", docs_collection="d", library_collection="l",
+            repos_collection="repos", repos_registry_collection="reg",
             vector_size=1024)
 
     def test_diagnose_returns_the_keys_the_cli_reads(self):

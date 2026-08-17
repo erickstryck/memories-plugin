@@ -576,6 +576,8 @@ class MemoriesProvider(_Base):
                                  "claude-code uses to share the archive.",
             "docs_collection": "Collection for temporary document chunks (TTL)",
             "library_collection": "Collection for permanently kept documents",
+            "repos_collection": "Collection holding repository chunks, grouped by repo",
+            "repos_registry_collection": "Collection holding one entry per indexed repository",
             "vector_size": "Embedding dimension; `qctx config detect` measures it",
             "context_window": "Model's context window in tokens; overrides the built-in "
                                "table when the bare model name is ambiguous (e.g. a 1M "

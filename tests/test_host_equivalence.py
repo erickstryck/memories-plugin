@@ -346,7 +346,8 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
                 qdrant_url="http://localhost:1", qdrant_api_key="", api_base_url="",
                 api_key="", embed_url="http://localhost:1/embeddings", rerank_url="",
                 embed_model="m", rerank_model="", memory_collection="test-memories",
-                docs_collection="", library_collection="", vector_size=8,
+                docs_collection="", library_collection="", repos_collection="repos",
+                repos_registry_collection="reg", vector_size=8,
             )
             with unittest.mock.patch.dict(os.environ,
                                           {"QCTX_RECALL_QDRANT_BUDGET": str(budget_value)}):
@@ -1081,7 +1082,8 @@ class TestTheToolsDoWhatTheCLIDoes(unittest.TestCase):
             qdrant_url="http://localhost:1", qdrant_api_key="", api_base_url="",
             api_key="", embed_url="http://localhost:1/embeddings", rerank_url="",
             embed_model="m", rerank_model="", memory_collection="mem",
-            docs_collection="tmp", library_collection="lib", vector_size=emb.dim)
+            docs_collection="tmp", library_collection="lib", repos_collection="repos",
+            repos_registry_collection="reg", vector_size=emb.dim)
 
     def _payload_of(self, mid) -> dict:
         p = dict(self.q.get_point("mem", mid)["payload"])

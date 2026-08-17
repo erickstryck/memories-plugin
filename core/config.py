@@ -38,6 +38,8 @@ ENV_ALIASES = {
     "memory_collection": ("QCTX_MEMORY_COLLECTION", "COLLECTION_NAME"),
     "docs_collection": ("QCTX_DOCS_COLLECTION", "DOCS_COLLECTION"),
     "library_collection": ("QCTX_LIBRARY_COLLECTION", "LIBRARY_COLLECTION"),
+    "repos_collection": ("QCTX_REPOS_COLLECTION", "REPOS_COLLECTION"),
+    "repos_registry_collection": ("QCTX_REPOS_REGISTRY_COLLECTION", "REPOS_REGISTRY_COLLECTION"),
     "vector_size": ("QCTX_VECTOR_SIZE", "VECTOR_SIZE"),
     "context_window": ("QCTX_CONTEXT_WINDOW",),
 }
@@ -54,6 +56,8 @@ DEFAULTS = {
     "memory_collection": "",
     "docs_collection": "memories_docs_tmp",
     "library_collection": "memories_docs_library",
+    "repos_collection": "memories_repos",
+    "repos_registry_collection": "memories_repos_registry",
     "vector_size": 1024,
     "context_window": 0,
 }
@@ -76,6 +80,8 @@ class Config:
     memory_collection: str
     docs_collection: str
     library_collection: str
+    repos_collection: str
+    repos_registry_collection: str
     vector_size: int
     context_window: int = 0
 
@@ -127,6 +133,13 @@ class Config:
     def require_library_collection(self) -> str:
         return self._require_doc_collection("library_collection", self.library_collection)
 
+    def require_repos_collection(self) -> str:
+        return self._require_doc_collection("repos_collection", self.repos_collection)
+
+    def require_repos_registry_collection(self) -> str:
+        return self._require_doc_collection("repos_registry_collection",
+                                            self.repos_registry_collection)
+
     def _require_doc_collection(self, field_name: str, value: str) -> str:
         if not value:
             raise ConfigError(f"{field_name} is not configured")
@@ -134,7 +147,7 @@ class Config:
         return self._require_distinct(field_name, value)
 
     def _require_distinct(self, field_name: str, value: str) -> str:
-        """Ensures the THREE collections are distinct.
+        """Ensures the FIVE collections are distinct.
 
         Every possible collision has a concrete consequence, and none of them raises at
         the time — they all degrade silently:
@@ -145,11 +158,19 @@ class Config:
         - the library in the TEMPORARY collection: the temporary one is destroyable by
           construction (`drop --all` deletes the collection), so a cleanup command would
           become able to erase a permanent archive.
+        - a repo archive on top of the LIBRARY: tens of thousands of automatic code chunks
+          drown the hand-picked documents, which is the same volume argument that keeps
+          documents out of the memory collection, one level down.
+        - the REGISTRY sharing the chunk collection: they are apart so that no search has to
+          filter registry rows out, and a filter forgotten once turns a registry row into a
+          search hit.
         """
         others = {
             "memory_collection": self.memory_collection,
             "docs_collection": self.docs_collection,
             "library_collection": self.library_collection,
+            "repos_collection": self.repos_collection,
+            "repos_registry_collection": self.repos_registry_collection,
         }
         for other_field, other_value in others.items():
             if other_field == field_name or not other_value:
@@ -157,7 +178,7 @@ class Config:
             if other_value == value:
                 raise ConfigError(
                     f"{field_name} and {other_field} point at the same collection "
-                    f"({value!r}). The three collections have different lifecycles and "
+                    f"({value!r}). The five collections have different lifecycles and "
                     f"have to be distinct — see `collections list`."
                 )
 
