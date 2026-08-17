@@ -103,14 +103,28 @@ def normalize_remote(url: str) -> str:
 
     Without this the join offer misses and the user is asked to name a repository that is
     already registered under the other URL form.
+
+    CASE IS FOLDED FIRST, and that is the whole reason there is no `.lower()` at the end: every
+    pattern below is written in lower case, so a scheme spelled `HTTPS://` used to survive its
+    own strip and then feed its colon to the scp-style rule, yielding `https///github.com/…`.
+    Folding once, before anything reads the string, is one owner for "case does not matter
+    here" instead of an ignore-case flag remembered on each pattern separately.
+
+    A `:2222` after the host is a TRANSPORT PORT and is dropped, not turned into a directory.
+    A colon before the first slash is only the scp-style host/path separator when what follows
+    is not a port — otherwise the same self-hosted repository reached over a non-standard SSH
+    port fails to match the plain scp form of itself, which is this function's one job.
     """
-    u = (url or "").strip()
-    u = re.sub(r"^[a-z+]+://", "", u)
+    u = (url or "").strip().lower()
+    u = re.sub(r"^[a-z+.\-]+://", "", u)
     u = re.sub(r"^[^@/]+@", "", u)
-    u = u.replace(":", "/", 1) if "/" not in u.split(":", 1)[0] else u
+    host, sep, rest = u.partition(":")
+    if sep and "/" not in host:
+        port, slash, tail = rest.partition("/")
+        u = (host + ("/" + tail if slash else "")) if port.isdigit() else (host + "/" + rest)
     u = re.sub(r"\.git$", "", u)
 
-    return u.strip("/").lower()
+    return u.strip("/")
 
 
 def slug_for(name: str) -> str:

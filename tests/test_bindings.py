@@ -81,6 +81,25 @@ class TestGitFacts(unittest.TestCase):
         self.assertEqual(bindings.normalize_remote("git@github.com:me/alpha.git"),
                          bindings.normalize_remote("https://github.com/me/alpha"))
 
+    def test_a_non_standard_ssh_port_is_not_a_directory(self):
+        """A port is transport, not identity. Folding `:2222` into the path is precisely the
+        miss this function exists to prevent: the same self-hosted repository reached over a
+        non-standard SSH port would be offered as a new repo instead of a join."""
+        self.assertEqual(bindings.normalize_remote("ssh://git@github.com:2222/me/alpha.git"),
+                         "github.com/me/alpha")
+        self.assertEqual(bindings.normalize_remote("ssh://git@github.com:2222/me/alpha.git"),
+                         bindings.normalize_remote("git@github.com:me/alpha.git"))
+
+    def test_an_upper_case_scheme_normalizes_like_a_lower_case_one(self):
+        """A case-sensitive scheme strip leaves `HTTPS://` in place, and then the scp-style
+        colon rule fires on the scheme's own colon and yields `https///github.com/me/alpha`.
+        The value is asserted, not just the equality: two forms agreeing on garbage would
+        satisfy an equality alone."""
+        self.assertEqual(bindings.normalize_remote("HTTPS://GitHub.com/Me/Alpha"),
+                         "github.com/me/alpha")
+        self.assertEqual(bindings.normalize_remote("HTTPS://GitHub.com/Me/Alpha"),
+                         bindings.normalize_remote("https://github.com/me/alpha"))
+
     def test_the_slug_is_stable_and_filesystem_shaped(self):
         self.assertEqual(bindings.slug_for("My Repo!"), "my-repo")
         self.assertEqual(bindings.slug_for("awesome-cv3"), "awesome-cv3")
