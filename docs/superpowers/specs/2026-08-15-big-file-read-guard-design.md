@@ -261,6 +261,23 @@ e o último turno do usuário.
 mensagem. Responsabilidade única, e evita que uma leitura bloqueada dispare centenas de
 chunks de embedding sem o usuário pedir.
 
+> **PRECISÃO de 2026-08-17, medida.** "Não age" era forte demais como estava escrito, e a
+> medição é melhor que a promessa. No caminho de BLOQUEIO — só nele — descobrir quem já está
+> indexado passa por `DocIndex.list_docs`, que chama `ensure` e, no arquivo temporário,
+> `sweep`. Medido nos dois hosts: `ensure_collection`, `ensure_payload_index` e
+> `delete_by_filter`. **Zero embeddings e zero pontos escritos** — a catástrofe que esta
+> cláusula existe para impedir continua impedida, e agora há teste que congela exatamente
+> esse conjunto de operações.
+>
+> E o `sweep` não é efeito colateral indesejado: ele é o que torna a resposta CORRETA. Sem
+> ele a guarda poderia dizer *"já indexado como X, busque nele"* sobre um documento que
+> expirou — mandando o usuário buscar num acervo que não o tem mais. Conselho errado é
+> exatamente o que os três casos do `decide` existem para evitar.
+>
+> Contornar isso exigiria uma listagem própria dentro da guarda, isto é, um SEGUNDO dono da
+> pergunta "o que está indexado" — o defeito que a ruling F5 já corrigiu três vezes nesta
+> feature. A redação é que estava imprecisa, não o código.
+
 ## Testes
 
 - **`core/bigfile.py`** — tabela sobre `Budget` fabricado: os dois critérios, as fronteiras
