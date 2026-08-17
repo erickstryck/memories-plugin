@@ -16,23 +16,17 @@ dono do vínculo local *caminho → repo*; o CLI só traduz argumentos.
 
 **Spec:** `docs/superpowers/specs/2026-08-17-repo-subcollections-design.md`
 
-## Pré-condição de base, e ela é textual
+## Base, já resolvida
 
-Esta branch (`repo-subcollections`) saiu da `main` em `855f6d3`. O PR #1 (guarda de arquivo
-grande) está ABERTO e toca `core/config.py` nos MESMOS três pontos de inserção que a Task 2 toca
-(`ENV_ALIASES`, `DEFAULTS`, o dataclass `Config`). Antes de começar:
+Esta branch foi **rebaseada em `cbfad7f`** (o merge do PR #1, a guarda de arquivo grande) em
+2026-08-17, e a suíte foi reconferida: **737 testes, OK (skipped=17)**. Essa é a baseline. O
+conflito em `core/config.py` que uma versão anterior deste plano previa **não aconteceu** — as
+duas branches tocaram regiões diferentes.
 
-```bash
-git fetch origin && git log --oneline origin/main -1
-```
-
-Se `origin/main` já contiver o merge do PR #1, faça `git rebase origin/main` PRIMEIRO e espere
-conflito nesses três pontos — são inserções adjacentes, resolve-se mantendo as duas. Se ainda não
-contiver, siga; o rebase acontece depois e o conflito é o mesmo.
-
-O que NÃO existe nesta base e nenhuma task pode referenciar: `core/knobs.py`, `core/bigfile.py`,
-`core/inventory.py`, `core/windows.py`, `hooks/bigfile.py`. Os helpers de env vivem duplicados em
-`hooks/recall.py:54` e `hooks/checkpoint.py:30`; **não unifique** — é escopo de outra branch.
+**O que agora EXISTE nesta base e o plano PODE referenciar** (uma versão anterior dizia o
+contrário, escrita antes do merge): `core/knobs.py` com `env(name, legacy, default)` e
+`env_num(...)`; `core/bigfile.py`, `core/windows.py`, `core/inventory.py`, `hooks/bigfile.py`.
+Os helpers de env **já estão unificados** em `core/knobs.py` — não os reescreva.
 
 ## Global Constraints
 
@@ -942,13 +936,31 @@ MSG
 
 **Files:**
 - Create: `core/bindings.py`
+- Modify: `core/knobs.py` (recebe `state_dir`)
+- Modify: `core/inventory.py:62` (passa a importar `state_dir` em vez de defini-lo)
 - Modify: `core/repos.py` (`candidates_for`)
 - Test: `tests/test_bindings.py`
+
+**`state_dir()` JÁ TEM DONO, e ele está na camada errada.** `core/inventory.py:62` o define — mas
+`inventory` é o módulo que fala com o Qdrant, importado TARDIAMENTE no caminho raro da guarda
+justamente para o caminho comum não pagar o import. Um helper que só lê uma variável de ambiente
+e monta um caminho não pertence a um módulo de rede.
+
+`Ruling: MOVER `state_dir` para `core/knobs.py` (puro, eager, já dono da leitura de ambiente) e
+fazer `inventory` importá-lo de lá. `bindings` também importa de lá. — Motivo: a alternativa é
+`bindings` definir o seu, e aí seriam TRÊS donos do mesmo caminho (inventory, bindings, e os dois
+`STATE_DIR` dos hooks) — a ruling F5 desta base, um dono por invariante, e desta vez seria eu
+introduzindo. Mover em vez de copiar também tira um helper puro de dentro de um módulo de rede.
+— Custo se errado: um import a mais em `inventory`, e o `state_dir` fica num módulo que já é
+importado por todo mundo de qualquer forma.`
+
+**NÃO** unifique os dois `STATE_DIR` de `hooks/recall.py:111` e `hooks/checkpoint.py:56`. É
+duplicação pré-existente que este trabalho não toca, e mexer nela é refatoração não relacionada.
 
 **Interfaces:**
 - Consumes: `RepoIndex.list_repos()` (Task 3).
 - Produces:
-  - `bindings.state_dir() -> str` (honra `QCTX_STATE_DIR`)
+  - `knobs.state_dir() -> Path` (MOVIDO de `core/inventory.py`, honra `QCTX_STATE_DIR`)
   - `bindings.get(checkout: str) -> str | None`
   - `bindings.bind(checkout: str, repo: str) -> None`
   - `bindings.forget_repo(repo: str) -> list[str]` — devolve os checkouts desvinculados
@@ -1092,7 +1104,31 @@ if __name__ == "__main__":
 Run: `python3 -m unittest tests.test_bindings 2>&1 | tail -4`
 Expected: FAIL — `ModuleNotFoundError: No module named 'core.bindings'`
 
-- [ ] **Step 3: Implemente `core/bindings.py`**
+- [ ] **Step 3: Mova `state_dir` para a camada certa**
+
+Corte a função de `core/inventory.py:62` e cole em `core/knobs.py`, acrescentando ao docstring
+por que ela mora lá:
+
+```python
+def state_dir() -> Path:
+    """Where this plugin keeps state, honouring QCTX_STATE_DIR.
+
+    It lives here and not beside the code that first needed it: reading one env var and
+    building a path is exactly what this module is for, and its previous home talks to Qdrant
+    and is imported LAZILY so the common path does not pay for it. A pure helper inside a
+    network module forces every caller to choose between an unwanted import and a copy.
+    """
+    return Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
+```
+
+Em `core/inventory.py`, troque a definição por `from .knobs import state_dir` (mantendo o uso
+inalterado) e confirme `from pathlib import Path` no `core/knobs.py`.
+
+Run: `find . -name __pycache__ -type d -prune -exec rm -rf {} + ; python3 -m unittest discover -s tests 2>&1 | tail -3`
+Expected: `OK`, 737 — o move não muda comportamento, e se algum teste cair é porque o import
+ficou faltando em algum lugar.
+
+- [ ] **Step 4: Implemente `core/bindings.py`**
 
 ```python
 """Which repository is THIS working copy, locally and without asking twice.
@@ -1114,19 +1150,21 @@ import os
 import re
 import subprocess
 
+from .knobs import state_dir
+
 FILENAME = "repo-bindings.json"
 
 
-def state_dir() -> str:
-    root = os.environ.get("QCTX_STATE_DIR") or os.path.join(
-        os.path.expanduser("~"), ".memories-plugin", "state")
+def _path() -> str:
+    """The binding file, under the ONE state directory this plugin has.
+
+    `state_dir` is imported and not redefined: it already had an owner, and a third copy of
+    "where does state live" is how the three of them start disagreeing.
+    """
+    root = state_dir()
     os.makedirs(root, exist_ok=True)
 
-    return root
-
-
-def _path() -> str:
-    return os.path.join(state_dir(), FILENAME)
+    return os.path.join(root, FILENAME)
 
 
 def _load() -> dict:
@@ -1215,7 +1253,7 @@ def slug_for(name: str) -> str:
     return s.strip("-") or "repo"
 ```
 
-- [ ] **Step 4: Acrescente `candidates_for` ao `RepoIndex`**
+- [ ] **Step 5: Acrescente `candidates_for` ao `RepoIndex`**
 
 Em `core/repos.py`, depois de `list_repos`:
 
@@ -1241,12 +1279,12 @@ Em `core/repos.py`, depois de `list_repos`:
                 "suggest": bindings.slug_for(os.path.basename(os.path.realpath(root)))}
 ```
 
-- [ ] **Step 5: Rode e veja passar**
+- [ ] **Step 6: Rode e veja passar**
 
 Run: `find . -name __pycache__ -type d -prune -exec rm -rf {} + ; python3 -m unittest tests.test_bindings 2>&1 | tail -3`
 Expected: `Ran 13 tests`, `OK`
 
-- [ ] **Step 6: Prove que as duas guardas mordem, uma por vez**
+- [ ] **Step 7: Prove que as duas guardas mordem, uma por vez**
 
 ```bash
 cp core/repos.py /tmp/rp.bak
@@ -1276,7 +1314,7 @@ cp /tmp/bd.bak core/bindings.py && rm /tmp/bd.bak /tmp/rp.bak
 Expected: a primeira nomeia `test_a_binding_to_a_repo_that_no_longer_exists...`; a segunda
 nomeia `test_the_same_repo_over_ssh_and_https_normalizes_alike`. Registre as duas COM o escopo.
 
-- [ ] **Step 7: Rode a suíte inteira e commite**
+- [ ] **Step 8: Rode a suíte inteira e commite**
 
 ```bash
 find . -name __pycache__ -type d -prune -exec rm -rf {} + ; python3 -m unittest discover -s tests 2>&1 | tail -3
