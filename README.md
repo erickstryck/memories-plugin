@@ -67,7 +67,7 @@ language, not just semantics. Consequences in the design:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 493 collected, 476 offline; no network, no deps
+python3 -m unittest discover -s tests    # 737 collected, 720 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -361,7 +361,7 @@ hosts/
   hermes/       the hermes-agent adapter: the provider object and its 15 tools
 skills/     memory, doc-index
 scripts/    cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
-tests/      476 offline tests + 17 integration
+tests/      720 offline tests + 17 integration
 ```
 
 ## Design
@@ -448,7 +448,7 @@ on purpose, and both are data rather than prose:
 Done and tested: the core, the CLI, the three archives, the guided diagnostics, all three
 hooks, both skills and the plugin manifest for claude-code; the provider, its 15 tools,
 the shared configuration wizard and the install script for hermes-agent; and the big-file
-read guard on both hosts. 697 offline tests and 17 integration tests against a real Qdrant
+read guard on both hosts. 720 offline tests and 17 integration tests against a real Qdrant
 and real models.
 
 Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the
