@@ -441,7 +441,7 @@ on purpose, and both are data rather than prose:
 Done and tested: the core, the CLI, the three archives, the guided diagnostics, all three
 hooks, both skills and the plugin manifest for claude-code; the provider, its 15 tools,
 the shared configuration wizard and the install script for hermes-agent; and the big-file
-read guard on both hosts. 685 offline tests and 17 integration tests against a real Qdrant
+read guard on both hosts. 697 offline tests and 17 integration tests against a real Qdrant
 and real models.
 
 Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the
