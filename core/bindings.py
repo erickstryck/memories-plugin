@@ -110,18 +110,23 @@ def normalize_remote(url: str) -> str:
     Folding once, before anything reads the string, is one owner for "case does not matter
     here" instead of an ignore-case flag remembered on each pattern separately.
 
-    A `:2222` after the host is a TRANSPORT PORT and is dropped, not turned into a directory.
-    A colon before the first slash is only the scp-style host/path separator when what follows
-    is not a port — otherwise the same self-hosted repository reached over a non-standard SSH
-    port fails to match the plain scp form of itself, which is this function's one job.
+    THE SCHEME DECIDES WHAT A COLON MEANS, and that is why it is captured instead of merely
+    stripped. git's URL grammar gives scp-style `user@host:path` no port syntax at all — to
+    name a port you must write `ssh://user@host:port/path`. So `:2222` is a TRANSPORT PORT only
+    when a scheme was present, and is dropped rather than turned into a directory; without a
+    scheme the colon is the path separator and what follows is never a port, however numeric it
+    looks. Guessing from the digits alone breaks one of the two forms whichever way it guesses:
+    a repository under a numeric directory (Gerrit, several self-hosted layouts) would lose that
+    segment, and the scp form would stop matching the https form of the same repository.
     """
     u = (url or "").strip().lower()
-    u = re.sub(r"^[a-z+.\-]+://", "", u)
+    u, had_scheme = re.subn(r"^[a-z+.\-]+://", "", u)
     u = re.sub(r"^[^@/]+@", "", u)
     host, sep, rest = u.partition(":")
     if sep and "/" not in host:
         port, slash, tail = rest.partition("/")
-        u = (host + ("/" + tail if slash else "")) if port.isdigit() else (host + "/" + rest)
+        u = (host + ("/" + tail if slash else "")) if had_scheme and port.isdigit() \
+            else (host + "/" + rest)
     u = re.sub(r"\.git$", "", u)
 
     return u.strip("/")

@@ -90,6 +90,24 @@ class TestGitFacts(unittest.TestCase):
         self.assertEqual(bindings.normalize_remote("ssh://git@github.com:2222/me/alpha.git"),
                          bindings.normalize_remote("git@github.com:me/alpha.git"))
 
+    def test_a_numeric_first_path_segment_survives_the_scp_form(self):
+        """scp-style `user@host:path` has NO port syntax in git's URL grammar — everything
+        after the colon is the path. A repository under a numeric directory (Gerrit and
+        several self-hosted layouts do this) must keep that segment, or the scp form stops
+        matching the https form of the same repository: the port fix arriving from the other
+        side."""
+        self.assertEqual(bindings.normalize_remote("git@host:1234/repo.git"), "host/1234/repo")
+        self.assertEqual(bindings.normalize_remote("git@host:1234/repo.git"),
+                         bindings.normalize_remote("https://host/1234/repo"))
+
+    def test_a_port_is_still_dropped_when_a_scheme_said_it_was_one(self):
+        """The other side of the same coin, and the reason the scheme is the disambiguator: to
+        name a port you MUST write `ssh://user@host:port/path`, so here `1234` really is a
+        port and folding it into the path would be the original miss again."""
+        self.assertEqual(bindings.normalize_remote("ssh://git@host:1234/repo.git"), "host/repo")
+        self.assertEqual(bindings.normalize_remote("ssh://git@host:1234/repo.git"),
+                         bindings.normalize_remote("git@host:repo.git"))
+
     def test_an_upper_case_scheme_normalizes_like_a_lower_case_one(self):
         """A case-sensitive scheme strip leaves `HTTPS://` in place, and then the scp-style
         colon rule fires on the scheme's own colon and yields `https///github.com/me/alpha`.
