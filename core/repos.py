@@ -216,6 +216,11 @@ class RepoIndex:
         search that cannot reach the archive and returns [] is indistinguishable from "there
         is nothing about this", and a caller would conclude absence from an outage. It raises.
 
+        THE INVARIANT IS `CoreError`, NOT `RepoError`: failure surfaces as some CoreError and
+        never as an empty result. The embedder is deliberately NOT wrapped here — it already
+        raises `EmbeddingError`, which is a CoreError that the CLI boundary catches — and
+        wrapping it would diverge from `docs.py` and `memory.py`, which call it bare too.
+
         `across` asks for as many groups as the registry knows, which is exactly why the
         registry exists: without it, how many groups to ask for would be a guess. It remains
         best-effort over what the search reaches — never a proof of absence.
@@ -243,14 +248,25 @@ class RepoIndex:
         except Exception as exc:                        # noqa: BLE001
             raise RepoError(f"the repository archive could not be searched: {exc}") from exc
 
-        groups = []
-        for group in raw[:limit]:
-            hits = [self._to_hit(h) for h in group.get("hits", [])]
-            if hits:
-                groups.append({"repo": group.get("id"), "hits": hits})
+        # The PARSING is guarded too, and not only the call. A response whose shape drifted,
+        # or a chunk written with a wrong field type, would otherwise leave `search` as an
+        # unhandled AttributeError from inside a comprehension — a crash the caller cannot
+        # tell from a bug in the search itself. Malformed is an error, never a dropped hit:
+        # silently skipping one would under-report, which is this task's harm in miniature.
+        try:
+            groups = []
+            for group in raw[:limit]:
+                hits = [self._to_hit(h) for h in group.get("hits", [])]
+                if hits:
+                    groups.append({"repo": group.get("id"), "hits": hits})
+            truncated = len(raw) > limit
+        except Exception as exc:                        # noqa: BLE001
+            raise RepoError(
+                f"the repository archive returned a result that could not be read: {exc}"
+            ) from exc
 
         return {"scope": "across" if across else "repo", "repo": None if across else repo,
-                "groups": groups, "truncated": len(raw) > limit}
+                "groups": groups, "truncated": truncated}
 
     def _to_hit(self, raw: dict) -> RepoHit:
         payload = raw.get("payload") or {}

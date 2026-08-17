@@ -106,6 +106,26 @@ class TestFailureDoesNotOpen(unittest.TestCase):
         with self.assertRaises(RepoError):
             ix.search("invoice", repo="quiet")
 
+    def test_a_response_whose_shape_drifted_is_an_error_and_not_a_traceback(self):
+        """The parsing is inside the guard for the same reason the call is. A caller can act
+        on a RepoError; an AttributeError raised from inside a comprehension reads as a bug
+        in the search itself, and hides that the archive answered with something unexpected.
+        """
+        shapes = {
+            "a group that is not a dict": [None],
+            "a hit that is not a dict": [{"id": "quiet", "hits": [None]}],
+            "a start_line that is not a number": [
+                {"id": "quiet", "hits": [{"score": 1.0, "payload": {
+                    "repo": "quiet",
+                    "metadata": {"path": "/nowhere", "start_line": "seven"}}}]}],
+        }
+        for shape, raw in shapes.items():
+            with self.subTest(shape=shape):
+                ix = an_index_with_two_repos()
+                ix.q.search_groups = lambda *a, _raw=raw, **kw: _raw
+                with self.assertRaises(RepoError):
+                    ix.search("invoice", repo="quiet")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
