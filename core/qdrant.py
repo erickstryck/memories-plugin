@@ -134,6 +134,17 @@ class Qdrant:
 
         return res.get("result", []) or []
 
+    def search_groups(self, name: str, vector: list[float], group_by: str, limit: int,
+                      group_size: int, filter_: dict | None = None,
+                      with_payload: bool = True) -> list[dict]:
+        body = {"vector": vector, "group_by": group_by, "limit": limit,
+                "group_size": group_size, "with_payload": with_payload}
+        if filter_:
+            body["filter"] = filter_
+        res = self.request("POST", f"/collections/{name}/points/search/groups", body)
+
+        return (res.get("result") or {}).get("groups", []) or []
+
     def get_point(self, name: str, point_id) -> dict | None:
         try:
             res = self.request("GET", f"/collections/{name}/points/{point_id}")

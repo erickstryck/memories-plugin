@@ -87,6 +87,25 @@ class FakeVectorStore:
 
         return output[:limit]
 
+    def search_groups(self, name: str, vector: list[float], group_by: str, limit: int,
+                      group_size: int, filter_: dict | None = None,
+                      with_payload: bool = True) -> list[dict]:
+        """Real grouping over the real cosine ranking, so the shadowing test means
+        something. Over-fetches deliberately: grouping the top-K is the defect this method
+        exists to avoid, so the fake must not reproduce it."""
+        ranked = self.search(name, vector, limit=len(self.collections.get(name, {}).get("points", {})),
+                             filter_=filter_, with_payload=True)
+        groups: dict = {}
+        for hit in ranked:
+            key = (hit.get("payload") or {}).get(group_by)
+            if key is None:
+                continue
+            groups.setdefault(key, []).append(hit)
+        out = [{"id": key, "hits": hits[:group_size]} for key, hits in groups.items()]
+        out.sort(key=lambda g: g["hits"][0]["score"], reverse=True)
+
+        return out[:limit]
+
     def scroll(self, name: str, limit: int = 256, offset=None,
                with_vector: bool = False, filter_: dict | None = None):
         items = [{"id": pid, "payload": p.get("payload", {})}

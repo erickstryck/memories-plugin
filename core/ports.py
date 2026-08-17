@@ -71,6 +71,25 @@ class VectorStore(Protocol):
                filter_: dict | None = ..., with_payload: bool = ...) -> list[dict]:
         ...
 
+    def search_groups(self, name: str, vector: list[float], group_by: str, limit: int,
+                      group_size: int, filter_: dict | None = ...,
+                      with_payload: bool = ...) -> list[dict]:
+        """Best hits per DISTINCT value of `group_by`, not the global top-K.
+
+        This is not a convenience over `search`. Grouping the top-K on the client answers
+        "which values are IN the top-K", which is a different question: one group with fifty
+        near-identical chunks fills every slot and a group with a single genuine match
+        disappears. Groups here form per distinct value, so the quiet one survives.
+
+        `limit` counts GROUPS; `group_size` counts hits within a group. Returns
+        `[{"id": <field value>, "hits": [point, ...]}, ...]`, best group first.
+
+        It is best-effort over what the search reaches, NOT an exhaustive scan: a group whose
+        best hit falls below the score horizon can be missing. No caller may read an empty
+        result as proof of absence.
+        """
+        ...
+
     def get_point(self, name: str, point_id) -> dict | None:
         ...
 
