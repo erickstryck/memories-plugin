@@ -80,8 +80,10 @@ import time                # noqa: E402
 import types               # noqa: E402
 import unittest.mock       # noqa: E402
 
+import core                    # noqa: E402
 from core import inventory  # noqa: E402
 from core.docs import doc_id_for  # noqa: E402
+from tests.fakes import FakeEmbedder, RecordingVectorStore  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: The guard as hermes runs it: a script, by absolute path, from a working directory that
@@ -823,6 +825,76 @@ class TestTheCatchAllIsWIDEAndNotAListOfTypes(unittest.TestCase):
                 self.assertEqual(err, "", "the contract promised silence, and this host "
                                           "quotes stderr as the reason when stdout is empty")
                 self.assertNotIn("Traceback", err)
+
+
+#: What ONE blocked read does to the archive, recorded rather than reasoned about. Every one
+#: of these comes from `list_docs("all")` — `ensure` on each scope, `sweep`'s delete of what
+#: expired in the temporary one, and the two scrolls — and NOT from anything this guard asks
+#: for directly. Frozen as a set so the next operation to appear here has to be looked at by
+#: a human: the guard is not read-only against Qdrant, and pretending otherwise in a docstring
+#: would be the kind of claim this repo keeps finding.
+BLOCKED_READ_OPS = {"ensure_collection", "ensure_payload_index", "delete_by_filter",
+                    "scroll_all"}
+
+
+class TestABlockedReadIndexesNothing(unittest.TestCase):
+    """"The hook decides, it does not act. It indexes nothing." — the spec's Failure modes.
+
+    The structural half of this lives in `tests/test_host_equivalence.py` (no file of the
+    guard may NAME a writing operation). This is the execution half, and it runs the path
+    where the temptation would sit: the read is BLOCKED, the ids ARE fetched, and the model
+    is being told to index — the one moment where "index it for the user while we are here"
+    reads like a kindness. It would cost hundreds of embedding chunks on a file the user may
+    have been about to abandon, before every file read, forever.
+
+    The real `core.inventory.indexed_ids` runs here — no spy — against a store that records
+    everything asked of it, which is the only way the transitive calls show up at all.
+    """
+
+    def _blocked_read(self):
+        chars, size = SHARE_ONLY
+        db = a_session_using(chars)
+        store, embedder = RecordingVectorStore(), FakeEmbedder()
+        cfg = types.SimpleNamespace(context_window=100_000, vector_size=8,
+                                    require_docs_collection=lambda: "t_docs",
+                                    require_library_collection=lambda: "t_lib")
+        out, code = io.StringIO(), 0
+        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()   # the breaker, never the real one
+        with unittest.mock.patch.object(adapter.core, "load", lambda: cfg), \
+             unittest.mock.patch.object(adapter, "state_db_path", lambda: db), \
+             unittest.mock.patch.object(core, "build_qdrant", lambda c, timeout=None: store), \
+             unittest.mock.patch.object(core, "build_embedder", lambda c, **kw: embedder), \
+             unittest.mock.patch.object(core, "build_reranker", lambda c, **kw: None), \
+             unittest.mock.patch.object(sys, "stdin",
+                                        io.StringIO(a_read_payload(a_file_of(size)))), \
+             contextlib.redirect_stdout(out):
+            try:
+                adapter.main()
+            except SystemExit as exc:
+                code = exc.code
+
+        return code, out.getvalue(), store, embedder
+
+    def test_the_blocked_read_really_did_reach_the_archive(self):
+        """The control. Everything below is an absence, and an absence proves nothing
+        without evidence that the code path ran at all."""
+        code, emitted, store, _ = self._blocked_read()
+        self.assertEqual(code, adapter.BLOCK_EXIT_CODE)
+        self.assertIn("index it with docs_index", json.loads(emitted)["reason"])
+        self.assertTrue(store.ops, "the ids were never fetched; nothing here is being tested")
+
+    def test_it_embeds_nothing_and_stores_no_point(self):
+        _, _, store, embedder = self._blocked_read()
+        self.assertEqual(embedder.calls, [], "a blocked read paid for embeddings")
+        self.assertEqual(store.points(), 0, "a blocked read wrote points into the archive")
+
+    def test_what_it_does_touch_is_exactly_what_the_lookup_costs(self):
+        """Not read-only, and said out loud: `list_docs` ensures both collections exist and
+        sweeps the expired half of the temporary one. That is the price of the "already
+        indexed, search it instead" half of the message, and freezing the set is what makes
+        the next addition visible instead of arriving with a refactor."""
+        _, _, store, _ = self._blocked_read()
+        self.assertEqual(set(store.ops), BLOCKED_READ_OPS)
 
 
 if __name__ == "__main__":

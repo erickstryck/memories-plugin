@@ -1809,5 +1809,93 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
         self.assertIn("QCTX_CONTEXT_WINDOW", section)
 
 
+#: Every file the guard is made of, on both hosts. The property below is about the guard as
+#: a whole, so the list is the whole guard: a call added to any one of them is a call the
+#: model never asked for.
+GUARD_MODULES = (REPO / "core" / "bigfile.py", REPO / "core" / "inventory.py",
+                 CLAUDE_GUARD, HERMES_GUARD)
+
+#: The archive operations the guard is ALLOWED to name. Everything else a store exposes is
+#: presumed to act, which is the direction that ages well: a writing method added tomorrow is
+#: covered without anyone remembering this list, while a reading one added tomorrow costs one
+#: deliberate line here — visible in the diff, which is exactly where it belongs.
+#:
+#: `list_docs` is on this list because the guard genuinely needs it, and it is NOT free of
+#: side effects: it calls `ensure` on both scopes and `sweep` on the temporary one. What that
+#: costs the backend is not argued here, it is MEASURED — see
+#: `TestABlockedReadIndexesNothing` in each adapter's test file, which records every call the
+#: blocked path makes against a fake store.
+READING_METHODS = {"search", "list_docs", "find", "recall", "get", "list_page", "count"}
+
+
+def archive_write_methods() -> set:
+    """Everything `DocIndex` and `MemoryStore` can be asked to DO, minus the reads.
+
+    Derived from the classes rather than frozen as a list of names, because a frozen list
+    ages: `index_file` and `keep_file` were the two anybody would think to write down, and
+    the method that gets added next is precisely the one nobody would.
+    """
+    from core.docs import DocIndex
+    from core.memory import MemoryStore
+
+    return {name for cls in (DocIndex, MemoryStore) for name in dir(cls)
+            if not name.startswith("_") and callable(getattr(cls, name))
+            and name not in READING_METHODS}
+
+
+def called_names(path: Path) -> set:
+    """Every name this file CALLS — `x.foo()` and `foo()` alike, from the AST.
+
+    From the AST and not a text scan for the reason `env_names` gives: these files explain
+    in prose what they must not do, and a text scan would report the explanation."""
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            found.add(node.func.attr)
+        elif isinstance(node.func, ast.Name):
+            found.add(node.func.id)
+
+    return found
+
+
+class TestTheGuardDecidesAndDoesNotACT(unittest.TestCase):
+    """"The hook decides, it does not act. It indexes nothing." — the spec's Failure modes.
+
+    The requirement was met and held by NOTHING, which is the shape this whole review was
+    looking for. It is also the requirement a helpful refactor breaks in one line: blocked
+    the read, so index it for the user — and a guard that runs before every file read starts
+    firing hundreds of embedding chunks nobody asked for, on a file the user may have been
+    about to abandon.
+
+    Two tests, because neither mechanism covers the other. This one is STRUCTURAL and reads
+    the sources: the guard may not so much as name a writing operation. The execution half
+    lives in each adapter's own file, on the BLOCK path, which is where the temptation to
+    index would sit.
+    """
+
+    def test_the_derivation_sees_the_operations_that_would_matter(self):
+        """The guard on the guard: an empty write set would make every assertion below an
+        intersection with nothing, passing for a guard that indexed on every read."""
+        writes = archive_write_methods()
+        self.assertTrue(writes)
+        for named in ("index_file", "keep_file", "store", "delete", "drop"):
+            with self.subTest(method=named):
+                self.assertIn(named, writes)
+        for read in ("list_docs", "search"):
+            with self.subTest(method=read):
+                self.assertNotIn(read, writes, "a read the guard needs is being forbidden")
+
+    def test_no_file_of_the_guard_calls_anything_that_writes(self):
+        writes = archive_write_methods()
+        for path in GUARD_MODULES:
+            with self.subTest(module=path.name):
+                self.assertEqual(sorted(called_names(path) & writes), [],
+                                 f"{path} acts on the archive; the guard decides and the "
+                                 f"model acts, which is what keeps a blocked read from "
+                                 f"costing an indexing run nobody asked for")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
