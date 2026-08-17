@@ -334,5 +334,81 @@ class TestTheRegistry(unittest.TestCase):
             ix.register("", "Alpha", [], "/home/me/alpha")
 
 
+class TestTheEntryRecordsWHATWasIndexedAndWHEN(unittest.TestCase):
+    """The spec's entry holds "contagem de arquivos e chunks, e quando foi indexado".
+
+    It held neither: `register` wrote five keys and `add_files` never touched the registry,
+    so the counts did not exist and `indexed_at` recorded the last REGISTRATION. Three
+    things were false because of it — the tool description telling the model the listing
+    shows when each repo was last indexed, the `divergent_repos` docstring arguing that the
+    data model the spec already specified would have to be invented, and the spec's own
+    failure table promising the listing marks an entry with no chunks.
+    """
+
+    def test_a_fresh_registration_claims_nothing_indexed(self):
+        entry = an_index_that_declared("alpha")
+        self.assertEqual((entry["files"], entry["chunks"]), (0, 0))
+
+    def test_a_fresh_registration_has_no_indexed_at_because_it_was_never_indexed(self):
+        """`?` in the listing is the truth here. A timestamp would say a repository with no
+        chunks in it was indexed a second ago."""
+        self.assertIsNone(an_index_that_declared("alpha").get("indexed_at"))
+
+    def test_indexing_records_the_counts_it_wrote(self):
+        ix = an_index("alpha")
+        wrote = ix.add_files("alpha", [a_file("invoice line\n" * 400)])
+        entry = ix.get_repo("alpha")
+        self.assertEqual(entry["files"], wrote["files"])
+        self.assertEqual(entry["chunks"], wrote["chunks"])
+        self.assertGreater(entry["chunks"], 0, "the fixture has to write more than nothing")
+
+    def test_indexing_stamps_when_it_happened(self):
+        ix = an_index("alpha")
+        ix.add_files("alpha", [a_file("x = 1\n")])
+        self.assertTrue(ix.get_repo("alpha")["indexed_at"])
+
+    def test_registering_again_does_NOT_reset_when_it_was_last_indexed(self):
+        """A second working copy is declared through `register`, which accumulates it. If
+        registering stamped `indexed_at`, declaring a checkout would claim an indexing that
+        never happened — which is exactly what the field did before."""
+        ix = an_index()
+        ix.register("alpha", "Alpha", [], "/home/me/alpha")
+        ix.add_files("alpha", [a_file("invoice\n")])
+        # A COPY, and not the entry itself. `FakeVectorStore` stores the payload it is
+        # handed, so the "before" picture is the very dict the next write mutates: read
+        # without copying, this assertion compares an object with itself and holds nothing.
+        indexed = dict(ix.get_repo("alpha"))
+        ix.register("alpha", "Alpha", [], "/home/me/alpha-2")
+        after = ix.get_repo("alpha")
+        self.assertEqual(after["indexed_at"], indexed["indexed_at"])
+        self.assertEqual((after["files"], after["chunks"]),
+                         (indexed["files"], indexed["chunks"]))
+        self.assertEqual(len(after["checkouts"]), 2, "it still accumulated the checkout")
+
+    def test_a_batch_that_indexed_NOTHING_claims_no_indexing(self):
+        """Every path skipped means nothing was written. Overwriting the counts with zeros
+        would erase a real claim — and with it the only evidence that tells a half-deleted
+        archive from a fresh registration."""
+        ix = an_index("alpha")
+        ix.add_files("alpha", [a_file("invoice\n")])
+        before = dict(ix.get_repo("alpha"))          # a COPY — see the test above
+        result = ix.add_files("alpha", ["/no/such/file/at/all.py"])
+        after = ix.get_repo("alpha")
+        self.assertEqual(result["files"], 0)
+        self.assertEqual(result["skipped"] and len(result["skipped"]), 1)
+        self.assertEqual((after["files"], after["chunks"], after["indexed_at"]),
+                         (before["files"], before["chunks"], before["indexed_at"]))
+
+    def test_the_counts_are_AS_OF_THE_LAST_indexing_and_not_a_running_total(self):
+        """Stated because it is a limit and not an accident: the registry is authoritative
+        over WHICH repos exist, never over how big the archive is right now. Only a scroll
+        knows that, and scrolling the archive for a metadata question is the cost this
+        design refuses to pay."""
+        ix = an_index("alpha")
+        ix.add_files("alpha", [a_file("one\n"), a_file("two\n")])
+        ix.add_files("alpha", [a_file("three\n")])
+        self.assertEqual(ix.get_repo("alpha")["files"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

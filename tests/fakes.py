@@ -271,3 +271,28 @@ def make_divergent(ix, repo: str, path: str) -> None:
     ix.register_request(repo)
     ix.add_files(repo, [path])
     ix.q.delete_points(ix.registry_name, [_point_id(f"registry:{repo}", 0)])
+
+
+def make_emptied(ix, repo: str, path: str) -> None:
+    """Leave an ENTRY CLAIMING CHUNKS OVER AN ARCHIVE THAT HAS NONE: the other divergence.
+
+    It is what a `drop_repo` that fails at its registry step leaves — the recoverable
+    remainder the chunks-first ordering exists to produce — so it is built that way here,
+    by letting the registry delete fail, and not by deleting the chunks by hand. Same rule
+    as `make_divergent`: a fixture that assembles a state through a path the product does
+    not have is asserting about a state the product cannot reach.
+    """
+    ix.register_request(repo)
+    ix.add_files(repo, [path])
+    original = ix.q.delete_points
+
+    def refuse(*a, **kw):
+        raise OSError("the registry delete failed")
+
+    ix.q.delete_points = refuse
+    try:
+        ix.drop_repo(repo)
+    except Exception:                                   # noqa: BLE001
+        pass
+    finally:
+        ix.q.delete_points = original

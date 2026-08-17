@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import bindings  # noqa: E402
 from core.repos import RepoError, RepoIndex  # noqa: E402
-from tests.fakes import FakeEmbedder, FakeVectorStore, make_divergent  # noqa: E402
+from tests.fakes import (FakeEmbedder, FakeVectorStore, make_divergent,  # noqa: E402
+                         make_emptied)
 
 
 def a_file(text: str = "content = 1\n") -> str:
@@ -92,6 +93,29 @@ class TestDropping(unittest.TestCase):
         ix.q.delete_by_filter = boom
         with self.assertRaises(RepoError):
             ix.drop_repo("alpha")
+        self.assertIsNotNone(ix.get_repo("alpha"))
+
+    def test_the_REAL_store_error_still_says_the_entry_was_kept(self):
+        """The message the chunks-first order exists to produce, against the error a real
+        store actually raises.
+
+        The sibling test injects `OSError`, which is NOT a `CoreError` — so it cannot see
+        the edit the ledger warned about: widening `except RepoError:` to `except CoreError:`
+        would re-raise a `QdrantError` bare and this sentence would vanish, while every test
+        stayed green. A real Qdrant raises `QdrantError`, and `QdrantError` IS a `CoreError`.
+        """
+        from core.qdrant import QdrantError
+
+        ix = a_populated_index()
+
+        def boom(*a, **kw):
+            raise QdrantError("connection refused")
+
+        ix.q.delete_by_filter = boom
+        with self.assertRaises(RepoError) as caught:
+            ix.drop_repo("alpha")
+        self.assertIn("kept for a second attempt", str(caught.exception),
+                      "the message that tells the user a rerun finishes the job was lost")
         self.assertIsNotNone(ix.get_repo("alpha"))
 
     def test_a_failure_deleting_chunks_does_NOT_unbind_the_checkout(self):
@@ -233,6 +257,55 @@ class TestDivergence(unittest.TestCase):
 
     def test_a_healthy_archive_reports_no_divergence(self):
         self.assertEqual(a_populated_index().divergent_repos(), [])
+
+
+class TestTheOtherDivergenceIsAnEntryOverAnEmptyArCHIVE(unittest.TestCase):
+    """An entry claiming chunks over an archive that has none — and it IS detectable now.
+
+    It was called undetectable, and the reasoning was sound while it held: an entry with
+    zero chunks is byte-for-byte a repository that was just registered, which is the normal
+    path in a design where `register` and `add_files` are separate calls. A report firing on
+    every fresh registration is one people learn to ignore.
+
+    The registry recording what the last `add_files` wrote is what separates them: a fresh
+    registration claims zero, and an archive whose chunks are gone claims N and has none.
+    The spec's failure table asked for this — "registro tem repo, acervo não tem chunk:
+    listagem marca a divergência" — and nothing marked it.
+    """
+
+    def test_an_entry_whose_chunks_are_gone_is_reported(self):
+        ix = a_populated_index()
+        make_emptied(ix, "gamma", a_file())
+        self.assertEqual(ix.emptied_repos(), ["gamma"])
+
+    def test_a_FRESH_REGISTRATION_is_NOT_reported(self):
+        """The whole reason this was refused before. Crying wolf on the happy path costs
+        more than the case it catches, so the distinction has to be real, not hopeful."""
+        ix = a_populated_index()
+        ix.register_request("just-declared")
+        self.assertEqual(ix.emptied_repos(), [])
+
+    def test_a_healthy_archive_reports_neither_direction(self):
+        ix = a_populated_index()
+        self.assertEqual((ix.divergent_repos(), ix.emptied_repos()), ([], []))
+
+    def test_the_two_directions_stay_separate(self):
+        """Chunks with no entry and an entry with no chunks are different repairs — one is
+        `drop`, the other is reindex — so one list would send half the readers to the wrong
+        remedy."""
+        ix = a_populated_index()
+        make_divergent(ix, "ghost", a_file())
+        make_emptied(ix, "gamma", a_file())
+        self.assertEqual(ix.divergent_repos(), ["ghost"])
+        self.assertEqual(ix.emptied_repos(), ["gamma"])
+
+    def test_the_listing_carries_both_so_a_host_cannot_answer_with_half(self):
+        ix = a_populated_index()
+        make_emptied(ix, "gamma", a_file())
+        out = ix.list_request()
+        self.assertEqual(out["emptied"], ["gamma"])
+        self.assertIn("gamma", [r["repo"] for r in out["repos"]],
+                      "it is still a listed repo — that is what makes it fixable")
 
 
 if __name__ == "__main__":

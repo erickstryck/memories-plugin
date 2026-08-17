@@ -1413,6 +1413,28 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
         self.assertEqual(cli["divergent"], ["ghost"],
                          "a repo that cannot be listed cannot be dropped by name either")
 
+    def test_both_hosts_report_what_the_last_indexing_wrote(self):
+        """The tool description tells the model the listing shows when each repository was
+        last indexed, and to use it before indexing a working copy again. That sentence is
+        only true if `add_files` is what writes the stamp and the counts."""
+        wrote = self.ix.add_files("alpha", [self.paths[0]])
+        cli = self._through_the_cli(self.cli.cmd_repos_list)
+        tool = self._through_the_tool("repos_list")
+        entries = {r["repo"]: r for r in cli["repos"]}
+        self.assertEqual(entries["alpha"]["chunks"], wrote["chunks"])
+        self.assertEqual(entries["alpha"]["files"], wrote["files"])
+        self.assertTrue(entries["alpha"]["indexed_at"])
+        self.assertIsNone(entries["beta"]["indexed_at"], "beta was declared, never indexed")
+        self.assertEqual(cli["repos"], tool["repos"])
+
+    def test_both_hosts_report_an_entry_whose_chunks_are_gone(self):
+        from tests.fakes import make_emptied
+        make_emptied(self.ix, "gamma", self.paths[0])
+        cli = self._through_the_cli(self.cli.cmd_repos_list)
+        tool = self._through_the_tool("repos_list")
+        self.assertEqual(cli["emptied"], ["gamma"])
+        self.assertEqual(cli["emptied"], tool["emptied"])
+
     def test_one_limit_delivers_the_same_number_of_hits_on_both_hosts(self):
         """The knob translation is the divergence risk here: `limit` trims groups and
         `group_size` caps hits inside one, so a host that passed the user's number to the

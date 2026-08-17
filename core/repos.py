@@ -133,6 +133,22 @@ class RepoIndex:
         A BINARY FILE IS THEREFORE ALREADY SKIPPED AND REPORTED, for free: `_read_source`
         refuses it. The bulk pipeline does not have to detect binaries to avoid poisoning
         the archive — it only has to avoid paying to open them.
+
+        IT ALSO RECORDS WHAT IT WROTE, in the registry entry. The spec's entry holds a file
+        and chunk count and when it was indexed; until this, nothing wrote any of the three,
+        so the counts did not exist and `indexed_at` recorded the last registration.
+
+        THE COUNTS ARE "AS OF THE LAST `add_files` THAT INDEXED SOMETHING", NOT A LIVE SIZE,
+        and naming that is the whole honesty of the field: this call REPLACES them with what
+        THIS batch wrote, so indexing five files after fifty leaves `files: 5`. The registry
+        is authoritative over WHICH REPOS EXIST — never over how big the archive is right
+        now. Only a scroll of the archive knows that, and scrolling the archive to answer a
+        metadata question is precisely the cost this design refuses to pay.
+
+        A BATCH THAT INDEXED NOTHING RECORDS NOTHING. Every path skipped means no file was
+        written, so neither the counts nor the stamp move: replacing a real claim with zeros
+        would erase the only evidence that tells a half-deleted archive (`emptied_repos`)
+        from a repository that was merely registered.
         """
         if not repo:
             raise RepoError("a repository name is required")
@@ -168,6 +184,10 @@ class RepoIndex:
                 continue
             files += 1
             chunks += added
+        if files:
+            entry = self.get_repo(repo) or {"repo": repo}
+            entry.update({"files": files, "chunks": chunks, "indexed_at": _iso(time.time())})
+            self._write_entry(entry)
 
         return {"repo": repo, "files": files, "chunks": chunks, "skipped": skipped}
 
@@ -245,23 +265,44 @@ class RepoIndex:
 
     def register(self, repo: str, label: str, remotes: list[str], checkout: str) -> dict:
         """Creates or updates the entry. Checkouts and remotes ACCUMULATE without repeating:
-        the same repository legitimately lives in several working copies at once."""
+        the same repository legitimately lives in several working copies at once.
+
+        A NEW ENTRY CLAIMS NOTHING INDEXED — `files` and `chunks` at zero, no `indexed_at` —
+        and that is not a placeholder, it is the fact: `register` and `add_files` are
+        separate calls by design, so a fresh entry describes a repository whose archive is
+        empty. `add_files` is the only thing that knows an indexing happened, so it is the
+        only thing that writes those three fields.
+
+        REGISTERING THEREFORE DOES NOT STAMP `indexed_at`, and it used to. This same call
+        accumulates a second working copy onto an existing repo, so stamping here reset "last
+        indexed" to now every time a checkout was declared — while the listing, and the tool
+        description the model reads, both call that field the last indexing.
+        """
         if not repo:
             raise RepoError("a repository name is required")
         self._require_slug(repo)
         self.ensure()
         entry = self.get_repo(repo) or {"repo": repo, "label": label or repo,
-                                        "remotes": [], "checkouts": []}
+                                        "remotes": [], "checkouts": [],
+                                        "files": 0, "chunks": 0, "indexed_at": None}
         entry["label"] = label or entry.get("label") or repo
         for value, key in ((checkout, "checkouts"), *[(r, "remotes") for r in remotes or []]):
             if value and value not in entry[key]:
                 entry[key].append(value)
-        entry["indexed_at"] = _iso(time.time())
-        self.q.upsert(self.registry_name, [{"id": _point_id(f"registry:{repo}", 0),
-                                            "vector": list(REGISTRY_VECTOR),
-                                            "payload": entry}])
+        self._write_entry(entry)
 
         return entry
+
+    def _write_entry(self, entry: dict) -> None:
+        """The ONE place an entry is written, because there are now two writers of it.
+
+        `register` owns identity (label, remotes, checkouts) and `add_files` owns what was
+        indexed, and both go through here — a second copy of the point id or of the registry
+        vector is how the two writers would start writing two different rows for one repo.
+        """
+        self.q.upsert(self.registry_name,
+                      [{"id": _point_id(f"registry:{entry['repo']}", 0),
+                        "vector": list(REGISTRY_VECTOR), "payload": entry}])
 
     def register_request(self, repo: str, label: str | None = None) -> dict:
         """Declare a repository BY NAME, with no detection and no join offer.
@@ -455,13 +496,21 @@ class RepoIndex:
         )
 
     def list_request(self) -> dict:
-        """What a LISTING is, on either host: the registered repos AND the divergent ones.
+        """What a LISTING is, on either host: the registered repos and BOTH divergences.
 
-        The two calls are one operation because leaving the second one out is precisely what
-        makes a divergent repo invisible — chunks, no entry, and therefore no name to drop it
-        by. Shared so that one host cannot quietly answer with half of it.
+        The calls are one operation because leaving one out is precisely what makes the state
+        invisible — a divergent repo has no name to drop it by, and an emptied one is listed
+        with a count that is no longer true. Shared so that one host cannot quietly answer
+        with part of it.
+
+        ONE SCROLL FEEDS BOTH DIVERGENCE READS. They ask opposite questions of the same set,
+        and this is already the expensive half of the listing.
         """
-        return {"repos": self.list_repos(), "divergent": self.divergent_repos()}
+        seen = self._repos_with_chunks()
+
+        return {"repos": self.list_repos(),
+                "divergent": self.divergent_repos(seen),
+                "emptied": self.emptied_repos(seen)}
 
     # ---- deleting -----------------------------------------------------------
 
@@ -561,35 +610,54 @@ class RepoIndex:
                 f"{repo!r} again clears the remainder."
             ) from exc
 
-    def divergent_repos(self) -> list[str]:
-        """Repos with chunks and no registry entry.
+    def _repos_with_chunks(self) -> set:
+        """Every repo name the ARCHIVE holds a chunk under. One scroll, two readers.
+
+        Both divergence directions need this same set, and it is the expensive read of the
+        listing (the whole chunk collection), so it is taken once and handed to both rather
+        than scrolled twice for one command.
+        """
+        return {(p.get("payload") or {}).get("repo")
+                for p in self.q.scroll_all(self.chunks_name)}
+
+    def divergent_repos(self, seen: set | None = None) -> list[str]:
+        """Repos with chunks and NO registry entry — one of the two divergence directions.
 
         This exists because the design has TWO sources of truth about which repos exist: the
         registry, which is authoritative, and the `repo` field on every chunk, which is
         derived. Naming the owner is half the defence; this is the other half — without it the
         copy is free to diverge unobserved.
 
-        IT DETECTS ONE DIRECTION AND ONLY ONE: chunks with no entry. The opposite divergence —
-        an ENTRY POINTING AT ZERO CHUNKS, which is exactly what a failure of `drop_repo`'s
-        registry step leaves — is NOT reported here, and that is a decision rather than an
-        omission (review, 2026-08-17).
-
-        WHY IT CANNOT BE DETECTED, as opposed to merely not being implemented yet: an entry
-        with zero chunks is BYTE-FOR-BYTE the state of a repository that was just registered
-        and has not been indexed yet, which is the normal path: `register` and `add_files` are
-        separate calls by design, and every repo passes through that state on its way in.
-        Nothing in the data distinguishes "half-deleted" from "brand new", so reporting it
-        would cry wolf on every fresh registration, and a divergence report that fires on the
-        happy path is one users learn to ignore — which costs more than the case it catches.
-
-        WHAT IT WOULD TAKE, if it is ever wanted: the registry would have to record a chunk
-        count at index time and `add_files` would have to maintain it, so that "expected N, has
-        zero" became a statement about a promise instead of a guess. That is a data-model
-        change with its own drift problem (a stored count is a third copy of a fact), and it is
-        deliberately not this method's to invent.
+        THE OTHER DIRECTION IS `emptied_repos`, and it is a different repair — reindex, not
+        drop — which is why the two are separate lists and not one. This method reports what
+        the listing cannot even name; that one reports what the listing names wrongly.
         """
         known = {r["repo"] for r in self.list_repos()}
-        seen = {(p.get("payload") or {}).get("repo")
-                for p in self.q.scroll_all(self.chunks_name)}
+        seen = self._repos_with_chunks() if seen is None else seen
 
         return sorted(r for r in seen if r and r not in known)
+
+    def emptied_repos(self, seen: set | None = None) -> list[str]:
+        """Entries that CLAIM chunks over an archive holding none — the other direction.
+
+        This is what a `drop_repo` failing at its registry step leaves: the recoverable
+        remainder that the chunks-first ordering deliberately produces, and which the spec's
+        failure table says the listing marks.
+
+        HOW IT TELLS THAT FROM A FRESH REGISTRATION, which is the question that made this
+        undetectable before: it reads the count `add_files` recorded. A repository that was
+        registered and never indexed claims zero and is silent here; one whose last indexing
+        wrote N and whose archive now holds nothing claims N and is reported. Without the
+        recorded count the two states are byte-for-byte identical, and a divergence report
+        that fires on every fresh registration is one people learn to ignore.
+
+        WHAT IT IS NOT: a size check. The count is as of the last `add_files` that indexed
+        something, not a live total (see `add_files`), so this compares a claim of SOME
+        chunks against an archive with NONE — the one comparison a stale count still answers
+        honestly. "Claims 50, has 7" is not reported, and must not be: reindexing a subset is
+        the ordinary path.
+        """
+        seen = self._repos_with_chunks() if seen is None else seen
+
+        return sorted(r["repo"] for r in self.list_repos()
+                      if (r.get("chunks") or 0) > 0 and r["repo"] not in seen)

@@ -21,7 +21,8 @@ sys.path.insert(0, ROOT)
 
 from core import bindings  # noqa: E402
 from core.repos import RepoIndex  # noqa: E402
-from tests.fakes import FakeEmbedder, FakeVectorStore, make_divergent  # noqa: E402
+from tests.fakes import (FakeEmbedder, FakeVectorStore, make_divergent,  # noqa: E402
+                         make_emptied)
 
 
 def run_cli(*args, env_extra=None):
@@ -213,6 +214,19 @@ class TestOneLimitMeansTheSameThingToTheUser(CLICase):
                          "--limit reached `limit`, which trims groups, and a scoped search "
                          "has one group — so it capped nothing")
 
+    def test_a_hit_arrives_as_an_OBJECT_and_not_as_a_dataclass_repr(self):
+        """`search_payload` exists so both hosts serialise hits into JSON objects. Nothing
+        held it: every assertion here read `len(hits)` or the repo names, and both survive
+        `default=str` rendering each hit as the string "RepoHit(score=0.41, path=...)".
+        Reading one FIELD is what pins the shape — a length is blind to it."""
+        self._two_repos()
+        text = self.rendered(self.cli.cmd_repos_search, query="invoice", repo="alpha",
+                             limit=6, json=True)
+        hit = json.loads(text)["groups"][0]["hits"][0]
+        self.assertIsInstance(hit, dict, "a hit reached the caller as a repr, not an object")
+        self.assertTrue(hit["path"], "the hit carries no path to read the current file from")
+        self.assertIn("score", hit)
+
     def test_an_across_search_still_reaches_every_repository(self):
         self._two_repos()
         text = self.rendered(self.cli.cmd_repos_search, query="invoice", across=True,
@@ -261,6 +275,40 @@ class TestSearchRefusesInsteadOfWideningSilently(CLICase):
         message = str(caught.exception)
         self.assertIn("--repo", message)
         self.assertIn("--all", message)
+
+
+class TestTheListReportsWhatWasIndexed(CLICase):
+    """The listing is where the registry's counts become an answer to a person.
+
+    The spec's failure table says an entry with no chunks is marked BY THE LISTING, and
+    nothing marked it. It is also the render that has to tell a declared-but-never-indexed
+    repository from an indexed one, which is the distinction the counts bought.
+    """
+
+    def test_an_indexed_repo_shows_what_its_last_indexing_wrote(self):
+        self.ix.register("alpha", "Alpha", [], "/tmp/alpha")
+        self.ix.add_files("alpha", [a_file("invoice total = 1\n")])
+        text = self.rendered(self.cli.cmd_repos_list)
+        self.assertIn("1 file(s)", text)
+        self.assertIn("chunk(s)", text)
+
+    def test_a_declared_but_never_indexed_repo_says_so_instead_of_showing_a_date(self):
+        """It used to show the registration time under a column called "last indexed"."""
+        self.ix.register("alpha", "Alpha", [], "/tmp/alpha")
+        self.assertIn("never indexed", self.rendered(self.cli.cmd_repos_list))
+
+    def test_an_entry_whose_chunks_are_gone_is_MARKED(self):
+        make_emptied(self.ix, "gamma", a_file("invoice\n"))
+        text = self.rendered(self.cli.cmd_repos_list)
+        self.assertIn("gamma", text)
+        self.assertIn("archive has none", text)
+
+    def test_the_json_listing_carries_both_divergences(self):
+        make_emptied(self.ix, "gamma", a_file("invoice\n"))
+        make_divergent(self.ix, "ghost", a_file("invoice\n"))
+        out = json.loads(self.rendered(self.cli.cmd_repos_list, json=True))
+        self.assertEqual(out["emptied"], ["gamma"])
+        self.assertEqual(out["divergent"], ["ghost"])
 
 
 class TestTheListNamesWhatCannotBeListed(CLICase):

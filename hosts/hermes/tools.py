@@ -769,11 +769,15 @@ SCHEMAS = [
     },
     {
         "name": "repos_list",
-        "description": ("List the indexed repositories, with their labels, checkouts and "
-                        "when each was last indexed. Use it to find out which repository "
-                        "names repos_search accepts, or before indexing a working copy "
-                        "again. Repositories whose chunks have no registry entry are "
-                        "reported separately — they can only be removed by name."),
+        "description": ("List the indexed repositories, with their labels, checkouts, how "
+                        "many files and chunks their last indexing wrote and when that was "
+                        "(null when a repository was declared but never indexed). Use it to "
+                        "find out which repository names repos_search accepts, or before "
+                        "indexing a working copy again. Two broken states are reported "
+                        "separately: 'divergent' is chunks with no registry entry, which can "
+                        "only be removed by name; 'emptied' is an entry whose chunks are "
+                        "gone, which needs reindexing or dropping. The counts are as of that "
+                        "last indexing, not a live measurement of the archive."),
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {

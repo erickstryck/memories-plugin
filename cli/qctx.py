@@ -499,12 +499,22 @@ def cmd_repos_list(args, cfg):
         output(out, True)
 
         return
+    claimed = {r["repo"]: r.get("chunks") or 0 for r in out["repos"]}
     for r in out["repos"]:
+        # "never indexed" and not a bare `?`: registering is not indexing, and the empty
+        # stamp is a fact about this repo rather than a missing field.
         print(f"{r['repo']:<24} {r.get('label', ''):<24} "
-              f"{len(r.get('checkouts') or [])} checkout(s)  {r.get('indexed_at', '?')}")
+              f"{len(r.get('checkouts') or [])} checkout(s)  "
+              f"{r.get('files') or 0} file(s), {r.get('chunks') or 0} chunk(s)  "
+              f"{r.get('indexed_at') or 'never indexed'}")
     for name in out["divergent"]:
         # Named out loud: it cannot be listed, so it cannot be dropped by name either.
         print(f"{name:<24} (chunks with no registry entry — run `repos drop {name}`)")
+    for name in out["emptied"]:
+        # The other direction, and a DIFFERENT repair: this one is listed, and what is wrong
+        # is the count it is listed with.
+        print(f"{name:<24} (its last indexing wrote {claimed.get(name, 0)} chunk(s) and the "
+              f"archive has none — reindex it with `repos add`, or `repos drop {name}`)")
 
 
 def cmd_repos_register(args, cfg):
