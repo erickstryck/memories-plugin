@@ -707,8 +707,8 @@ import time
 
 from . import ports
 from .chunk import chunk_text, mode_for_suffix
-from .docs import (CoreError, _iso, _point_id, _read_source, content_digest,
-                   doc_id_for)
+from .docs import _iso, _point_id, _read_source, content_digest, doc_id_for
+from .errors import CoreError
 
 
 class RepoError(CoreError):
@@ -748,6 +748,14 @@ class RepoIndex:
         A list of eight hundred paths with one empty file in it must index the other 799:
         aborting the batch for an unindexable member would make the bulk pipeline's job
         impossible, so the failure is REPORTED per path instead.
+
+        It catches CoreError and not a list of leaf types: `_read_source` raises DocsError
+        for a missing file AND for a binary one, and enumerating leaf classes is how a
+        catch silently stops covering the case it was written for.
+
+        A BINARY FILE IS THEREFORE ALREADY SKIPPED AND REPORTED, for free: `_read_source`
+        refuses it. The bulk pipeline does not have to detect binaries to avoid poisoning
+        the archive — it only has to avoid paying to open them.
         """
         if not repo:
             raise RepoError("a repository name is required")
@@ -757,7 +765,7 @@ class RepoIndex:
         for path in paths:
             try:
                 added = self._write_one(repo, path)
-            except (OSError, RepoError, ValueError) as exc:
+            except (CoreError, OSError, ValueError) as exc:
                 skipped.append((path, str(exc)))
                 continue
             files += 1
@@ -1934,7 +1942,9 @@ E em `tests/test_host_equivalence.py`, na classe que compara superfícies:
         from hosts.hermes import tools as hermes_tools
 
         cli_verbs = {"list", "search", "add", "drop"}
-        hermes_names = {t["name"] for t in hermes_tools.TOOLS
+        # SCHEMAS is the surface the host actually consumes
+        # (hosts/hermes/__init__.py:251 deep-copies it); dispatch() routes the calls.
+        hermes_names = {t["name"] for t in hermes_tools.SCHEMAS
                         if t["name"].startswith("repos_")}
         self.assertEqual({n.split("repos_", 1)[1] for n in hermes_names}, cli_verbs)
 ```
@@ -2051,10 +2061,13 @@ def cmd_repos_drop(args, cfg):
 
 - [ ] **Step 4: As mesmas operações no hermes**
 
-Em `hosts/hermes/tools.py`, acrescente quatro ferramentas seguindo o formato exato das que já
-existem (nome, descrição, `input_schema`, handler): `repos_list`, `repos_search` (com
-`query`, `repo`, `across`), `repos_add` (`repo`, `paths`), `repos_drop` (`repo`, `yes`).
-Cada handler chama o MESMO `RepoIndex` — nenhuma lógica de decisão vive no adaptador.
+Em `hosts/hermes/tools.py`, acrescente quatro entradas a **`SCHEMAS`** (o nome real da
+superfície — `hosts/hermes/__init__.py:251` faz `copy.deepcopy(tools.SCHEMAS)`; hoje são 15) e os
+handlers correspondentes em **`dispatch`** (roteado em `:535` como
+`tools.dispatch(tool_name, args, cfg=...)`): `repos_list`, `repos_search` (com `query`, `repo`,
+`across`), `repos_add` (`repo`, `paths`), `repos_drop` (`repo`, `yes`). Copie o formato exato das
+vizinhas do arquivo, incluindo os helpers `_text`/`_bool`/`_require` que elas usam para ler
+argumentos. Cada handler chama o MESMO `RepoIndex` — nenhuma lógica de decisão vive no adaptador.
 
 - [ ] **Step 5: Rode e veja passar**
 
@@ -2067,7 +2080,7 @@ Expected: `OK`
 cp hosts/hermes/tools.py /tmp/tl.bak
 python3 - <<'PY'
 p = "hosts/hermes/tools.py"; s = open(p).read()
-needle = '"repos_drop"'
+needle = '"repos_drop"'   # in SCHEMAS
 assert s.count(needle) >= 1, s.count(needle)
 open(p, "w").write(s.replace(needle, '"repos_delete"', 1))
 print("mutation landed: one host renamed a repository operation")
