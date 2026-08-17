@@ -13,6 +13,7 @@ back the day it needed to rerank.
 from .config import Config, ConfigError, load, save, redacted
 from .errors import CoreError
 from .docs import DocIndex, DocsError, parse_ttl, doc_id_for
+from .repos import RepoError, RepoIndex
 from .memory import (METADATA_FIELDS, MemoryStore, Recalled, is_blank, metadata_from,
                      search_collections)
 from .embedding import Embedder, EmbeddingError
@@ -25,6 +26,7 @@ __all__ = [
     "CoreError",
     "Config", "ConfigError", "load", "save", "redacted",
     "DocIndex", "DocsError", "parse_ttl", "doc_id_for",
+    "RepoError", "RepoIndex",
     "MemoryStore", "Recalled", "search_collections",
     "METADATA_FIELDS", "metadata_from", "is_blank",
     "Embedder", "EmbeddingError", "Reranker", "RerankError",
