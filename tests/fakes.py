@@ -248,3 +248,26 @@ class RecordingVectorStore:
     def points(self) -> int:
         """How many points exist anywhere in it — zero is "nothing was indexed"."""
         return sum(len(c["points"]) for c in self.inner.collections.values())
+
+
+# ---- fixtures the product can no longer build by itself ----------------------
+
+
+def make_divergent(ix, repo: str, path: str) -> None:
+    """Leave CHUNKS WITH NO REGISTRY ENTRY: the state a half-done drop leaves behind.
+
+    Built the way it actually happens — declare, index, lose the entry — and NOT by indexing
+    an undeclared name, because `RepoIndex.add_files` refuses that on purpose: the ordinary
+    path must not be able to manufacture the divergence `divergent_repos` exists to denounce.
+    A fixture taking the forbidden shortcut would be asserting on a state the product can no
+    longer reach, which is how a divergence test outlives the divergence it tested.
+
+    One definition, shared by every test that needs the state, because the four that need it
+    are in four files and a private copy of "how to break the archive" in each is how they
+    stop agreeing about what broken means.
+    """
+    from core.docs import _point_id
+
+    ix.register_request(repo)
+    ix.add_files(repo, [path])
+    ix.q.delete_points(ix.registry_name, [_point_id(f"registry:{repo}", 0)])

@@ -19,9 +19,11 @@ the logic lives in `core/`; this file only translates arguments.
     qctx docs list [--scope ...]
     qctx docs refresh [--scope library|tmp]      reindexes what changed on disk
     qctx docs drop <doc-id> [--scope ...] | --purge-tmp | --expired
+    qctx repos register <name> [--label L]       declares a repository
     qctx repos list                              every indexed repository
     qctx repos search <question> [--repo R | --all] [--limit N]
     qctx repos add <repo> <path> [<path>...]     indexes exactly these files
+                                                 (the repo must be registered first)
     qctx repos drop <repo> --yes                 permanent, no undo
 
 Three archives, three lifecycles: MEMORY holds curated facts and never expires;
@@ -486,6 +488,16 @@ def cmd_repos_list(args, cfg):
         print(f"{name:<24} (chunks with no registry entry — run `repos drop {name}`)")
 
 
+def cmd_repos_register(args, cfg):
+    out = core.build_repos(cfg).register_request(args.repo, args.label)
+    if args.json:
+        output(out, True)
+
+        return
+    print(f"registered {out['repo']} ({out['label']}) — index files into it with "
+          f"`qctx repos add {out['repo']} <path>...`")
+
+
 def cmd_repos_search(args, cfg):
     out = core.build_repos(cfg).search_request(args.query, repo=args.repo,
                                                across=args.across, limit=args.limit)
@@ -683,6 +695,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="search every indexed repository")
     p.add_argument("--limit", type=int, default=8)
     p.set_defaults(fn=cmd_repos_search)
+
+    p = repsub.add_parser("register", help="declare a repository, by name")
+    p.add_argument("repo")
+    p.add_argument("--label", help="a human name for it (default: the name itself)")
+    p.set_defaults(fn=cmd_repos_register)
 
     p = repsub.add_parser("add", help="index the given files under a repository")
     p.add_argument("repo")

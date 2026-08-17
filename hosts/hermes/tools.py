@@ -1,9 +1,9 @@
 """The operations the MODEL may invoke, as hermes tool schemas.
 
-Nineteen of the CLI's twenty-four. The five left out are `setup` (interactive, wants a TTY)
+Twenty of the CLI's twenty-five. The five left out are `setup` (interactive, wants a TTY)
 and `config show/set/detect` plus `collections` — configuration belongs to the operator, and
 a `config set` tool would let the model point the archive somewhere else mid-conversation.
-The CLI still carries all twenty-four in both hosts; this is only about what the model
+The CLI still carries all twenty-five in both hosts; this is only about what the model
 reaches on its own.
 
 Every handler returns a JSON STRING, and no handler raises. hermes surfaces a raise as a
@@ -376,6 +376,12 @@ def _repos_list(args: dict, cfg) -> str:
     return _ok(_repos(cfg).list_request())
 
 
+def _repos_register(args: dict, cfg) -> str:
+    repo = _require(args, "repo")
+
+    return _ok(_repos(cfg).register_request(repo, _text(args, "label")))
+
+
 def _repos_search(args: dict, cfg) -> str:
     query = _require(args, "query")
     repo, across = _text(args, "repo"), _bool(args, "across")
@@ -737,6 +743,28 @@ SCHEMAS = [
     },
     # -- repositories --
     {
+        "name": "repos_register",
+        "description": ("Declare a repository by name, so files can be indexed under it. "
+                        "Use it once per repository, before repos_add — indexing under a "
+                        "name that was never declared is refused, because chunks with no "
+                        "registry entry are unreachable by every listing. It records the "
+                        "name you give and nothing else: it does not inspect the working "
+                        "copy and does not offer to join an existing repository."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string",
+                         "description": "The name to declare. It is the key everything else "
+                                        "addresses the repository by, so it cannot be "
+                                        "changed later — check repos_list first."},
+                "label": {"type": "string",
+                          "description": "A human name for it, shown in listings. Defaults "
+                                         "to the name itself."},
+            },
+            "required": ["repo"],
+        },
+    },
+    {
         "name": "repos_list",
         "description": ("List the indexed repositories, with their labels, checkouts and "
                         "when each was last indexed. Use it to find out which repository "
@@ -779,7 +807,8 @@ SCHEMAS = [
                         "version of each one. Use it to keep a repository's archive current "
                         "after edits, or to add files a bulk index did not cover. It indexes "
                         "EXACTLY the paths given — it never walks a directory — and a file "
-                        "it cannot read is reported and skipped, not fatal to the batch."),
+                        "it cannot read is reported and skipped, not fatal to the batch. The "
+                        "repository must have been declared with repos_register first."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -828,6 +857,7 @@ ROUTES = {
     "docs_list": _docs_list,
     "docs_refresh": _docs_refresh,
     "docs_drop": _docs_drop,
+    "repos_register": _repos_register,
     "repos_list": _repos_list,
     "repos_search": _repos_search,
     "repos_add": _repos_add,

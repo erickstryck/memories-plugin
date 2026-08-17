@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import bindings  # noqa: E402
 from core.repos import RepoError, RepoIndex  # noqa: E402
-from tests.fakes import FakeEmbedder, FakeVectorStore  # noqa: E402
+from tests.fakes import FakeEmbedder, FakeVectorStore, make_divergent  # noqa: E402
 
 
 def a_file(text: str = "content = 1\n") -> str:
@@ -188,7 +188,7 @@ class TestFinishingAHalfDoneDrop(unittest.TestCase):
         `divergent_repos` exists to put in front of a human.
         """
         ix = a_populated_index()
-        ix.add_files("ghost", [a_file()])          # chunks, and no registry entry
+        make_divergent(ix, "ghost", a_file())      # chunks, and no registry entry
         bindings.bind("/tmp/ghost", "ghost")
 
         out = ix.drop_repo("ghost")
@@ -228,7 +228,7 @@ class TestDivergence(unittest.TestCase):
         """The price of honesty for having two sources of truth about which repos exist. The
         registry is authoritative; this is how the copy is caught diverging."""
         ix = a_populated_index()
-        ix.add_files("ghost", [a_file()])
+        make_divergent(ix, "ghost", a_file())
         self.assertEqual(ix.divergent_repos(), ["ghost"])
 
     def test_a_healthy_archive_reports_no_divergence(self):

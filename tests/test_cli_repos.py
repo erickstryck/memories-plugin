@@ -21,7 +21,7 @@ sys.path.insert(0, ROOT)
 
 from core import bindings  # noqa: E402
 from core.repos import RepoIndex  # noqa: E402
-from tests.fakes import FakeEmbedder, FakeVectorStore  # noqa: E402
+from tests.fakes import FakeEmbedder, FakeVectorStore, make_divergent  # noqa: E402
 
 
 def run_cli(*args, env_extra=None):
@@ -36,11 +36,16 @@ def run_cli(*args, env_extra=None):
 class TestTheVerbsExist(unittest.TestCase):
     """Argument wiring only: these must not reach Qdrant, so they are checked by --help."""
 
-    def test_repos_has_the_four_verbs(self):
+    def test_repos_has_the_five_verbs(self):
         out = run_cli("repos", "--help")
         self.assertEqual(out.returncode, 0, out.stderr)
-        for verb in ("list", "search", "add", "drop"):
+        for verb in ("list", "search", "add", "drop", "register"):
             self.assertIn(verb, out.stdout)
+
+    def test_register_takes_a_name_and_an_optional_label(self):
+        out = run_cli("repos", "register", "--help")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("--label", out.stdout)
 
     def test_search_takes_repo_and_all(self):
         out = run_cli("repos", "search", "--help")
@@ -81,6 +86,7 @@ class Args:
     def __init__(self, **kw):
         self.json = False
         self.repo = None
+        self.label = None
         self.across = False
         self.limit = 8
         self.yes = False
@@ -148,6 +154,43 @@ class TestTheDropRenderTellsTheTwoOutcomesApart(CLICase):
         self.assertEqual(json.loads(text)["repo"], "alpha")
 
 
+class TestDeclaringBeforeIndexing(CLICase):
+    """`repos add` on a name nobody declared would write chunks no listing can reach.
+
+    That is the state `divergent_repos` exists to report, produced by the FIRST command a
+    user would type. `repos register` is the manual declaration that makes `add` legal, and
+    the refusal names it.
+    """
+
+    def test_register_declares_the_name_and_says_so(self):
+        text = self.rendered(self.cli.cmd_repos_register, repo="alpha", label=None)
+        self.assertIn("alpha", text)
+        self.assertEqual([r["repo"] for r in self.ix.list_repos()], ["alpha"])
+
+    def test_register_keeps_a_label_that_was_given(self):
+        text = self.rendered(self.cli.cmd_repos_register, repo="alpha",
+                             label="Alpha, the first")
+        self.assertIn("Alpha, the first", text)
+
+    def test_the_json_form_of_register_is_actually_printed(self):
+        text = self.rendered(self.cli.cmd_repos_register, repo="alpha", label=None, json=True)
+        self.assertEqual(json.loads(text)["repo"], "alpha")
+
+    def test_add_refuses_a_repository_that_was_never_declared(self):
+        with self.assertRaises(Exception) as caught:
+            self.rendered(self.cli.cmd_repos_add, repo="alpha", paths=[a_file("x = 1\n")])
+        self.assertIn("repos register alpha", str(caught.exception))
+        self.assertEqual(list(self.ix.q.scroll_all("c")), [], "it indexed it anyway")
+        self.assertEqual(self.ix.divergent_repos(), [],
+                         "the ordinary path manufactured the divergence it denounces")
+
+    def test_add_works_the_moment_the_repository_is_declared(self):
+        """The refusal is only honest if the remedy it names actually unblocks the call."""
+        self.rendered(self.cli.cmd_repos_register, repo="alpha", label=None)
+        text = self.rendered(self.cli.cmd_repos_add, repo="alpha", paths=[a_file("x = 1\n")])
+        self.assertIn("1 file(s)", text)
+
+
 class TestOneLimitMeansTheSameThingToTheUser(CLICase):
     """`--limit` is ONE user-facing number over `search`'s two honest knobs.
 
@@ -196,8 +239,7 @@ class TestTheListNamesWhatCannotBeListed(CLICase):
         dropped by name. Printing it is what makes it fixable."""
         self.ix.register("alpha", "Alpha", [], "/tmp/alpha")
         self.ix.add_files("alpha", [a_file("invoice\n")])
-        self.ix.add_files("ghost", [a_file("invoice\n")])
-        self.ix.q.delete_points("r", [])          # the entry for `ghost` never existed
+        make_divergent(self.ix, "ghost", a_file("invoice\n"))
         text = self.rendered(self.cli.cmd_repos_list)
         self.assertIn("alpha", text)
         self.assertIn("ghost", text)

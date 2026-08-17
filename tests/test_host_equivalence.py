@@ -1057,7 +1057,7 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
         other is exactly the divergence this file exists to catch."""
         from hosts.hermes import tools as hermes_tools
 
-        cli_verbs = {"list", "search", "add", "drop"}
+        cli_verbs = {"list", "search", "add", "drop", "register"}
         # SCHEMAS is the surface the host actually consumes
         # (hosts/hermes/__init__.py:251 deep-copies it); dispatch() routes the calls.
         hermes_names = {t["name"] for t in hermes_tools.SCHEMAS
@@ -1359,6 +1359,7 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
             def __init__(self, **over):
                 self.json = True
                 self.repo = None
+                self.label = None
                 self.across = False
                 self.limit = 8
                 self.yes = False
@@ -1377,6 +1378,24 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
         with unittest.mock.patch.object(core_module(), "build_repos", lambda cfg: self.ix):
             return json.loads(tools.dispatch(name, args, cfg=self.cfg))
 
+    def test_register_declares_the_same_entry_from_both_hosts(self):
+        cli = self._through_the_cli(self.cli.cmd_repos_register, repo="gamma", label="G")
+        tool = self._through_the_tool("repos_register", repo="delta", label="G")
+        self.assertEqual({k: v for k, v in cli.items() if k != "indexed_at"},
+                         {k: v for k, v in tool.items()
+                          if k != "indexed_at"} | {"repo": "gamma"})
+
+    def test_neither_host_indexes_a_repository_that_was_never_declared(self):
+        """Otherwise the first command a user types writes chunks no listing can reach —
+        the state `divergent_repos` exists to report, manufactured by the ordinary path."""
+        answer = self._through_the_tool("repos_add", repo="undeclared", paths=[self.paths[0]])
+        self.assertIn("error", answer)
+        self.assertIn("repos register undeclared", answer["error"])
+        with self.assertRaises(Exception):
+            self._through_the_cli(self.cli.cmd_repos_add, repo="undeclared",
+                                  paths=[self.paths[0]])
+        self.assertEqual(self.ix.divergent_repos(), [])
+
     def test_add_indexes_the_same_files_from_both_hosts(self):
         cli = self._through_the_cli(self.cli.cmd_repos_add, repo="alpha",
                                     paths=[self.paths[0]])
@@ -1385,8 +1404,9 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
         self.assertEqual((cli["repo"], cli["files"]), (tool["repo"], tool["files"]))
 
     def test_list_reports_the_same_repositories_and_the_same_divergence(self):
+        from tests.fakes import make_divergent
         self.ix.add_files("alpha", [self.paths[0]])
-        self.ix.add_files("ghost", [self.paths[1]])
+        make_divergent(self.ix, "ghost", self.paths[1])
         cli = self._through_the_cli(self.cli.cmd_repos_list)
         tool = self._through_the_tool("repos_list")
         self.assertEqual(cli, tool)

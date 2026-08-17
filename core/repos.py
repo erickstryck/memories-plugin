@@ -108,6 +108,27 @@ class RepoIndex:
         if not repo:
             raise RepoError("a repository name is required")
         self.ensure()
+        if not self.get_repo(repo):
+            # THE REGISTRY IS AUTHORITATIVE OVER WHICH REPOS EXIST — this module's own
+            # docstring says so, and until this guard existed it was not true: `add_files`
+            # wrote whatever name it was handed. Chunks under a name no entry knows are
+            # unreachable by `list_repos`, and `divergent_repos` then reports them as a
+            # defect: the ordinary path would manufacture the exact state this feature has a
+            # function to denounce.
+            #
+            # REFUSING AND NOT REGISTERING. Declaring the name here would turn a typo into a
+            # permanent archive — `repos add alpah …` would create `alpah`, and repositories
+            # in this design are removed only by hand, so the mistake would outlive every
+            # session that could still recognise it. The refusal catches the typo; auto-
+            # creating buries it.
+            #
+            # IT SITS IN `add_files` AND NOT IN A REQUEST WRAPPER, unlike the other guards on
+            # this class, because the bulk pipeline will call this method too and the same
+            # harm reaches the archive through it.
+            raise RepoError(
+                f"repository {repo!r} is not registered, so its chunks would be unreachable "
+                f"by any listing. Declare it first: `qctx repos register {repo}` "
+                f"(repos_register as a tool), or check the name with `qctx repos list`.")
         files = chunks = 0
         skipped: list = []
         for path in paths:
@@ -181,6 +202,25 @@ class RepoIndex:
                                             "payload": entry}])
 
         return entry
+
+    def register_request(self, repo: str, label: str | None = None) -> dict:
+        """Declare a repository BY NAME, with no detection and no join offer.
+
+        The MANUAL path both hosts call, and deliberately plain: it records the name that was
+        declared and the label, and nothing else. Detecting the working copy, matching it
+        against the known remotes and offering to join an existing repository is
+        `candidates_for`'s job, and belongs to the interactive flow that will wrap this one.
+        This is what that flow will call, not a competitor to it.
+
+        NO CHECKOUT AND NO REMOTES ARE RECORDED, because none were declared. Inferring them
+        from the working directory is precisely the derivation this design rejected: identity
+        here is declared, so a manual declaration records what was declared. `register` still
+        accepts both and accumulates them without repeating, for the caller that HAS them.
+        """
+        if not repo:
+            raise RepoError("a repository name is required")
+
+        return self.register(repo, label or repo, [], "")
 
     def get_repo(self, repo: str) -> dict | None:
         point = self.q.get_point(self.registry_name, _point_id(f"registry:{repo}", 0))

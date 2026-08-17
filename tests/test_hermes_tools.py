@@ -1,8 +1,8 @@
-"""The 19 tools the model may call, and the 5 it may not.
+"""The 20 tools the model may call, and the 5 it may not.
 
 Configuration is the operator's, not the model's: exposing `config set` as a tool would let
 the model point the archive somewhere else mid-conversation. `setup` is interactive and
-wants a TTY. The CLI keeps all 24 in both hosts — the restriction is only about what the
+wants a TTY. The CLI keeps all 25 in both hosts — the restriction is only about what the
 MODEL can reach on its own.
 
 Two properties are checked from OUTSIDE the tools module, not by importing it:
@@ -34,7 +34,7 @@ EXPECTED = {
     "memory_store", "memory_store_many", "memory_find", "memory_recall", "memory_get",
     "memory_update", "memory_delete", "memory_list", "memory_search_collections",
     "docs_index", "docs_keep", "docs_search", "docs_list", "docs_refresh", "docs_drop",
-    "repos_list", "repos_search", "repos_add", "repos_drop",
+    "repos_list", "repos_search", "repos_add", "repos_drop", "repos_register",
 }
 FORBIDDEN = {"setup", "config_set", "config_detect", "config_show", "collections"}
 
@@ -55,7 +55,7 @@ def setUpModule():
     `core.load()` defaults `library_collection` to `memories_docs_library`
     (core/config.py:54-55), a PRODUCTION archive, and `docs_refresh` has no required
     arguments. A provider left without an injected config — one deleted `p._cfg = ...` line
-    in a test that walks all 19 tools — would reindex the user's permanent library from a
+    in a test that walks all 20 tools — would reindex the user's permanent library from a
     unit test, with the suite green.
 
     Every test here therefore injects a `Config`. The one behaviour that must call
