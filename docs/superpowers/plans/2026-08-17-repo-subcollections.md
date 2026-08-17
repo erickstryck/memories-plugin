@@ -275,7 +275,8 @@ e não é.
 - [ ] **Step 9: Rode a suíte inteira**
 
 Run: `find . -name __pycache__ -type d -prune -exec rm -rf {} + ; python3 -m unittest discover -s tests 2>&1 | tail -3`
-Expected: `OK`, contagem = baseline + 5
+Expected: `OK`, contagem = baseline + **6** e skipped + 1 — o teste de integração do
+Step 8 é CONTADO mesmo pulando, e essa aritmética já enganou uma vez
 
 - [ ] **Step 10: Commit**
 
