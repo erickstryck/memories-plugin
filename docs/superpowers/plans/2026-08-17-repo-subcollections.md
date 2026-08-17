@@ -495,8 +495,13 @@ find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
 python3 -m unittest tests.test_config_repos 2>&1 | tail -3
 cp /tmp/cf.bak core/config.py && rm /tmp/cf.bak
 ```
-Expected: `FAILED` com pelo menos `test_repos_may_not_be_the_memory_collection` e
-`test_repos_may_not_be_the_library`. Registre a contagem COM o escopo.
+Expected: `FAILED` nomeando `test_the_registry_may_not_be_the_chunk_archive` e
+`test_the_older_three_still_reject_the_new_two`. Registre a contagem COM o escopo.
+
+**Não são os dois testes que a intuição sugere, e a razão importa:** tirar `repos_collection` do
+dict `others` não afeta a checagem DE `repos_collection` — o valor dela continua sendo comparado
+contra `memory` e `library`, que seguem no dict. Afeta a checagem dos OUTROS campos CONTRA repos.
+A relação tem duas direções e a mutação só derruba uma delas.
 
 - [ ] **Step 9: Commit**
 
