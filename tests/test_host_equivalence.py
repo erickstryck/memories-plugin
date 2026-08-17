@@ -1664,6 +1664,53 @@ class TestEachHostAppliesItsOwnReadCeiling(unittest.TestCase):
 
 README = REPO / "README.md"
 SKILL = REPO / "skills" / "doc-index" / "SKILL.md"
+HOOKS_JSON = REPO / "hooks" / "hooks.json"
+CUTOVER = REPO / "scripts" / "hermes_cutover.sh"
+
+
+class TestBothHostsActuallyREGISTERTheGuard(unittest.TestCase):
+    """A guard nothing calls is a guard that does not exist, and the two hosts are wired in
+    completely different places: a manifest this repo ships, and a line the cutover script
+    writes into the user's `config.yaml`.
+
+    The hermes half has its own suite (`tests/test_hermes_cutover.py`) because a script that
+    edits a live file has to be driven to be believed. This is the half that had nothing:
+    deleting the `PreToolUse` block from `hooks/hooks.json` left every test green, including
+    the one that reasons about "the timeout hooks.json gives it".
+    """
+
+    def entry(self):
+        manifest = json.loads(HOOKS_JSON.read_text())
+        for block in manifest.get("hooks", {}).get("PreToolUse", []):
+            for hook in block.get("hooks", []):
+                if "bigfile.py" in hook.get("command", ""):
+                    return block, hook
+
+        return None, None
+
+    def test_claude_code_calls_the_guard_before_a_read(self):
+        block, hook = self.entry()
+        self.assertIsNotNone(hook, "hooks.json registers no PreToolUse hook for bigfile.py")
+        self.assertEqual(block.get("matcher"), "Read",
+                         "a wider matcher hands the guard tools it must not block")
+        self.assertIn("CLAUDE_PLUGIN_ROOT", hook["command"],
+                      "the path has to come from the host, not from whoever wrote it")
+
+    def test_the_timeout_is_the_one_the_rest_of_the_suite_reasons_about(self):
+        """`tests/test_bigfile_claude.py` measures the deadline against "the 5s hooks.json
+        gives it". That number was in prose on both sides and asserted on neither."""
+        _, hook = self.entry()
+        self.assertEqual(hook["timeout"], 5)
+
+    def test_both_hosts_get_the_same_budget_and_the_same_tool(self):
+        """Same guard, same 5 seconds, and each host's own name for the read tool — `Read`
+        against `read_file`. The hermes side is written by the cutover script, so it is read
+        out of the script rather than out of a file only an install produces."""
+        _, hook = self.entry()
+        script = CUTOVER.read_text()
+        self.assertIn("matcher: read_file", script)
+        self.assertIn(f"timeout: {hook['timeout']}", script)
+        self.assertIn("hosts/hermes/bigfile.py", script)
 
 #: Named rather than guessed, for the reason `DIVERGENCE_HEADING` is: a renamed heading has
 #: to fail loudly here, not turn every check below into an `assertIn` over "".
