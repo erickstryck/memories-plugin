@@ -292,6 +292,97 @@ class TestRenderDrop(unittest.TestCase):
                          "2 means 'you called it wrong', distinct from a core failure")
 
 
+class TestTheCLIEnumeratesAllFiveCollections(unittest.TestCase):
+    """Four places in this file listed three collections while the config knew five.
+
+    Each one answers a question about "the collections this package uses", and each one
+    answered it while omitting two of them: a configured repos collection was hidden from
+    the listing, shown with no role, set without the dimension warning, and never offered
+    by the wizard. None of them fails loudly — they under-report, which is the failure mode
+    this whole feature was reviewed for.
+    """
+
+    def setUp(self):
+        import unittest.mock
+        self.cli = load_cli()
+        self.cfg = core.Config(
+            qdrant_url="", qdrant_api_key="", api_base_url="",
+            api_key="", embed_url="", rerank_url="", embed_model="m", rerank_model="r",
+            memory_collection="mem", docs_collection="tmp", library_collection="lib",
+            repos_collection="ws-repos", repos_registry_collection="ws-reg",
+            vector_size=8)
+        self.store = FakeVectorStore()
+        for name in ("mem", "tmp", "lib", "ws-repos", "ws-reg", "ws-someone-elses"):
+            self.store.ensure_collection(name, 8)
+        self.patch = unittest.mock.patch.object(self.cli.core, "build_qdrant",
+                                                lambda cfg: self.store)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    class Args:
+        def __init__(self, **kw):
+            self.json = False
+            self.all = False
+            self.check = False
+            self.__dict__.update(kw)
+
+    def test_a_configured_repos_collection_is_not_hidden_as_another_system(self):
+        """The `ws-` prefix hides collections from another system, and a configured name is
+        exempt — it was exempt for three of the five. A user who points the repos archive at
+        a name with that prefix simply could not see it."""
+        out = json.loads(rendered(self.cli.cmd_collections, self.Args(json=True), self.cfg))
+        shown = {l["collection"] for l in out["collections"]}
+        self.assertIn("ws-repos", shown)
+        self.assertIn("ws-reg", shown)
+        self.assertNotIn("ws-someone-elses", shown, "the hiding itself must still work")
+
+    def test_the_two_repos_collections_are_shown_WITH_a_role(self):
+        """An empty role reads as "nothing here uses this", which is how a collection this
+        package writes to every day gets picked as the target for something else."""
+        out = json.loads(rendered(self.cli.cmd_collections,
+                                  self.Args(json=True, all=True), self.cfg))
+        roles = {l["collection"]: l["role"] for l in out["collections"]}
+        self.assertTrue(roles["ws-repos"], "the repo chunk archive has no role label")
+        self.assertTrue(roles["ws-reg"], "the repo registry has no role label")
+        self.assertEqual(roles["ws-someone-elses"], "")
+
+    def test_setting_a_repos_collection_warns_like_the_other_three(self):
+        """The dimension check is a warning at the moment of choice, and the moment of
+        choice is the same command for all five."""
+        import unittest.mock
+        with unittest.mock.patch.object(self.cli.core, "save", lambda patch: "/tmp/cfg"), \
+             unittest.mock.patch.object(self.cli.core, "load", lambda: self.cfg):
+            for key in ("repos-collection", "repos-registry-collection"):
+                with self.subTest(key=key):
+                    text = rendered(self.cli.cmd_config_set,
+                                    self.Args(key=key, value="brand-new"), self.cfg)
+                    self.assertIn("does not exist yet", text)
+
+    def test_the_wizard_offers_the_two_repos_collections_too(self):
+        """It walked the user through three of the five, so the other two could only be set
+        by hand — by someone who knew they existed."""
+        import unittest.mock
+        asked = []
+
+        def fake_input(prompt=""):
+            asked.append(prompt)
+
+            return ""
+
+        class TTY:
+            def isatty(self):
+                return True
+
+        with unittest.mock.patch("builtins.input", fake_input), \
+             unittest.mock.patch.object(self.cli.sys, "stdin", TTY()), \
+             unittest.mock.patch.object(self.cli.core, "save", lambda patch: "/tmp/cfg"), \
+             unittest.mock.patch.object(self.cli.core, "load", lambda: self.cfg):
+            rendered(self.cli.cmd_setup, self.Args(), self.cfg)
+        prompts = " ".join(asked)
+        self.assertIn("repos_collection", prompts)
+        self.assertIn("repos_registry_collection", prompts)
+
+
 class TestParser(unittest.TestCase):
     def setUp(self):
         self.cli = load_cli()

@@ -72,7 +72,11 @@ from core.setup import NOISE_PREFIXES as NOISE  # noqa: E402
 def cmd_collections(args, cfg):
     q = core.build_qdrant(cfg)
     names = q.list_collections()
-    configured = {cfg.memory_collection, cfg.docs_collection, cfg.library_collection}
+    # All five, like `Config._require_distinct`: a configured collection is exempt from the
+    # noise-prefix hiding, and listing only three of them hid two collections this package
+    # writes to from the command whose job is to show them.
+    configured = {cfg.memory_collection, cfg.docs_collection, cfg.library_collection,
+                  cfg.repos_collection, cfg.repos_registry_collection}
     if not args.all:
         visible = [n for n in names
                     if n in configured or not n.startswith(NOISE)]
@@ -83,14 +87,22 @@ def cmd_collections(args, cfg):
     for name in visible:
         info = q.collection_info(name) or {}
         size = info.get("size")
+        role = ("memory" if name == cfg.memory_collection
+                else "temporary" if name == cfg.docs_collection
+                else "library" if name == cfg.library_collection
+                else "repos" if name == cfg.repos_collection
+                else "repo registry" if name == cfg.repos_registry_collection else "")
+        # The registry is the one collection whose vector says nothing (`core/repos.py`
+        # sizes it 1 on purpose), so judging it by the model's dimension would mark a
+        # correct install INCOMPAT.
+        wanted = core.repos.REGISTRY_VECTOR_SIZE if role == "repo registry" \
+            else cfg.vector_size
         lines.append({
             "collection": name,
             "points": info.get("points"),
             "dim": size,
-            "compatible": size == cfg.vector_size,
-            "role": ("memory" if name == cfg.memory_collection
-                    else "temporary" if name == cfg.docs_collection
-                    else "library" if name == cfg.library_collection else ""),
+            "compatible": size == wanted,
+            "role": role,
         })
     lines.sort(key=lambda l: (not l["role"], -(l["points"] or 0)))
     if args.json:
@@ -129,15 +141,20 @@ def cmd_config_set(args, cfg):
         print(f"{key} = {value}  (written to {path})")
     # A warning, not an error: the collection may be created later. But an incompatible
     # dimension is a silent trap, so it is worth shouting at the moment of choice.
-    if key in ("memory_collection", "docs_collection", "library_collection"):
+    if key in ("memory_collection", "docs_collection", "library_collection",
+               "repos_collection", "repos_registry_collection"):
+        # The registry's vector carries no meaning and is sized 1 (`core/repos.py`), so the
+        # dimension it has to match is its own, not the model's.
+        wanted = core.repos.REGISTRY_VECTOR_SIZE if key == "repos_registry_collection" \
+            else cfg.vector_size
         try:
             q = core.build_qdrant(core.load())
             info = q.collection_info(value)
             if info is None:
                 print(f"  (collection {value!r} does not exist yet — it will be created on first use)")
-            elif info.get("size") not in (None, cfg.vector_size):
+            elif info.get("size") not in (None, wanted):
                 print(f"  CAUTION: {value!r} has dimension {info['size']}, "
-                      f"incompatible with the model ({cfg.vector_size})")
+                      f"incompatible with this role ({wanted})")
         except Exception:
             pass
 
@@ -207,7 +224,9 @@ def cmd_setup(args, cfg):
         core.save({"memory_collection": choice})
         print(f"  memory_collection = {choice}")
     for key, current in (("docs_collection", cfg.docs_collection),
-                         ("library_collection", cfg.library_collection)):
+                         ("library_collection", cfg.library_collection),
+                         ("repos_collection", cfg.repos_collection),
+                         ("repos_registry_collection", cfg.repos_registry_collection)):
         resp = input(f"{key} [{current}]: ").strip()
         if resp:
             core.save({key: resp})

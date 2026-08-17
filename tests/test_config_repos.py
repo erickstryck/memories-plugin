@@ -64,5 +64,35 @@ class TestTheFiveAreDistinct(unittest.TestCase):
             a_config(docs_collection="repos").require_docs_collection()
 
 
+class TestTheDIAGNOSTICKnowsTheSameFiveNames(unittest.TestCase):
+    """`setup.diagnose` enumerated three collections while the guard enumerated five.
+
+    The consequence is not cosmetic: `qctx setup` answered "ready" on a configuration whose
+    first effect, in `_require_distinct`'s own words, is repository chunks drowning the
+    curated memory archive. The guard did fire — but only once a repos command ran, which
+    is after the diagnostic said the install was fine.
+    """
+
+    def test_a_repos_collection_colliding_with_memory_is_a_BLOCKER(self):
+        from core import setup
+        rel = setup.diagnose(a_config(repos_collection="mem", qdrant_url=""))
+        self.assertIn("repos_collection", {c["name"] for c in rel["blockers"]})
+
+    def test_a_registry_colliding_with_memory_is_a_BLOCKER(self):
+        from core import setup
+        rel = setup.diagnose(a_config(repos_registry_collection="mem", qdrant_url=""))
+        self.assertIn("repos_registry_collection", {c["name"] for c in rel["blockers"]})
+
+    def test_the_diagnostic_reports_on_all_five_collections(self):
+        """Not only on collisions: a check that never mentions a collection cannot report
+        anything about it — a wrong dimension included."""
+        from core import setup
+        rel = setup.diagnose(a_config(qdrant_url=""))
+        self.assertLessEqual(
+            {"memory_collection", "docs_collection", "library_collection",
+             "repos_collection", "repos_registry_collection"},
+            {c["name"] for c in rel["checks"]})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

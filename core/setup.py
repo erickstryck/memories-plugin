@@ -108,13 +108,33 @@ def _check_rerank(cfg: Config) -> Check:
 
 def _check_collections(cfg: Config, q) -> list[Check]:
     checks = []
+    # ALL FIVE, and the count is the point. `Config._require_distinct` enumerates five; this
+    # enumerated three, so `setup` reported "ready" on a configuration where the repository
+    # archive sat on top of the memory collection — a collision whose first consequence, in
+    # that guard's own words, is code chunks drowning the curated archive. The guard did
+    # fire, but only once a repos command ran, which is long after the diagnostic was
+    # believed. A diagnostic that omits a role cannot report anything about it.
+    #
+    # THE REGISTRY IS THE ONE WHOSE DIMENSION IS NOT THE MODEL'S. It stores no meaning in
+    # its vector — `core/repos.py` sizes it 1 and says why — so checking it against
+    # `vector_size` would report a correct install as broken, which is the same lie in the
+    # other direction. Each role therefore carries the dimension it actually expects.
+    from .repos import REGISTRY_VECTOR_SIZE
+
     roles = (
-        ("memory_collection", cfg.memory_collection, "memory-collection", True),
-        ("docs_collection", cfg.docs_collection, "docs-collection", False),
-        ("library_collection", cfg.library_collection, "library-collection", False),
+        ("memory_collection", cfg.memory_collection, "memory-collection", True,
+         cfg.vector_size),
+        ("docs_collection", cfg.docs_collection, "docs-collection", False,
+         cfg.vector_size),
+        ("library_collection", cfg.library_collection, "library-collection", False,
+         cfg.vector_size),
+        ("repos_collection", cfg.repos_collection, "repos-collection", False,
+         cfg.vector_size),
+        ("repos_registry_collection", cfg.repos_registry_collection,
+         "repos-registry-collection", False, REGISTRY_VECTOR_SIZE),
     )
     seen_values: dict[str, str] = {}
-    for field, value, cli_key, required in roles:
+    for field, value, cli_key, required, expected_dim in roles:
         if not value:
             checks.append(Check(field, not required,
                                 "not configured",
@@ -136,9 +156,9 @@ def _check_collections(cfg: Config, q) -> list[Check]:
             checks.append(Check(field, True, f"{value!r} will be created on first use"))
             continue
         dim = info.get("size")
-        if dim not in (None, cfg.vector_size):
+        if dim not in (None, expected_dim):
             checks.append(Check(field, False,
-                                f"{value!r} has dimension {dim}, the model uses {cfg.vector_size}",
+                                f"{value!r} has dimension {dim}, this role uses {expected_dim}",
                                 "pick another collection or another embedding model"))
             continue
         checks.append(Check(field, True, f"{value!r} — {info.get('points')} points"))
