@@ -571,5 +571,69 @@ class TestThePriceFollowsTheRequestsLimit(unittest.TestCase):
                                  adapter.DEFAULT_READ_LINES)
 
 
+# --- The WIDTH of the catch-all, and not merely its existence ---------------------------
+#: Runs the hook as `__main__` in a REAL process with ONE thing replaced: `json.load`, the
+#: first call `_run()` makes. Nothing else is faked, so what is measured is the interpreter's
+#: own top-level behaviour — the traceback and the exit status the host would actually see.
+#:
+#: A subprocess and not an in-process call, because two of the three things the contract
+#: promises only exist in a process: the exit STATUS, and the TRACEBACK the interpreter
+#: prints when nothing catches. In-process, "no traceback" is true of any raise nobody
+#: printed, which would prove nothing.
+_INJECT = (
+    "import json, runpy, sys\n"
+    "kinds = {'KeyboardInterrupt': KeyboardInterrupt, 'MemoryError': MemoryError}\n"
+    "def boom(*a, **k):\n"
+    "    raise kinds[sys.argv[1]]('injected: this is not a ValueError')\n"
+    "json.load = boom\n"
+    "runpy.run_path(sys.argv[2], run_name='__main__')\n"
+)
+
+
+class TestTheCatchAllIsWIDEAndNotAListOfTypes(unittest.TestCase):
+    """`main()` catches `BaseException`, and its docstring says why: a LIST of types has to
+    be updated in every consumer when a new error appears, and forgetting does not fail
+    loudly — it fails as a traceback where the contract promised silence.
+
+    That reasoning had no test. Measured on this branch, full suite (714): narrowing the
+    catch-all to `except ValueError` in BOTH adapters left the suite at 714 OK, while
+    replacing it with `raise` failed — so it was reached, but only ever by a `ValueError`.
+    The property with no owner was its WIDTH.
+
+    The two types are chosen for what each one alone cannot prove. `MemoryError` is an
+    `Exception` no plausible `except (…)` list names; `KeyboardInterrupt` is not an
+    `Exception` at all, so it is the only one of the two that survives the narrowing a
+    linter suggests (`except Exception`) — measured: with `except Exception` the
+    `MemoryError` case passes and the `KeyboardInterrupt` case fails.
+    """
+
+    def _hook(self, kind=None):
+        """(stdout, stderr, returncode) for the hook, optionally with `kind` injected."""
+        path, transcript = a_file_of(A_BIG_FILE), a_transcript([ASSISTANT])
+        argv = ([sys.executable, "-c", _INJECT, kind, HOOK] if kind
+                else [sys.executable, HOOK])
+        done = subprocess.run(argv, input=a_read_payload(path, transcript),
+                              env=hook_env(), capture_output=True, text=True, timeout=30)
+
+        return done.stdout, done.stderr, done.returncode
+
+    def test_the_same_read_without_the_injection_really_does_block(self):
+        """The control, and without it every assertion below could pass on a hook that
+        never ran: an injection that silently failed to fire would look like silence."""
+        out, err, code = self._hook()
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual((err, code), ("", 0))
+
+    def test_an_error_no_except_list_would_name_still_emits_nothing(self):
+        for kind in ("MemoryError", "KeyboardInterrupt"):
+            with self.subTest(raised=kind):
+                out, err, code = self._hook(kind)
+                self.assertEqual(out, "", "a stray line on stdout corrupts the hook protocol")
+                self.assertEqual(code, 0, "a non-zero exit here is a file the user cannot read")
+                self.assertEqual(err, "", "the contract promised silence, and a traceback on "
+                                          "stderr is what a narrowed catch-all leaves instead")
+                self.assertNotIn("Traceback", err)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -757,5 +757,73 @@ class TestThePriceFollowsWhatOneReadLoads(unittest.TestCase):
                                  adapter.DEFAULT_READ_LINES)
 
 
+# --- The WIDTH of the catch-all, and not merely its existence ---------------------------
+#: Runs the guard as `__main__` in a REAL process, from `/` as hermes starts it, with ONE
+#: thing replaced: `json.load`, the first call `_run()` makes. Nothing else is faked, so what
+#: is measured is the interpreter's own top-level behaviour — the traceback and the exit
+#: status the host would actually see.
+#:
+#: A subprocess and not an in-process call, because two of the three things the contract
+#: promises only exist in a process: the exit STATUS, and the TRACEBACK the interpreter
+#: prints when nothing catches. In-process, "no traceback" is true of any raise nobody
+#: printed, which would prove nothing. And on THIS host stderr is not cosmetic: the host
+#: quotes it as the block message when stdout carries none.
+_INJECT = (
+    "import json, runpy, sys\n"
+    "kinds = {'KeyboardInterrupt': KeyboardInterrupt, 'MemoryError': MemoryError}\n"
+    "def boom(*a, **k):\n"
+    "    raise kinds[sys.argv[1]]('injected: this is not a ValueError')\n"
+    "json.load = boom\n"
+    "runpy.run_path(sys.argv[2], run_name='__main__')\n"
+)
+
+
+class TestTheCatchAllIsWIDEAndNotAListOfTypes(unittest.TestCase):
+    """`main()` catches `BaseException`, and its docstring says why: a LIST of types has to
+    be updated in every consumer when a new error appears, and forgetting does not fail
+    loudly — it fails as a traceback where the contract promised silence.
+
+    That reasoning had no test. Measured on this branch, full suite (714): narrowing the
+    catch-all to `except ValueError` in BOTH adapters left the suite at 714 OK, while
+    replacing it with `raise` failed — so it was reached, but only ever by a `ValueError`.
+    The property with no owner was its WIDTH.
+
+    The two types are chosen for what each one alone cannot prove. `MemoryError` is an
+    `Exception` no plausible `except (…)` list names; `KeyboardInterrupt` is not an
+    `Exception` at all, so it is the only one of the two that survives the narrowing a
+    linter suggests (`except Exception`) — measured: with `except Exception` the
+    `MemoryError` case passes and the `KeyboardInterrupt` case fails.
+    """
+
+    def _guard(self, kind=None):
+        """(stdout, stderr, returncode) for the guard, optionally with `kind` injected."""
+        chars, size = SHARE_ONLY
+        db = a_session_using(chars)
+        argv = ([sys.executable, "-c", _INJECT, kind, GUARD] if kind
+                else [sys.executable, GUARD])
+        done = subprocess.run(argv, input=a_read_payload(a_file_of(size)),
+                              env=guard_env(db), cwd="/", capture_output=True, text=True,
+                              timeout=60)
+
+        return done.stdout, done.stderr, done.returncode
+
+    def test_the_same_read_without_the_injection_really_does_block(self):
+        """The control, and without it every assertion below could pass on a guard that
+        never ran: an injection that silently failed to fire would look like silence."""
+        out, err, code = self._guard()
+        self.assertEqual(json.loads(out)["decision"], "block")
+        self.assertEqual((err, code), ("", adapter.BLOCK_EXIT_CODE))
+
+    def test_an_error_no_except_list_would_name_still_emits_nothing(self):
+        for kind in ("MemoryError", "KeyboardInterrupt"):
+            with self.subTest(raised=kind):
+                out, err, code = self._guard(kind)
+                self.assertEqual(out, "", "stdout carries the block contract and nothing else")
+                self.assertEqual(code, 0, "any non-zero exit is a block; 2 IS the block code")
+                self.assertEqual(err, "", "the contract promised silence, and this host "
+                                          "quotes stderr as the reason when stdout is empty")
+                self.assertNotIn("Traceback", err)
+
+
 if __name__ == "__main__":
     unittest.main()
