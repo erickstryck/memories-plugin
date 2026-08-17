@@ -56,6 +56,35 @@ class RepoHit:
     stale: str | None    # the reason, when the file changed since it was indexed
 
 
+def empty_note(across: bool, repo: str | None, known: int) -> str:
+    """What an answer with NO groups says, in words, on every host.
+
+    THE ONE SENTENCE THIS FEATURE MUST NOT GET WRONG. The grouping is best-effort over what
+    the search reached — the spec's "limite honesto" — so zero groups means "nothing came
+    back above the cut", never "no repository mentions this". Rendering an empty list and
+    stopping lets the caller supply the missing half of the sentence, and it supplies the
+    false one: a model asking `across` reads `{"groups": []}` from a tool that promises to
+    search every indexed repository and concludes absence. That is the same error the recall
+    hook exists to avoid, which distinguishes "consulted, nothing above the cut" from
+    "unavailable" — here it would be a third thing, "consulted, and therefore nothing
+    exists", which no top-K can support.
+
+    IT LIVES IN THE CORE FOR THE REASON EVERY OTHER DECISION HERE DOES: two hosts rendering
+    the same absence would render it in two sets of words, and the words ARE the fix. The
+    CLI prints it; the tool ships it inside the JSON so the model reads a sentence instead
+    of inferring from an empty array.
+    """
+    where = (f"across the {known} registered repositor{'y' if known == 1 else 'ies'}"
+             if across else f"in {repo!r}")
+    claim = ("no repository mentions this" if across
+             else f"{repo!r} does not mention this")
+
+    return (f"Nothing came back above the search's cut {where}. The grouping is best-effort "
+            f"over what the search reached, not an exhaustive sweep — a repository whose "
+            f"best chunk falls below the score horizon simply does not come back — so this "
+            f"is not a statement that {claim}. Try other words, or read the files.")
+
+
 def search_payload(result: dict) -> dict:
     """The JSON form of a `search` result: hits as objects, never as their repr.
 
@@ -361,8 +390,14 @@ class RepoIndex:
                 f"the repository archive returned a result that could not be read: {exc}"
             ) from exc
 
+        # `note` is ALWAYS a key and `truncated` does not answer for it: `truncated` says
+        # there were more groups than `limit` allowed, which is a statement about the
+        # ceiling. This one is about the floor, and it is the only place the promise "never
+        # affirm absence" is actually kept. `None` when there are hits, because a caveat
+        # printed on every successful search is a caveat nobody reads.
         return {"scope": "across" if across else "repo", "repo": None if across else repo,
-                "groups": groups, "truncated": truncated}
+                "groups": groups, "truncated": truncated,
+                "note": None if groups else empty_note(across, repo, len(known))}
 
     def search_request(self, query: str, repo: str | None = None, across: bool = False,
                        limit: int = 8, cwd: str | None = None) -> dict:

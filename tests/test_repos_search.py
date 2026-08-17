@@ -92,6 +92,61 @@ class TestTheTraversal(unittest.TestCase):
             ix.search("anything", across=True)
 
 
+class TestAnEmptyAnswerNEVERAffirmsAbsence(unittest.TestCase):
+    """An answer with no groups has to SAY "nothing above the cut", in words.
+
+    The spec calls this the cardinal error of the feature: the grouping is best-effort over
+    what the search reached, never an exhaustive sweep, so `[]` means "nothing came back
+    above the cut" and NOT "no repository mentions this". A model calling
+    `repos_search(across=true)` — whose description promises every indexed repository — reads
+    a bare empty list as proof of absence, which is exactly the conclusion the recall hook
+    exists to refuse to let it draw.
+
+    It lives in the core so both hosts inherit the same sentence: rendering it twice is
+    rendering it two ways, and this is the sentence that must not vary.
+    """
+
+    def _registered_but_empty(self) -> RepoIndex:
+        ix = RepoIndex(FakeVectorStore(), FakeEmbedder(dim=8), "c", "r", 8)
+        ix.register("alpha", "Alpha", [], "/tmp/alpha")
+        ix.register("beta", "Beta", [], "/tmp/beta")
+
+        return ix
+
+    def test_an_across_search_with_no_groups_carries_the_sentence(self):
+        out = self._registered_but_empty().search("invoice", across=True)
+        self.assertEqual(out["groups"], [])
+        self.assertTrue(out["note"], "an empty result answered with silence")
+
+    def test_the_sentence_says_above_the_cut_and_never_that_nothing_exists(self):
+        note = self._registered_but_empty().search("invoice", across=True)["note"].lower()
+        self.assertIn("above", note, "it has to name the CUT, not the absence")
+        self.assertIn("reach", note, "it has to say the search is best-effort over what it "
+                                     "reached")
+        self.assertIn("not a statement that no repository mentions this", note,
+                      "the one conclusion it exists to forbid has to be named and refused, "
+                      "not merely left unsaid")
+
+    def test_a_scoped_search_with_no_groups_carries_it_too(self):
+        """Same harm, one repository down: "alpha has nothing about x" is a claim the top-K
+        cannot support either."""
+        out = self._registered_but_empty().search("invoice", repo="alpha")
+        self.assertEqual(out["groups"], [])
+        self.assertTrue(out["note"])
+        self.assertIn("alpha", out["note"], "it has to name the repository it searched")
+
+    def test_an_answer_WITH_hits_carries_no_sentence(self):
+        """A caveat printed on every successful search is a caveat nobody reads."""
+        out = an_index_with_two_repos().search("billing invoice charge total", across=True)
+        self.assertTrue(out["groups"])
+        self.assertIsNone(out["note"])
+
+    def test_the_key_is_always_present_so_a_consumer_can_read_it_unconditionally(self):
+        for out in (an_index_with_two_repos().search("invoice", across=True),
+                    self._registered_but_empty().search("invoice", across=True)):
+            self.assertIn("note", out)
+
+
 class TestFailureDoesNotOpen(unittest.TestCase):
     def test_an_unreachable_store_raises_instead_of_returning_nothing(self):
         """The inverse of the big-file guard, on purpose: there, blocking on a doubtful

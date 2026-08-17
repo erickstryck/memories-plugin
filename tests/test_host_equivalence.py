@@ -1425,6 +1425,18 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
         self.assertEqual(len(cli["groups"][0]["hits"]), 6)
         self.assertEqual(len(cli["groups"][0]["hits"]), len(tool["groups"][0]["hits"]))
 
+    def test_an_empty_across_search_says_the_SAME_sentence_on_both_hosts(self):
+        """The sentence that must never vary between hosts, because it is the one the spec
+        makes cardinal: `--all` never affirms absence. Nothing is indexed here, so both
+        answers have zero groups — and an empty list with no words is what a model reads as
+        "no repository mentions this"."""
+        cli = self._through_the_cli(self.cli.cmd_repos_search, query="invoice", across=True)
+        tool = self._through_the_tool("repos_search", query="invoice", across=True)
+        self.assertEqual(cli["groups"], [])
+        self.assertEqual(tool["groups"], [])
+        self.assertTrue(cli["note"])
+        self.assertEqual(cli["note"], tool["note"])
+
     def test_neither_host_drops_an_archive_without_the_confirmation(self):
         self.ix.add_files("alpha", [self.paths[0]])
         answer = self._through_the_tool("repos_drop", repo="alpha")

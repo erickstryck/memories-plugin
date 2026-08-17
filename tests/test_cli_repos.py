@@ -222,6 +222,36 @@ class TestOneLimitMeansTheSameThingToTheUser(CLICase):
         self.assertFalse(out["truncated"])
 
 
+class TestAnEmptyAnswerIsPrintedAndNotSwallowed(CLICase):
+    """`--all` with nothing above the cut printed an EMPTY STRING.
+
+    The loop over `groups` renders nothing when there are none, and the `truncated` line
+    answers a different question (were there more groups than `--limit` allowed). So the
+    one sentence the spec demands of this feature — never affirm absence — reached neither
+    host. The core produces it; here it must actually be printed.
+    """
+
+    def _two_registered_repos_with_nothing_indexed(self):
+        for name in ("alpha", "beta"):
+            self.ix.register(name, name.title(), [], f"/tmp/{name}")
+
+    def test_the_human_render_says_something_rather_than_nothing(self):
+        self._two_registered_repos_with_nothing_indexed()
+        text = self.rendered(self.cli.cmd_repos_search, query="invoice", across=True)
+        self.assertTrue(text.strip(), "an empty search printed an empty string")
+        self.assertIn("above", text.lower())
+
+    def test_the_json_form_carries_it_too_so_a_model_reads_it(self):
+        """A model reading `{"groups": []}` concludes absence. It has to read the sentence
+        instead of inferring from an empty array."""
+        self._two_registered_repos_with_nothing_indexed()
+        text = self.rendered(self.cli.cmd_repos_search, query="invoice", across=True,
+                             json=True)
+        out = json.loads(text)
+        self.assertEqual(out["groups"], [])
+        self.assertTrue(out["note"])
+
+
 class TestSearchRefusesInsteadOfWideningSilently(CLICase):
     def test_outside_an_indexed_repository_it_names_the_two_remedies(self):
         """Falling back to a broad search would be the noise the scoped default exists to

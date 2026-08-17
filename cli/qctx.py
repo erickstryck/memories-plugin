@@ -531,6 +531,11 @@ def cmd_repos_search(args, cfg):
         for hit in group["hits"]:
             flag = f"  [{hit.stale}]" if hit.stale else ""
             print(f"  {hit.score:.3f}  {hit.path}:{hit.start_line}-{hit.end_line}{flag}")
+    if out["note"]:
+        # The loop above renders NOTHING when there are no groups, and an empty screen is
+        # read as "there is nothing about this" — the one conclusion this feature must not
+        # let anyone draw. The core writes the sentence; both hosts carry the same one.
+        print(out["note"])
     if out["truncated"]:
         # Never a claim of absence: the groups beyond the ceiling were never judged.
         print("\n(more repositories matched than --limit allowed — raise it to see them)")
