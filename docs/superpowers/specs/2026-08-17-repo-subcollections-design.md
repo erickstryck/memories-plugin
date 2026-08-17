@@ -51,9 +51,21 @@ eu tenho"* varrendo os chunks seria `scroll_all` sobre TODOS os pontos — dezen
 de chunks lidos para uma pergunta de metadado. **É isto que torna o registro obrigatório, e
 não uma conveniência.**
 
-**Nenhuma porta nova é necessária.** Filtro por keyword já é usado (`{"key": "doc_id",
-"match": {"value": ...}}` em `core/docs.py:343`), `search` aceita filtro, `scroll_all`
-aceita filtro, e `ensure_payload_index(name, field, schema)` existe.
+**UMA porta nova é necessária, e ela vem de uma pergunta do usuário** (2026-08-17): *"se eu
+quiser verificar se algum repo menciona sobre o assunto x, ele consegue fazer essa
+travessia?"*. Filtro por keyword já é usado (`{"key": "doc_id", "match": {"value": ...}}` em
+`core/docs.py:343`), `search` aceita filtro, `scroll_all` aceita filtro, e
+`ensure_payload_index(name, field, schema)` existe — mas nada disso responde àquela pergunta,
+pelo motivo da seção seguinte. Falta `search_groups`.
+
+**`group_by` do Qdrant existe e foi MEDIDO neste deployment** (versão 1.18.2, medida em
+`GET /`): `POST /collections/<c>/points/search/groups` com `group_by`, `limit` (número de
+GRUPOS) e `group_size` (hits por grupo) devolveu 4 grupos distintos numa consulta contra
+`memories_docs_tmp`, agrupando por `doc_id`. Capacidade confirmada por efeito, não por número
+de versão.
+
+**A instância já é povoada:** ~85 coleções e ~2 milhões de pontos (medido). Acrescentar duas
+coleções é irrelevante; acrescentar uma por repositório entraria numa instância já cheia.
 
 **Metade da detecção de desatualizado já existe.** `core/docs.py::source_changed` compara
 por **digest** e não por metadado, e o docstring registra por quê: `cp -p`, `rsync --times`
@@ -80,7 +92,7 @@ em branches diferentes.
 ```
 core/repos.py    RepoIndex: o acervo, o registro, e as operações sobre eles
 core/docs.py     REUSADO, não copiado: chunking, content_digest, source_changed, doc_id_for
-core/ports.py    inalterado
+core/ports.py    ganha `search_groups` — a travessia "quais repos mencionam x"
 cli/qctx.py      verbos `repos` — invólucros finos sobre RepoIndex
 ```
 
@@ -174,9 +186,27 @@ Fora de um repo indexado, o comando **falha dizendo o remédio** (nomeie um repo
 `--all`) em vez de buscar em tudo: buscar tudo em silêncio é o ruído que a decisão de escopo
 recusou.
 
-Os resultados carregam o `repo`, então agrupá-los na saída de `--all` já mostra QUAIS
-projetos casaram antes de o modelo varrer um. Não há camada de agregação separada, de
-propósito: o agrupamento entrega a maior parte do valor dos "dois estágios" a custo zero.
+**`--all` agrupa NO SERVIDOR, e a versão anterior desta spec estava errada aqui.** Ela dizia
+que bastava agrupar os resultados no cliente, porque cada hit carrega o `repo`. Isso responde
+"quais repos estão no top-K", que não é a pergunta: busca vetorial devolve os K melhores por
+similaridade, então um repo com cinquenta chunks parecidos ocupa os dez primeiros lugares e um
+repo com UMA menção real desaparece. Para *"algum repo fala de x?"* é a pergunta errada
+respondida com confiança.
+
+O correto é `search_groups` com `group_by: "repo"`, `limit` = quantos repos o registro conhece,
+`group_size` pequeno (3). Os grupos se formam por VALOR DISTINTO e não por posição no ranking
+global, então o repo de menção única aparece como grupo próprio. Uma consulta só — melhor que
+os dois estágios e melhor que uma coleção por repo, que precisaria de N.
+
+**Sinergia com o registro:** é ele que diz quantos repos existem, logo quantos grupos pedir.
+Sem registro, esse número seria um chute.
+
+**O limite honesto:** o agrupamento é sobre o que a busca alcança, não uma varredura
+exaustiva. Um repo cujo melhor chunk fique abaixo do horizonte de score pode não aparecer.
+Então a saída de `--all` nunca afirma ausência: ela diz "nada acima do corte", que é a mesma
+distinção que o hook de recall já faz entre "consultado, nada relevante" e "indisponível".
+Afirmar "nenhum repo menciona x" a partir de um top-K é a versão desta feature do erro que
+aquele hook existe para não cometer.
 
 Herda do `docs search` o retorno da **localização** em vez de um retrato do conteúdo, para o
 consumidor ler o arquivo atual — o que também faz um chunk velho degradar para "arquivo
@@ -229,6 +259,10 @@ mesma distinção que o hook de recall já faz entre "consultado, nada acima do 
 - **Equivalência entre hosts**, no padrão de `tests/test_host_equivalence.py`: as mesmas
   operações existem e decidem igual nos dois hosts.
 - **`scope=all` não alcança repos** — teste, porque é regressão de funcionalidade entregue.
+- **O repo de menção única não é ofuscado** — teste dedicado, com fixture em que um repo tem
+  muitos chunks fortes e outro tem UM fraco: o agrupamento tem de devolver os dois. É a
+  regressão exata que a versão anterior desta spec teria embarcado, e um teste que use fixture
+  equilibrada não a pegaria.
 - **Sonda de mutação em toda guarda**: removê-la tem de deixar a suíte vermelha, com a
   contagem de ocorrências verificada antes de substituir e o ESCOPO de cada contagem
   declarado (módulo isolado ou suíte inteira). As duas regras nasceram de defeitos reais
@@ -242,8 +276,10 @@ mesma distinção que o hook de recall já faz entre "consultado, nada acima do 
   (branch, linguagem) sem tocar quem já consome.
 - **Substituição** — `RepoIndex` fala com as mesmas portas; qualquer store que as satisfaça
   serve, e é isso que os testes com fakes exploram.
-- **Segregação de interface** — nenhuma porta nova; nenhum método novo exigido de quem
-  implementa `VectorStore`.
+- **Segregação de interface** — um método novo em `VectorStore` (`search_groups`), e ele é
+  exigido porque a travessia entre repos não se expressa com os que existem. O fake dos testes
+  o implementa, e é o mesmo contrato que o Qdrant já oferece — não estamos inventando
+  capacidade, estamos expondo uma que o servidor tem e a porta escondia.
 - **Inversão de dependência** — depende de `ports.VectorStore` e `ports.EmbeddingModel`,
   nunca do cliente HTTP.
 - **Reusar, não copiar** — chunking, `content_digest`, `source_changed` e `doc_id_for` são
