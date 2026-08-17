@@ -67,7 +67,7 @@ language, not just semantics. Consequences in the design:
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 737 collected, 720 offline; no network, no deps
+python3 -m unittest discover -s tests    # 889 collected, 871 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -75,23 +75,49 @@ There is no `pip install`: the core uses only the standard library. That is
 deliberate — this code runs inside hooks fired on every interaction, and a missing
 dependency would turn an environment failure into a silent loss of functionality.
 
-### As a Claude Code plugin
+### Install on Claude Code
 
-The repository is at once a plugin and a single-plugin marketplace:
+The repository is at once a plugin and a single-plugin marketplace, so two commands do it:
 
 ```bash
 claude plugin marketplace add ~/dev/memories-plugin
 claude plugin install memories-plugin@memories-plugin
 ```
 
-Enabling the plugin registers **two `UserPromptSubmit` hooks** (recall on every
-prompt, checkpoint every N) and **two skills** (`memory`, `doc-index`). The hooks use
-`${CLAUDE_PLUGIN_ROOT}`, so there is no hard-coded path to maintain.
+Then **open a new terminal** — the harness reads `settings.json` at start-up.
 
-**If you already had equivalent hooks registered by hand in `settings.json`, remove
-them in the SAME pass.** Both sets fire together and recall gets injected twice into
-the same prompt — which is worse than having none, because it doubles the context cost
-without adding information. Check the log: one round per prompt, not two.
+That registers, with no path for you to maintain (the hooks resolve
+`${CLAUDE_PLUGIN_ROOT}` themselves):
+
+| what | when it runs |
+|---|---|
+| recall hook | every prompt, before the model sees it |
+| checkpoint hook | every Nth prompt, to write memories down |
+| big-file guard | before every `Read`, to refuse a read that would cost too much context |
+| skills `memory` and `doc-index` | loaded on demand, when the model needs them |
+
+To check it took: `claude plugin list` shows it enabled, and the recall log at
+`~/.memories-plugin/state/recall.log` gets one round per prompt — **one, not two**.
+
+**If you already had equivalent hooks registered by hand in `settings.json`, remove them
+in the SAME pass** — `./scripts/cutover.sh --apply` does both at once. Two sets fire
+together and recall lands twice in one prompt, which is worse than having none: it doubles
+the context cost and adds no information.
+
+### Install on hermes-agent
+
+```bash
+./scripts/hermes_cutover.sh            # reports what it would do; writes NOTHING
+./scripts/hermes_cutover.sh --apply    # installs, with a dated backup of every file it edits
+```
+
+Run the first form first and read it. It checks the credentials, the collections, the
+provider entry, the hook block and whether the context window is declared, and prints the
+exact fix for each gap. The `--apply` form writes a `.bak-<timestamp>` beside anything it
+edits and re-reads the result to confirm it took, rather than trusting that the write
+returned zero.
+
+Then restart hermes.
 
 ## Hosts
 
@@ -104,7 +130,7 @@ The same core serves two hosts, with the same operations and the same configurat
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
 | big-file guard | `PreToolUse` hook on `Read` | `pre_tool_call` shell hook, matcher `read_file` |
-| operations | `qctx` CLI + two skills | 15 model-invokable tools + the same CLI |
+| operations | `qctx` CLI + two skills | 20 model-invokable tools + the same CLI |
 | what the model is told | the two skills | `system_prompt_block()`, from the same `core/prompts.py` |
 | configuration | `~/.config/memories-plugin/config.json` | the same file |
 | credentials | the environment | the environment, or `$HERMES_HOME/.env` |
@@ -112,12 +138,7 @@ The same core serves two hosts, with the same operations and the same configurat
 Equivalence is not a claim in this table — `tests/test_host_equivalence.py` renders every
 block state through both adapters and requires byte-identical output.
 
-```bash
-./scripts/hermes_cutover.sh            # check the install and report; writes nothing
-./scripts/hermes_cutover.sh --apply    # install as the hermes memory provider
-```
-
-The install is a **symlink** into `$HERMES_HOME/plugins/memories`, one level deep and no
+The hermes install is a **symlink** into `$HERMES_HOME/plugins/memories`, one level deep and no
 deeper: hermes' loader (`plugins/memory/__init__.py`) scans `$HERMES_HOME/plugins/<name>/`,
 and a provider one directory further down is not discovered at all. That is measured
 against the installed loader, not read off the documentation — `tests/test_hermes_provider.py`
@@ -251,6 +272,34 @@ breaks has to get out of the way, never become a cage.
 
 ## Configuration
 
+### The short version
+
+Four things must be set before anything works: where Qdrant is, where the embedding
+endpoint is, the two credentials, and which collection holds your memory. Everything
+else has a working default.
+
+```bash
+# 1. the two secrets go in the environment, never in the file
+export QCTX_QDRANT_API_KEY="..."      # your Qdrant key
+export QCTX_API_KEY="..."             # your embedding/re-rank server key
+
+# 2. the addresses go in the file, because they are not secret
+qctx config set qdrant-url https://your-qdrant.example
+qctx config set api-base-url https://your-llm-server.example/v1
+
+# 3. name the archive your curated facts live in (it starts EMPTY on purpose)
+qctx config set memory-collection my_memories
+
+# 4. check everything, and let it tell you what is still missing
+qctx setup
+```
+
+`qctx setup` is the one command to run when something is wrong: it probes Qdrant, the
+embedding endpoint (detecting the model's real dimension), the re-rank endpoint and every
+collection, and prints the exact command that fixes each gap.
+
+### The long version
+
 Start with the guided diagnostics:
 
 ```bash
@@ -307,6 +356,57 @@ secret ends up in backups and in dotfile sync.
 `memory_collection` starts out **empty** on purpose: with no explicit choice the CLI
 refuses to operate, so there is no accidental write path into the wrong archive.
 
+## Every command, at a glance
+
+Four groups. `memory` is curated facts, `docs` is documents you point at, `repos` is whole
+repositories, and the rest is configuration. Everything below exists on **both hosts** —
+the CLI name is on the left, the hermes tool name on the right.
+
+### Memory — facts worth keeping
+
+| command | tool | what it does |
+|---|---|---|
+| `memory store` | `memory_store` | write one fact |
+| `memory store-many` | `memory_store_many` | write a batch, all-or-nothing |
+| `memory find` | `memory_find` | dense search, cheap, no re-rank |
+| `memory recall` | `memory_recall` | two-stage search with re-rank — the accurate one |
+| `memory get` | `memory_get` | read one by id |
+| `memory list` | `memory_list` | list what is stored |
+| `memory update` | `memory_update` | correct a fact in place |
+| `memory delete` | `memory_delete` | remove one |
+| `memory search-collections` | `memory_search_collections` | read-only search in someone else's archive |
+
+### Docs — a document you point at
+
+| command | tool | what it does |
+|---|---|---|
+| `docs index` | `docs_index` | index TEMPORARILY, with a TTL |
+| `docs keep` | `docs_keep` | keep in the LIBRARY, no expiry |
+| `docs search` | `docs_search` | search, returning `path:lines` and an excerpt |
+| `docs list` | `docs_list` | what is indexed |
+| `docs refresh` | `docs_refresh` | reindex what changed on disk |
+| `docs drop` | `docs_drop` | delete one document, or the whole temporary archive |
+
+### Repos — a whole repository, grouped
+
+| command | tool | what it does |
+|---|---|---|
+| `repos register` | `repos_register` | declare a repository by name, before indexing anything |
+| `repos add` | `repos_add` | index the given files under it |
+| `repos search` | `repos_search` | search one repository, or `--all` to ask which ones mention it |
+| `repos list` | `repos_list` | every repository, with counts and when it was last indexed |
+| `repos drop` | `repos_drop` | delete a repository archive, permanently |
+
+### Configuration and diagnostics — CLI only
+
+| command | what it does |
+|---|---|
+| `setup` | probe everything and print the exact fix for each gap |
+| `config show` | the resolved configuration |
+| `config set` | write one setting to the file |
+| `config detect` | ask the embedding endpoint its real dimension and store it |
+| `collections list` | what exists in Qdrant, and whether each matches your model |
+
 ## Usage
 
 ```bash
@@ -328,7 +428,25 @@ qctx docs list
 qctx docs refresh --scope library                   # reindexes what changed on disk
 qctx docs drop <doc-id> --scope library
 qctx docs drop --purge-tmp                          # deletes only the temporary archive
+
+# repositories
+qctx repos register my-project                      # declare it first — the name IS the key
+qctx repos add my-project $(git ls-files '*.py')    # index the files you hand it
+qctx repos search "how is auth done" --limit 8      # this repository
+qctx repos search "retry policy" --all              # which of my projects mention it?
+qctx repos list                                     # counts, and when each was last indexed
+qctx repos drop my-project --yes                    # permanent, and only ever manual
 ```
+
+A repository name must be a **slug** — lowercase, digits and hyphens — because it is the
+key everything filters on. `repos register "My Project"` is refused, naming `my-project`
+as the remedy rather than silently rewriting what you typed.
+
+`--all` is the one that pays for the rest: it groups **on the server**, one group per
+repository, so a project with a single genuine mention still comes back next to one with
+fifty. Grouping the top results on the client would answer a different question and answer
+it confidently. When nothing clears the threshold it says so in words — it never returns
+an empty result that reads as "no project mentions this".
 
 For a text file, the search returns **`path:lines`** plus a short excerpt, rather than
 the whole content: the consumer re-reads the exact region and works on the **current**
