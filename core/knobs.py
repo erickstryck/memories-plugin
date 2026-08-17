@@ -21,7 +21,20 @@ import os
 
 
 def env(name: str, legacy: str, default: str) -> str:
-    return os.environ.get(name) or os.environ.get(legacy) or default
+    """The value, stripped, or the coded default when there is none worth having.
+
+    BLANK COUNTS AS UNSET, and that is not tidiness. Not every knob here is a number any
+    more: the file-read guard's escape marker is TEXT the user types, and
+    `QCTX_BIGFILE_ESCAPE="   "` would make the marker a space — a string that appears in
+    almost every sentence ever written, so every read would carry the escape and the guard
+    would be off while still reporting itself installed. A knob whose absurd value silently
+    disables the thing it configures is the shape this repo already clamps for elsewhere.
+    """
+    for value in (os.environ.get(name), os.environ.get(legacy)):
+        if value and value.strip():
+            return value.strip()
+
+    return default
 
 
 def env_num(name: str, legacy: str, default: str, kind=float):

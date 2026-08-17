@@ -69,7 +69,7 @@ if REPO_ROOT not in sys.path:
 
 import core  # noqa: E402
 from core import bigfile, windows  # noqa: E402
-from core.knobs import env_num  # noqa: E402
+from core.knobs import env, env_num  # noqa: E402
 
 #: The exit code `agent/shell_hooks.py::BLOCK_EXIT_CODE` honours on `pre_tool_call`.
 BLOCK_EXIT_CODE = 2
@@ -82,6 +82,17 @@ BLOCK_EXIT_CODE = 2
 #: scan in the test suite is what keeps that true.
 FLOOR_PCT = env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
 SHARE_PCT = env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
+
+#: The literal the user types to force a read through, and — being TEXT the user types —
+#: configurable: a deployer whose own tooling uses `--full` as a flag would otherwise unlock
+#: the guard by accident, which is the false positive a literal marker exists to prevent.
+#: Blank falls back, in `core.knobs.env`: a marker of spaces would match every message.
+#:
+#: ONE OWNER PER HOST, and it is this constant. It is what `escape_requested` looks for AND
+#: what `decide` is handed to put in the message, so the marker the guard teaches cannot
+#: drift from the one it accepts. The name is the one the sibling host reads too — a
+#: deployer who configured the guard on one host expects the same variable on the other.
+ESCAPE_MARKER = env("QCTX_BIGFILE_ESCAPE", "BIGFILE_ESCAPE", "--full")
 
 #: What ONE `read_file` can put in the context, measured in the installed v0.20.1:
 #: `_DEFAULT_MAX_READ_CHARS = 100_000` (`tools/file_tools.py:65`, applied through
@@ -205,7 +216,7 @@ def escape_requested(db_path: str, session_id: str) -> bool:
                  "select content from messages where session_id=? and role='user' and "
                  "active=1 order by timestamp desc, rowid desc limit 1", (session_id,))
 
-    return bool(rows) and bigfile.ESCAPE_MARKER in (rows[0][0] or "")
+    return bool(rows) and ESCAPE_MARKER in (rows[0][0] or "")
 
 
 def _run() -> str:
@@ -227,7 +238,7 @@ def _run() -> str:
     # PASS ONE: no `indexed_ids`, no network. This is the path every read takes.
     verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
                              read_lines=_read_lines(tool_input),
-                             read_bytes=READ_CHAR_CEILING)
+                             read_bytes=READ_CHAR_CEILING, escape=ESCAPE_MARKER)
     if not verdict.block:
         return ""
 
@@ -246,7 +257,7 @@ def _run() -> str:
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
                              floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
                              read_lines=_read_lines(tool_input),
-                             read_bytes=READ_CHAR_CEILING)
+                             read_bytes=READ_CHAR_CEILING, escape=ESCAPE_MARKER)
 
     return verdict.reason if verdict.block else ""
 

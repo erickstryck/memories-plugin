@@ -701,5 +701,67 @@ class TestABlockedReadIndexesNothing(unittest.TestCase):
         self.assertEqual(set(store.ops), BLOCKED_READ_OPS)
 
 
+class TestTheEscapeMarkerIsConfigurable(unittest.TestCase):
+    """The spec says the marker is a literal, defaulting to `--full`, and CONFIGURABLE.
+    Nobody implemented the last word: no brief asked for it, so every scoped review passed
+    correctly and the question was never put.
+
+    It is not completeness for its own sake. The marker is text the USER types, and there
+    are domains where `--full` occurs on its own — anyone working on a CLI that has a
+    `--full` flag would unlock the guard by accident, which is the exact false positive a
+    literal marker (rather than "read it whole") exists to avoid.
+
+    THE TRAP, and it is what these tests are for: the marker is used in the MESSAGE, which
+    teaches the user what to type, and in the DETECTION, which reads the last user turn. Two
+    readers of one setting can disagree, and the failure is a guard that advertises a way out
+    it then refuses. Every case below asserts BOTH halves against the same configured value.
+
+    A subprocess, because the marker is read at IMPORT time like the two threshold knobs; an
+    in-process patch would test a value the module never read.
+    """
+
+    def _decide(self, turn: str, **env):
+        """(stdout, exit code) for a big-file read whose last user turn is `turn`."""
+        transcript = a_transcript([ASSISTANT,
+                                   dict(REAL_TURN, message={"role": "user", "content": turn})])
+        _, out, code = run_hook(a_file_of(A_BIG_FILE), transcript, hook_env(**env))
+
+        return out, code
+
+    def _reason(self, out: str) -> str:
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_unset_it_is_the_documented_default(self):
+        allowed, code = self._decide("leia o arquivo --full")
+        self.assertEqual((allowed, code), ("", 0), "--full must still unlock by default")
+        blocked, _ = self._decide("leia o arquivo")
+        self.assertIn("put --full in your request", self._reason(blocked))
+
+    def test_a_configured_marker_is_the_one_BOTH_halves_use(self):
+        env = {"QCTX_BIGFILE_ESCAPE": "@@raw"}
+        allowed, code = self._decide("leia o arquivo @@raw", **env)
+        self.assertEqual((allowed, code), ("", 0), "the configured marker did not unlock")
+        stale, _ = self._decide("leia o arquivo --full", **env)
+        reason = self._reason(stale)
+        self.assertIn("put @@raw in your request", reason,
+                      "the message teaches a marker the detection would reject")
+        self.assertNotIn("--full", reason)
+
+    def test_the_legacy_spelling_is_accepted_like_every_other_knob(self):
+        allowed, code = self._decide("leia @@raw", BIGFILE_ESCAPE="@@raw")
+        self.assertEqual((allowed, code), ("", 0))
+
+    def test_a_blank_marker_falls_back_instead_of_unlocking_everything(self):
+        """`QCTX_BIGFILE_ESCAPE="   "` set as the marker would appear in almost every
+        message ever written, and the guard would be off for every read while still
+        reporting itself installed."""
+        for blank in ("", "   ", "\t"):
+            with self.subTest(value=repr(blank)):
+                blocked, _ = self._decide("leia o arquivo", QCTX_BIGFILE_ESCAPE=blank)
+                self.assertIn("put --full in your request", self._reason(blocked))
+                allowed, code = self._decide("leia --full", QCTX_BIGFILE_ESCAPE=blank)
+                self.assertEqual((allowed, code), ("", 0))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -718,21 +718,37 @@ KNOB_SOURCES = {
 }
 
 
-def numeric_knobs(rel_path: str) -> list:
-    """(attribute, canonical env name, legacy env name, coded default) for one file's knobs.
+def all_knobs(rel_path: str) -> list:
+    """(attribute, canonical env name, legacy env name, coded default) for EVERY knob.
 
     Read out of the source so a knob added later is covered without anyone remembering to
     add it here — which is the whole point twice over: the knob that broke was the one
     nobody thought to list, and the one that stayed broken was in a file nobody scanned.
+
+    Numeric and textual alike. The split below is younger than this scan: for a long while
+    every knob in this repo was a number, so "the scan" and "the numeric scan" were the same
+    thing — and the first textual one (the guard's escape marker) would have been invisible
+    to a derivation that filtered by `float()` before anyone noticed the filter was there.
+    """
+    return [(m.group("attr"), m.group("name"), m.group("legacy"), m.group("default"))
+            for m in _KNOB.finditer((REPO / rel_path).read_text())]
+
+
+def numeric_knobs(rel_path: str) -> list:
+    """The subset of `all_knobs` whose coded default is a number.
+
+    A separate list because what is asserted about them is arithmetic: that garbage in the
+    environment falls back to the same NUMBER. "Garbage" is not a thing a textual knob has —
+    every string is a valid marker — so its analogue is the BLANK value, and that is
+    asserted where the knob is used, in each guard's own tests.
     """
     found = []
-    for m in _KNOB.finditer((REPO / rel_path).read_text()):
+    for knob in all_knobs(rel_path):
         try:
-            float(m.group("default"))
+            float(knob[3])
         except ValueError:
             continue                      # not a numeric knob
-        found.append((m.group("attr"), m.group("name"), m.group("legacy"),
-                      m.group("default")))
+        found.append(knob)
 
     return found
 
@@ -812,6 +828,31 @@ class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
             for expected in ("FLOOR_PCT", "SHARE_PCT"):
                 self.assertIn(expected, per_file[rel],
                               f"{rel}: the guard's own thresholds are not being scanned")
+
+    def test_the_escape_marker_is_a_knob_this_scan_can_SEE(self):
+        """The first knob in this repo whose value is not a number, and the reason the
+        derivation above got split in two.
+
+        `numeric_knobs` filters by `float(default)`, so a textual knob was invisible to
+        every check here while looking exactly like a covered one in the source. The knob
+        that broke was always the one nobody listed; a knob the SCAN cannot list is the same
+        defect with an extra step.
+
+        Both guards, and byte for byte the same triple: this is what a deployer is promised,
+        and a marker configured on one host and not the other is a guard that unlocks in one
+        session and not the next.
+        """
+        derived = {rel: {attr: knob for attr, *knob in all_knobs(rel)}
+                   for rel in ("hooks/bigfile.py", "hosts/hermes/bigfile.py")}
+        for rel, knobs in derived.items():
+            with self.subTest(source=rel):
+                self.assertIn("ESCAPE_MARKER", knobs,
+                              f"{rel}: the escape marker is not a knob the scan derives")
+                self.assertEqual(knobs["ESCAPE_MARKER"],
+                                 ["QCTX_BIGFILE_ESCAPE", "BIGFILE_ESCAPE", "--full"])
+        self.assertEqual(derived["hooks/bigfile.py"]["ESCAPE_MARKER"],
+                         derived["hosts/hermes/bigfile.py"]["ESCAPE_MARKER"],
+                         "the two hosts would answer to different markers")
 
     def test_no_knob_reads_the_environment_without_the_tolerant_helper(self):
         """The complement of the derivation: a knob the scan cannot SEE is not covered by it.

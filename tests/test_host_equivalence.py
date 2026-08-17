@@ -1765,11 +1765,22 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
 
     def test_the_escape_marker_is_documented_on_both_surfaces(self):
         """The README is for the user, who is the only one who can type it, and the SKILL is
-        for the model, which must not believe it can."""
-        from core import bigfile
+        for the model, which must not believe it can.
 
-        self.assertIn(bigfile.ESCAPE_MARKER, guard_section())
-        self.assertIn(bigfile.ESCAPE_MARKER, SKILL.read_text())
+        The marker is DERIVED from the two adapters — the only place a live one comes from
+        now that it is configurable — and not from a constant in the core, which no longer
+        has one: a default kept there would be a second owner of the marker, free to teach
+        what the detection rejects. The two adapters must also agree, or the documentation
+        would be true on one host only.
+        """
+        from tests.test_hermes_provider import all_knobs   # where the knob scan lives
+
+        markers = {default for rel in ("hooks/bigfile.py", "hosts/hermes/bigfile.py")
+                   for attr, _, _, default in all_knobs(rel) if attr == "ESCAPE_MARKER"}
+        self.assertEqual(len(markers), 1, f"the hosts default to different markers: {markers}")
+        marker = markers.pop()
+        self.assertIn(marker, guard_section())
+        self.assertIn(marker, SKILL.read_text())
 
     def test_it_states_the_per_read_ceilings_the_adapters_apply(self):
         """The "it prices the READ, not the file" claim is only useful with its numbers, and

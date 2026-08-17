@@ -47,10 +47,18 @@ class Verdict:
 #: Enough bytes to catch a NUL without paying for the file.
 _SNIFF_BYTES = 8192
 
-#: The literal the user types to force the read through. A marker and not a natural phrase
-#: on purpose: "read it whole" false-positives easily ("read the whole paragraph"), and
-#: `--full` is only ever typed deliberately.
-ESCAPE_MARKER = "--full"
+# THE ESCAPE MARKER IS NOT DEFINED HERE, AND ITS ABSENCE IS LOAD-BEARING. The literal the
+# user types to force a read through is CONFIGURABLE (the spec, "A palavra de escape"),
+# because it is text a user types and there are domains where `--full` occurs on its own —
+# anyone working on a CLI with a `--full` flag would unlock the guard by accident, which is
+# the false positive a literal marker exists to avoid.
+#
+# Configurable text used in TWO places — the message below, which teaches the user what to
+# type, and the detection in each adapter, which reads the last user turn — is the shape
+# ruling F5 settles: one owner. A default kept in this module would be a second one, free to
+# teach a marker the detection rejects, and a guard that advertises a way out it then
+# refuses is worse than one with no way out at all. So `decide` prints the marker its CALLER
+# detects with, or none.
 
 
 def sample_of(path: str) -> bytes | None:
@@ -149,7 +157,7 @@ def cost_of(path: str) -> int:
 
 def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
            floor_pct: float = FLOOR_PCT, share_pct: float = SHARE_PCT,
-           read_lines=None, read_bytes=None) -> Verdict:
+           read_lines=None, read_bytes=None, escape: str = "") -> Verdict:
     """Block when either criterion fires, whichever comes first.
 
     `indexed_ids` is a set of doc ids ALREADY FETCHED by the caller — this function never
@@ -158,6 +166,10 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
     that round trip up front would tax the path that never needed it. The adapter fetches
     `indexed_ids` only after a first `decide(..., indexed_ids=None)` call has already said
     it would block — which is rare — and calls again just to enrich the message.
+
+    `escape` is the literal the HOST detects in the user's turn to let a read through, and
+    the message repeats it verbatim. It is passed in rather than known here so that the text
+    the message teaches and the text the adapter looks for cannot be two different settings.
 
     `read_lines` / `read_bytes` are the HOST's ceilings on a single read (claude-code stops
     at 2000 lines by default, hermes truncates at ~100k chars). They only ever make the
@@ -234,6 +246,8 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
     else:
         what = "index it with docs_index and search the parts that answer"
 
-    reason = f"{head}. Instead, {what}. To read it anyway, put {ESCAPE_MARKER} in your request."
+    # The caller's marker, never one of ours — see the note where the constant is not.
+    way_out = f" To read it anyway, put {escape} in your request." if escape else ""
+    reason = f"{head}. Instead, {what}.{way_out}"
 
     return Verdict(True, reason, cost, free)

@@ -55,7 +55,9 @@ Three things worth knowing so you do not work around it by accident:
   to the context in use, and the guard starts refusing as it fills.
 - `--full` is the **user's** escape word. It is read from the last user turn only, so
   writing it in your own output does nothing at all. If the file really has to be read
-  whole, say why and let the user decide.
+  whole, say why and let the user decide. The word is configurable
+  (`QCTX_BIGFILE_ESCAPE`), and the refusal message always names the one in force — quote it
+  from there rather than from here.
 
 ## Searching
 

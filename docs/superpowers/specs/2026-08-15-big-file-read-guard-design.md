@@ -215,14 +215,19 @@ a um adaptador sem escrever a linha correspondente deixa a suíte vermelha.
 | Localização do estado do host | nada: `transcript_path` vem no payload | `QCTX_HERMES_STATE_DB`, senão `HERMES_HOME`, senão `~/.hermes` | o hermes não põe o banco no payload; o caminho tem de ser resolvido, e `hermes_constants.py::get_hermes_home` é a resolução que o próprio host usa |
 | Timeout de I/O local | — | `SQLITE_TIMEOUT_S` = 0,5 s, com `mode=ro` | o hermes escreve no `state.db` AO VIVO e isto roda antes de cada leitura; um guarda que esperasse pelo lock seria uma interrupção auto-infligida. Do outro lado não há banco vivo nenhum |
 | Bootstrap de `sys.path` | não precisa: hooks rodam como processo próprio | `REPO_ROOT` inserido em `sys.path` no topo do módulo | o loader do hermes pré-executa cada `*.py` irmão ANTES do `__init__.py`, registrando em `sys.modules` primeiro e engolindo a falha em `logger.debug`; sem o bootstrap o provider inteiro não carrega e a única pista é uma linha de debug |
-| Knobs de sintonia (`QCTX_BIGFILE_FLOOR_PCT`, `QCTX_BIGFILE_SHARE_PCT`) | idênticos | idênticos | é a promessa ao deployer, e a varredura de knobs de `tests/test_hermes_provider.py::KNOB_SOURCES` cobre os dois arquivos para que continue verdadeira |
+| Knobs de sintonia (`QCTX_BIGFILE_FLOOR_PCT`, `QCTX_BIGFILE_SHARE_PCT`, `QCTX_BIGFILE_ESCAPE`) | idênticos | idênticos | é a promessa ao deployer, e a varredura de knobs de `tests/test_hermes_provider.py::KNOB_SOURCES` cobre os dois arquivos para que continue verdadeira |
 | A decisão (`core.bigfile.decide`) | idêntica | idêntica | é o que a equivalência cobra, e a única camada em que ela é verdadeira |
 
 ### A palavra de escape
 
-Marcador literal, default `--full`, configurável. **Não** frase natural: *"leia inteiro"*
-dispara falso positivo fácil (*"leia inteiro o parágrafo 3"*); `--full` só se digita de
-propósito.
+Marcador literal, default `--full`, configurável — `QCTX_BIGFILE_ESCAPE` (legado
+`BIGFILE_ESCAPE`), lido pelo ADAPTADOR de cada host e passado para `decide`, que nunca tem
+default próprio: o marcador aparece na MENSAGEM e na DETECÇÃO, e dois donos de um texto
+configurável divergem — guarda que ensina uma palavra e recusa essa palavra. Valor em branco
+cai no default; marcador de espaços casaria com toda mensagem. **Não** frase natural:
+*"leia inteiro"* dispara falso positivo fácil (*"leia inteiro o parágrafo 3"*); `--full` só
+se digita de propósito, e é configurável justamente porque existe domínio em que ele aparece
+sozinho (quem trabalha numa CLI com flag `--full`).
 
 Ganha o escopo certo de graça: o hook lê **o último turno do usuário**, então o `--full`
 vale para aquele turno e evapora no próximo. Não existe estado a limpar, e não há como

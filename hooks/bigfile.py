@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
 from core import bigfile, windows  # noqa: E402
-from core.knobs import env_num  # noqa: E402
+from core.knobs import env, env_num  # noqa: E402
 
 #: Enough for the last usage block and the last user turn, never the whole file.
 TAIL_BYTES = 256 * 1024
@@ -84,6 +84,17 @@ def _read_lines(tool_input: dict) -> int:
 #: expects the same variable to move the same number on the other.
 FLOOR_PCT = env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
 SHARE_PCT = env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
+
+#: The literal the user types to force a read through, and — being TEXT the user types —
+#: configurable: a deployer whose own tooling uses `--full` as a flag would otherwise unlock
+#: the guard by accident, which is the false positive a literal marker exists to prevent.
+#: Blank falls back, in `core.knobs.env`: a marker of spaces would match every message.
+#:
+#: ONE OWNER PER HOST, and it is this constant. It is what `escape_requested` looks for AND
+#: what `decide` is handed to put in the message, so the marker the guard teaches cannot
+#: drift from the one it accepts. The name is the one the sibling host reads too — a
+#: deployer who configured the guard on one host expects the same variable on the other.
+ESCAPE_MARKER = env("QCTX_BIGFILE_ESCAPE", "BIGFILE_ESCAPE", "--full")
 
 
 def _tail_objects(path: str) -> list:
@@ -148,7 +159,7 @@ def escape_requested(path: str) -> bool:
         text = c if isinstance(c, str) else " ".join(
             b.get("text", "") for b in c if isinstance(b, dict)) if isinstance(c, list) else ""
 
-        return bigfile.ESCAPE_MARKER in text
+        return ESCAPE_MARKER in text
 
     return False
 
@@ -177,7 +188,7 @@ def _run() -> None:
 
     # PASS ONE: no `indexed_ids`, no network. This is the path every read takes.
     verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
-                             read_lines=_read_lines(tool_input))
+                             read_lines=_read_lines(tool_input), escape=ESCAPE_MARKER)
     if not verdict.block:
         return
 
@@ -195,7 +206,7 @@ def _run() -> None:
 
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
                              floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
-                             read_lines=_read_lines(tool_input))
+                             read_lines=_read_lines(tool_input), escape=ESCAPE_MARKER)
     if verdict.block:
         deny(verdict.reason)
 

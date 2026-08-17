@@ -191,7 +191,14 @@ way forward.
 To read it anyway, put `--full` in your own message. It is scoped to that one turn and
 evaporates with the next prompt, by construction — the hook reads the last user turn, so
 there is nothing to switch back off and no way to leave the guard disabled by forgetting.
-That is exactly why it is not an environment variable.
+That is exactly why the escape is not an environment variable.
+
+The marker itself is (`QCTX_BIGFILE_ESCAPE`, default `--full`), and configuring it does not
+switch anything off — the escape still has to be typed, in that turn. Worth changing if
+`--full` is a word your work contains on its own: on a CLI that has a `--full` flag, asking
+about it would unlock the guard by accident, which is the false positive a literal marker is
+there to avoid. A blank value falls back to the default; a marker of spaces would match
+every message ever written.
 
 **Declare `context_window`, or the guard mostly sleeps.** Neither host exposes the window
 size where a hook can read it, and the model name does not settle it: the 1M and the 200k

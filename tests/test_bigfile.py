@@ -161,8 +161,28 @@ class TestSpecialCases(unittest.TestCase):
     def test_the_message_names_the_escape(self):
         """A block with no way out is a cage. The message has to carry its own key."""
         path = a_file(4 * 171_000)
-        v = bigfile.decide(path, Budget(window=1_000_000, used=604_023, exact=True))
+        v = bigfile.decide(path, Budget(window=1_000_000, used=604_023, exact=True),
+                           escape="--full")
         self.assertIn("--full", v.reason)
+
+    def test_the_only_marker_it_can_teach_is_the_one_it_was_HANDED(self):
+        """The marker is CONFIGURABLE (spec, "A palavra de escape"), and it is used in two
+        places: this message, which teaches the user what to type, and the detection in each
+        adapter, which reads the last user turn. If this module kept a default of its own,
+        an adapter reading a configured marker would go on teaching the built-in one — a
+        guard that says it can be unlocked and then does not unlock. Ruling F5: one owner.
+
+        So there is no default here to fall back to. The core prints the caller's marker or
+        no way out at all, and "no way out at all" is a visible failure rather than a lie.
+        """
+        path = a_file(4 * 171_000)
+        budget = Budget(window=1_000_000, used=604_023, exact=True)
+        v = bigfile.decide(path, budget, escape="@@raw")
+        self.assertIn("put @@raw in your request", v.reason)
+        self.assertNotIn("--full", v.reason, "a marker the caller does not detect")
+        self.assertNotIn("in your request", bigfile.decide(path, budget).reason)
+        self.assertFalse(hasattr(bigfile, "ESCAPE_MARKER"),
+                         "a module constant here is a second owner of the marker")
 
 
 # --- The price has to match what the read actually loads --------------------------------
