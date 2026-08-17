@@ -863,17 +863,59 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         # The independent step still ran: a refusal here is not an abort.
         self.assertIn("provider: memories", text)
 
-    def test_apply_re_reads_the_guard_instead_of_trusting_the_rewrite(self):
-        """Same rule the provider write already lives by. `pre_tool_call:` mapped to a
-        scalar is a legal file that hermes parses to zero hooks (`hooks.%s must be a list`),
-        and appending to it is not possible — so the write cannot take, and the script has
-        to say that rather than print the line it hoped for."""
+    def test_apply_refuses_a_pre_tool_call_it_cannot_append_to(self):
+        """`pre_tool_call:` mapped to a scalar is a legal file that hermes parses to zero
+        hooks (`hooks.%s must be a list`), and appending to it is not possible — so the
+        write cannot take, and the script has to say that rather than print the line it
+        hoped for.
+
+        WHAT THIS DOES NOT REACH, and its old name claimed it did: the post-write re-read.
+        The rewriter exits 3 here, so the failure is reported before anything is written at
+        all — measured, by replacing the re-read's condition with `true` and watching the
+        whole suite stay green. The test below is the one that reaches it.
+        """
         self.config_yaml.write_text(CONFIG_YAML + "hooks:\n  pre_tool_call: disabled\n")
         out = self.run_script("--apply")
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
-        self.assertLine(out, "big-file guard")
+        self.assertLine(out, "could not register the big-file guard")
         self.assertNoLine(out, "=== now ===")
         self.assertNotIn("bigfile.py", self.config_yaml.read_text())
+
+    def test_apply_re_reads_the_guard_instead_of_trusting_the_rewrite(self):
+        """The branch the re-read OWNS, and nothing had ever reached it: the rewrite
+        succeeds, `mv` succeeds, and the file still does not hold what hermes needs.
+
+        An entry that already runs THIS command is left exactly as it is — the rewriter is
+        idempotent on purpose, and an entry the user wrote is the user's. So an entry
+        carrying the wrong matcher survives the write intact, and every signal short of
+        re-reading looks like success: the rewriter exits 0, `mv` returns 0, and the file is
+        byte-for-byte what it was. Only asking hermes' own parser what fires can tell that
+        `read_file` does not.
+
+        The matcher is not a detail: `write_file` and `patch` take a `path` too, so the
+        entry above is a read-cost guard wired to WRITES. Printing "registered: matcher
+        read_file" for it is the same defect `scripts/cutover.sh` already paid for once —
+        reporting a state it had not verified.
+        """
+        guard_cmd = f'python3 "{self.root}/hosts/hermes/bigfile.py"'
+        self.config_yaml.write_text(
+            CONFIG_YAML
+            + "hooks:\n"
+              "  pre_tool_call:\n"
+              "    - matcher: write_file\n"
+              f"      command: {guard_cmd}\n")
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertLine(out, "the big-file guard did not take")
+        self.assertLine(out, "one or more steps FAILED")
+        self.assertNoLine(out, "matcher read_file ->")
+        self.assertNoLine(out, "=== now ===")
+        # The independent step still ran, and the user's entry was not rewritten behind
+        # their back: the refusal is a report, not an edit.
+        text = self.config_yaml.read_text()
+        self.assertIn("provider: memories", text)
+        self.assertIn("- matcher: write_file\n", text)
+        self.assertEqual(text.count("bigfile.py"), 1, text)
 
     def test_the_real_hermes_config_is_never_touched_by_an_apply(self):
         """The one file in this suite that a bug here would destroy for real. Asserted on

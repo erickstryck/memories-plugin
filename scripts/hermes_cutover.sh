@@ -859,7 +859,10 @@ PY
               '$1=="entry" && $3==cmd {print $2; exit}')" = read_file ]; then
         ok "big-file guard registered: pre_tool_call, matcher read_file -> $GUARD"
       else
-        fail "the big-file guard did not take: no pre_tool_call entry runs $GUARD_CMD"
+        # Both states that reach here, because there are two and the message used to name
+        # only one: no entry at all, or an entry that runs this command under a DIFFERENT
+        # matcher — which fires on write_file and patch and never on a read.
+        fail "the big-file guard did not take: no pre_tool_call entry with matcher read_file runs $GUARD_CMD"
         say  "        Restore $CONFIG.bak-$STAMP and add the entry by hand."
       fi
     else
