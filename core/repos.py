@@ -301,11 +301,28 @@ class RepoIndex:
         EACH STEP REPORTS WHAT IT ACTUALLY DID, because the order is only half the promise: a
         failure that misnames which steps completed sends the caller looking for damage that
         is not there, or leaves them unaware of damage that is.
-        """
-        from . import bindings
 
+        AND THE PROMISE HOLDS FOR ALL THREE STEPS, which is why a repo with no entry but with
+        local bindings is FINISHED here instead of refused. Reviewed 2026-08-17: a rerun after
+        a step-1 or step-2 failure finishes the job because the entry is still there to find,
+        but a step-3 failure used to be terminal — the entry is correctly gone, so the rerun
+        answered "is not indexed" and the stray binding was unreachable forever, `forget_repo`
+        having no other caller. "Break toward the state a rerun can fix" has to be true of the
+        step it was written for. Dropping a repository means making it not exist ANYWHERE, so
+        finishing a half-done drop IS the request, not a different one.
+        """
         if not self.get_repo(repo):
-            raise RepoError(f"repository {repo!r} is not indexed")
+            # No entry. Either a half-done drop to finish, or a repo that never existed — and
+            # the bindings are what tell them apart, so they are cleared BEFORE deciding. When
+            # nothing was bound, nothing was cleared and the refusal below is unchanged.
+            stale = self._forget_bindings(repo)
+            if not stale:
+                raise RepoError(f"repository {repo!r} is not indexed")
+
+            # Deliberately NOT touching the chunks: chunks without an entry are a divergence
+            # this method must not silently absorb. `list_repos` refuses to invent an entry for
+            # them and `divergent_repos` names them for a human — see its docstring.
+            return {"repo": repo, "unbound": stale, "already_gone": True}
         try:
             self.q.delete_by_filter(self.chunks_name,
                                     {"must": [{"key": "repo", "match": {"value": repo}}]})
@@ -320,24 +337,36 @@ class RepoIndex:
         self.q.delete_points(self.registry_name, [_point_id(f"registry:{repo}", 0)])
         # Last, and only once the archive agrees: a checkout must never claim to belong to a
         # repo that is gone, because the next index would write into a phantom.
+        unbound = self._forget_bindings(repo)
+
+        return {"repo": repo, "unbound": unbound, "already_gone": False}
+
+    def _forget_bindings(self, repo: str) -> list[str]:
+        """Clears the local bindings of `repo`, turning a write failure into a true report.
+
+        Shared by both paths through `drop_repo` rather than copied into each, and that is not
+        only tidiness: the finishing path exists BECAUSE this step can fail, so if the two
+        described the same failure differently, the second attempt would contradict the first.
+        """
+        from . import bindings
+
         try:
-            unbound = bindings.forget_repo(repo)
+            return bindings.forget_repo(repo)
         except RepoError:
             raise
         except Exception as exc:                        # noqa: BLE001
             # STILL A FAILURE — three things were asked for and two were done — but an
             # ACCURATE one. `bindings._save` writes a file, so a read-only or full state dir
             # arrives here as a bare OSError, which reads as "the deletion failed" when the
-            # deletion succeeded; the re-run then says "is not indexed" and the whole thing
-            # looks permanently broken while nothing is. Say what is true instead.
+            # deletion succeeded; a message that misnames which steps completed sends the
+            # caller looking for damage that is not there. Say what is true instead — and the
+            # rerun it points at is a real path, not a hope: see `drop_repo`.
             raise RepoError(
                 f"the archive of {repo!r} WAS deleted, but its local bindings could not be "
-                f"cleared: {exc}. This is safe to leave: a binding naming a repo the "
-                f"registry no longer knows already reads as unbound, so no checkout writes "
-                f"into a phantom — it only keeps a dead name until the file can be written."
+                f"cleared: {exc}. Nothing points into a phantom, since a binding naming a "
+                f"repo the registry no longer knows already reads as unbound, and dropping "
+                f"{repo!r} again clears the remainder."
             ) from exc
-
-        return {"repo": repo, "unbound": unbound}
 
     def divergent_repos(self) -> list[str]:
         """Repos with chunks and no registry entry.
@@ -346,6 +375,25 @@ class RepoIndex:
         registry, which is authoritative, and the `repo` field on every chunk, which is
         derived. Naming the owner is half the defence; this is the other half — without it the
         copy is free to diverge unobserved.
+
+        IT DETECTS ONE DIRECTION AND ONLY ONE: chunks with no entry. The opposite divergence —
+        an ENTRY POINTING AT ZERO CHUNKS, which is exactly what a failure of `drop_repo`'s
+        registry step leaves — is NOT reported here, and that is a decision rather than an
+        omission (review, 2026-08-17).
+
+        WHY IT CANNOT BE DETECTED, as opposed to merely not being implemented yet: an entry
+        with zero chunks is BYTE-FOR-BYTE the state of a repository that was just registered
+        and has not been indexed yet, which is the normal path: `register` and `add_files` are
+        separate calls by design, and every repo passes through that state on its way in.
+        Nothing in the data distinguishes "half-deleted" from "brand new", so reporting it
+        would cry wolf on every fresh registration, and a divergence report that fires on the
+        happy path is one users learn to ignore — which costs more than the case it catches.
+
+        WHAT IT WOULD TAKE, if it is ever wanted: the registry would have to record a chunk
+        count at index time and `add_files` would have to maintain it, so that "expected N, has
+        zero" became a statement about a promise instead of a guess. That is a data-model
+        change with its own drift problem (a stored count is a third copy of a fact), and it is
+        deliberately not this method's to invent.
         """
         known = {r["repo"] for r in self.list_repos()}
         seen = {(p.get("payload") or {}).get("repo")

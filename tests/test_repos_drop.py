@@ -128,9 +128,75 @@ class TestDropping(unittest.TestCase):
         self.assertIn("bindings", said)
         self.assertIn("read-only file system", said)      # the cause survives, never swallowed
         self.assertNotIn("chunks", said)                  # not the other failure's story
+        # And it points at the rerun, which the test below proves is a real path and not a hope.
+        self.assertIn("again clears the remainder", said)
         # And the message told the truth: the archive really is gone.
         self.assertIsNone(ix.get_repo("alpha"))
         self.assertEqual({p["payload"]["repo"] for p in ix.q.scroll_all("c")}, {"beta"})
+
+
+class TestFinishingAHalfDoneDrop(unittest.TestCase):
+    """The rerun promise, for the ONE step that used to be unable to keep it.
+
+    Reviewed 2026-08-17: after a step-1 or step-2 failure the entry survives, so a rerun finds
+    it and finishes. After a step-3 failure the entry is correctly gone, and `drop_repo` used to
+    answer "is not indexed" forever while the stray binding stayed unreachable — `forget_repo`
+    has no other caller. The ordering's whole justification is "break toward the state a rerun
+    can fix", so the step it was written for has to be one a rerun can actually fix.
+    """
+
+    def test_a_rerun_after_a_bindings_failure_clears_the_remainder(self):
+        ix = a_populated_index()
+        real_forget = bindings.forget_repo
+        self.addCleanup(setattr, bindings, "forget_repo", real_forget)
+        bindings.forget_repo = _raise(OSError("read-only file system"))
+        with self.assertRaises(RepoError):
+            ix.drop_repo("alpha")
+        # The half-done state the ordering deliberately produces: archive gone, binding left.
+        self.assertIsNone(ix.get_repo("alpha"))
+        self.assertEqual(bindings.get("/tmp/alpha"), "alpha")
+
+        bindings.forget_repo = real_forget          # the disk comes back
+        out = ix.drop_repo("alpha")                 # and the SAME request finishes the job
+
+        self.assertEqual(out["unbound"], ["/tmp/alpha"])
+        self.assertTrue(out["already_gone"])
+        self.assertIsNone(bindings.get("/tmp/alpha"))
+        self.assertEqual(bindings.get("/tmp/beta"), "beta")     # and only this repo's
+
+    def test_a_repo_with_neither_an_entry_nor_bindings_is_STILL_an_error(self):
+        """The cost of the fix if it is wrong, so it is pinned: `drop_repo` now succeeds in a
+        case that used to raise, and the two cases are one `if` apart. A name that was never a
+        repository must still be refused — including while OTHER repos are bound, which is the
+        state that would let a careless "did anything get unbound?" answer yes for the wrong
+        reason.
+        """
+        ix = a_populated_index()
+        with self.assertRaises(RepoError) as caught:
+            ix.drop_repo("gamma")
+        self.assertIn("not indexed", str(caught.exception))
+        # And the refusal cost the bound repos nothing.
+        self.assertEqual(bindings.get("/tmp/alpha"), "alpha")
+        self.assertEqual(bindings.get("/tmp/beta"), "beta")
+
+    def test_finishing_does_NOT_absorb_a_divergence(self):
+        """The finishing path finishes the BINDING step and nothing else, which is the only
+        step that could otherwise never be finished. It deliberately leaves chunks-without-an
+        -entry alone: `list_repos` refuses to invent an entry for them for the same reason, and
+        deleting them here would make the same divergence droppable or not according to whether
+        a binding happens to exist — silently absorbing, on one path only, the exact state
+        `divergent_repos` exists to put in front of a human.
+        """
+        ix = a_populated_index()
+        ix.add_files("ghost", [a_file()])          # chunks, and no registry entry
+        bindings.bind("/tmp/ghost", "ghost")
+
+        out = ix.drop_repo("ghost")
+
+        self.assertEqual(out["unbound"], ["/tmp/ghost"])
+        self.assertIsNone(bindings.get("/tmp/ghost"))
+        # Still there, and still named as a divergence rather than quietly swallowed.
+        self.assertEqual(ix.divergent_repos(), ["ghost"])
 
 
 class TestItsOwnErrorIsNotWrappedTwice(unittest.TestCase):
