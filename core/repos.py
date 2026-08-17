@@ -184,11 +184,42 @@ class RepoIndex:
 
     # ---- registry ----------------------------------------------------------
 
+    @staticmethod
+    def _require_slug(repo: str) -> None:
+        """The name must ALREADY be its own slug. Refused, never silently transformed.
+
+        The spec makes the id a slug derived from the chosen name, and `bindings.slug_for`
+        exists to produce it — its own docstring calls the slug "the FILTER KEY, so it may
+        never change afterwards". Until this guard, nothing enforced it and `My Repo!` was
+        stored verbatim.
+
+        WHY REFUSING RATHER THAN SLUGIFYING, which is the decision and not merely the
+        behaviour: transforming here would mean `repos register "My Repo"` stores `my-repo`
+        while `repos add "My Repo" f.py` then looks up `My Repo` and is refused — the write
+        path and the read path would disagree unless EVERY entry point transformed
+        identically, which is four places that must never drift. Refusing with the slug named
+        is what every other refusal in this feature does, and it costs a retyped name.
+
+        It sits on `register`, the primitive, for the same reason the registry check sits on
+        `add_files`: the interactive flow will call `register` directly with the remotes and
+        checkout it detected, so a guard only in `register_request` would leave the hole open
+        for the caller most likely to fill the registry through it.
+        """
+        from . import bindings
+
+        slug = bindings.slug_for(repo)
+        if repo != slug:
+            raise RepoError(
+                f"a repository name has to be a slug, because it is the filter key every "
+                f"chunk is stored under and it can never change afterwards. {repo!r} is not "
+                f"one — use {slug!r} instead: `qctx repos register {slug}`.")
+
     def register(self, repo: str, label: str, remotes: list[str], checkout: str) -> dict:
         """Creates or updates the entry. Checkouts and remotes ACCUMULATE without repeating:
         the same repository legitimately lives in several working copies at once."""
         if not repo:
             raise RepoError("a repository name is required")
+        self._require_slug(repo)
         self.ensure()
         entry = self.get_repo(repo) or {"repo": repo, "label": label or repo,
                                         "remotes": [], "checkouts": []}
@@ -245,6 +276,14 @@ class RepoIndex:
 
         `bound` is set only when the binding points at a repo the registry still knows: a
         stale binding must behave as unbound, or this checkout writes into a phantom repo.
+
+        `taken` says the SUGGESTION already belongs to something else, and it is a distinct
+        answer from `join`, not a weaker form of it. `join` means "this IS that repository,
+        because you share a remote". `taken` means "two unrelated working copies happen to
+        sit in directories of the same name". Presenting the second as the first would decide
+        identity by an accident of naming, which is exactly what the declared-identity
+        decision exists to reject — so the conflict is NAMED and the host asks, rather than
+        merged. Deciding what to do about it is the host's; reporting it is this method's.
         """
         from . import bindings
 
@@ -256,9 +295,12 @@ class RepoIndex:
         wanted = {bindings.normalize_remote(r) for r in remotes or [] if r}
         join = [r for r in known
                 if wanted & {bindings.normalize_remote(x) for x in r.get("remotes") or []}]
+        # Computed once and read twice: a second copy of this expression is how `taken` would
+        # come to answer about a name `suggest` no longer offers.
+        suggest = bindings.slug_for(os.path.basename(os.path.realpath(root)))
 
-        return {"bound": bound, "join": join,
-                "suggest": bindings.slug_for(os.path.basename(os.path.realpath(root)))}
+        return {"bound": bound, "join": join, "suggest": suggest,
+                "taken": suggest in by_name}
 
     # ---- searching ---------------------------------------------------------
 

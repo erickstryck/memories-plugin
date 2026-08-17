@@ -697,7 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_repos_search)
 
     p = repsub.add_parser("register", help="declare a repository, by name")
-    p.add_argument("repo")
+    p.add_argument("repo", help="a slug: lower case, digits and hyphens (it is the filter "
+                                "key, so it can never change)")
     p.add_argument("--label", help="a human name for it (default: the name itself)")
     p.set_defaults(fn=cmd_repos_register)
 

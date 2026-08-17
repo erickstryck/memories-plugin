@@ -149,6 +149,32 @@ class TestTheChoiceOffered(unittest.TestCase):
         bindings.bind("/home/me/alpha", "deleted-repo")
         self.assertIsNone(self.ix.candidates_for("/home/me/alpha", [])["bound"])
 
+    def test_a_taken_slug_is_reported_as_a_conflict_and_not_silently_joined(self):
+        """Merging on slug collision would decide identity by an accident of naming, which is
+        what the declared-identity decision exists to reject."""
+        self.ix.register("alpha", "Alpha", ["git@host:me/alpha.git"], "/home/me/alpha")
+        out = self.ix.candidates_for("/home/me/some-other/alpha", [])
+        self.assertEqual(out["suggest"], "alpha")
+        self.assertTrue(out["taken"], "a suggestion that already exists must be flagged")
+
+    def test_a_free_slug_is_NOT_flagged(self):
+        """The other direction, or `taken` could be hard-coded true and still pass above —
+        and the host would then report a conflict for every brand-new repository."""
+        self.ix.register("alpha", "Alpha", [], "/home/me/alpha")
+        out = self.ix.candidates_for("/home/me/brand-new", [])
+        self.assertEqual(out["suggest"], "brand-new")
+        self.assertFalse(out["taken"])
+
+    def test_a_collision_is_reported_as_a_conflict_and_NOT_as_a_join_offer(self):
+        """The two are different answers and the host must not confuse them: `join` means
+        "this IS that repository, by remote"; `taken` means "the name you would be offered
+        already belongs to something else". Same directory name, no shared remote."""
+        self.ix.register("alpha", "Alpha", ["git@host:me/alpha.git"], "/home/me/alpha")
+        out = self.ix.candidates_for("/home/me/some-other/alpha",
+                                     ["git@host:someone-else/alpha.git"])
+        self.assertEqual(out["join"], [], "a different remote is not the same repository")
+        self.assertTrue(out["taken"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -754,9 +754,12 @@ SCHEMAS = [
             "type": "object",
             "properties": {
                 "repo": {"type": "string",
-                         "description": "The name to declare. It is the key everything else "
-                                        "addresses the repository by, so it cannot be "
-                                        "changed later — check repos_list first."},
+                         "description": "The name to declare. It must ALREADY be a slug — "
+                                        "lower case letters, digits and hyphens, e.g. "
+                                        "my-repo — because it is the filter key every chunk "
+                                        "is stored under and cannot be changed later. A "
+                                        "name that is not one is refused, with the slug to "
+                                        "use named. Check repos_list first."},
                 "label": {"type": "string",
                           "description": "A human name for it, shown in listings. Defaults "
                                          "to the name itself."},

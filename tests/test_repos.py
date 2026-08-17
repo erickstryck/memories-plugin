@@ -224,6 +224,82 @@ class TestDeclaringARepository(unittest.TestCase):
             an_index().register_request("")
 
 
+class TestTheNameMustAlreadyBeItsOwnSlug(unittest.TestCase):
+    """The spec says the id is a SLUG derived from the chosen name, and `slug_for` exists to
+    produce it. It was not enforced: `register_request("My Repo!")` stored `'My Repo!'`.
+
+    REFUSED, NOT SILENTLY SLUGIFIED, and the second reason is the decisive one. Transforming
+    here means `repos register "My Repo"` stores `my-repo` while `repos add "My Repo" f.py`
+    then looks up `My Repo` and is refused — the two paths disagree unless every entry point
+    transforms identically, which is four places that must never drift. Refusing with the
+    remedy named is what every other refusal in this feature does, and it costs the user one
+    retyped name.
+    """
+
+    def test_a_name_that_is_not_a_slug_is_refused(self):
+        with self.assertRaises(RepoError):
+            an_index().register_request("My Repo!")
+
+    def test_the_refusal_names_the_slug_to_use(self):
+        with self.assertRaises(RepoError) as caught:
+            an_index().register_request("My Repo!")
+        self.assertIn("my-repo", str(caught.exception))
+
+    def test_it_does_NOT_store_the_slug_it_suggested(self):
+        """Silent transformation is the failure this guard exists to avoid, so the refusal
+        must leave the registry empty — not quietly hold what it recommended."""
+        ix = an_index()
+        with self.assertRaises(RepoError):
+            ix.register_request("My Repo!")
+        self.assertEqual(ix.list_repos(), [])
+
+    def test_a_name_that_is_already_a_slug_passes_through_untouched(self):
+        for name in ("alpha", "awesome-cv3", "repo2"):
+            with self.subTest(name=name):
+                self.assertEqual(an_index().register_request(name)["repo"], name)
+
+    def test_the_primitive_refuses_too_and_not_only_the_request_wrapper(self):
+        """Same placement argument as `add_files`' registry guard: the interactive flow will
+        call `register` DIRECTLY, with the remotes and the checkout it detected, so a guard
+        that lived only in the wrapper would leave the hole open for the caller most likely
+        to fill the registry through it."""
+        with self.assertRaises(RepoError):
+            an_index().register("My Repo!", "My Repo!", [], "/home/me/x")
+
+    def test_a_declaration_that_SUCCEEDS_is_always_indexable_under_the_SAME_name(self):
+        """The decisive reason for refusing rather than slugifying, as a round trip.
+
+        Had `register` quietly stored `my-repo` for `My Repo!`, the declaration would report
+        success and the very next command — `repos add "My Repo!" f.py` — would look up
+        `My Repo!`, find nothing, and be refused for a repository the user had just declared.
+        Each half looks correct alone; only the round trip catches the two paths disagreeing.
+
+        Measured, and the reason this test exists: removing the guard and MAKING IT SLUGIFY
+        failed exactly the same five tests, because every one of them asserts on the refusal
+        and none asserted on what a SUCCESSFUL declaration promises. A refusal is skipped
+        here on purpose — it promised nothing, so there is nothing to honour.
+        """
+        ix = an_index()
+        for name in ("My Repo!", "alpha", "Awesome CV3", "awesome-cv3"):
+            with self.subTest(name=name):
+                try:
+                    declared = ix.register_request(name)["repo"]
+                except RepoError:
+                    continue
+                self.assertEqual(declared, name,
+                                 "it stored a name the caller never gave, so the read path "
+                                 "will look up a repository that is not there")
+                self.assertEqual(ix.add_files(name, [a_file("x = 1\n")])["files"], 1)
+
+    def test_a_name_made_only_of_separators_is_refused_rather_than_becoming_repo(self):
+        """`slug_for` falls back to the literal `repo` for a name with nothing usable in it.
+        Accepting that would register an archive called `repo` for someone who typed `---`."""
+        ix = an_index()
+        with self.assertRaises(RepoError):
+            ix.register_request("---")
+        self.assertEqual(ix.list_repos(), [])
+
+
 class TestTheRegistry(unittest.TestCase):
     def test_registering_makes_the_repo_listable(self):
         ix = an_index()
