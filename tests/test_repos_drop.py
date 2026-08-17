@@ -18,6 +18,14 @@ def a_file(text: str = "content = 1\n") -> str:
     return path
 
 
+def _raise(error):
+    """A stand-in that fails with exactly `error`, whatever it is called with."""
+    def raising(*a, **kw):
+        raise error
+
+    return raising
+
+
 def a_populated_index() -> RepoIndex:
     os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
     ix = RepoIndex(FakeVectorStore(), FakeEmbedder(dim=8), "c", "r", 8)
@@ -101,6 +109,52 @@ class TestDropping(unittest.TestCase):
         with self.assertRaises(RepoError):
             ix.drop_repo("alpha")
         self.assertEqual(bindings.get("/tmp/alpha"), "alpha")
+
+    def test_a_failure_clearing_the_bindings_says_the_archive_WAS_deleted(self):
+        """Still a failure — three things were asked for and two were done — but an accurate
+        one, and the accuracy is the point. `bindings._save` writes a file, so a read-only
+        state dir arrives as a bare OSError that reads as "the deletion failed" when the
+        deletion succeeded; the re-run then answers "is not indexed" and the whole thing looks
+        permanently broken while nothing is. The message must not be the chunks one either:
+        those two failures leave OPPOSITE remainders and call for opposite reactions.
+        """
+        ix = a_populated_index()
+        self.addCleanup(setattr, bindings, "forget_repo", bindings.forget_repo)
+        bindings.forget_repo = _raise(OSError("read-only file system"))
+        with self.assertRaises(RepoError) as caught:
+            ix.drop_repo("alpha")
+        said = str(caught.exception).lower()
+        self.assertIn("was deleted", said)
+        self.assertIn("bindings", said)
+        self.assertIn("read-only file system", said)      # the cause survives, never swallowed
+        self.assertNotIn("chunks", said)                  # not the other failure's story
+        # And the message told the truth: the archive really is gone.
+        self.assertIsNone(ix.get_repo("alpha"))
+        self.assertEqual({p["payload"]["repo"] for p in ix.q.scroll_all("c")}, {"beta"})
+
+
+class TestItsOwnErrorIsNotWrappedTwice(unittest.TestCase):
+    """`search` puts `except RepoError: raise` ahead of its broad handler (`core/repos.py`), and
+    `drop_repo`'s two handlers must not drift from that sibling. Nothing inside either `try`
+    raises `RepoError` today, so the guard is unreachable in production — which is exactly why
+    it is pinned here instead of left as a comment: the day a call is added inside one of them,
+    this module's own message must reach the caller once, not nested in a paraphrase of itself.
+    """
+
+    def test_from_the_chunk_delete(self):
+        ix = a_populated_index()
+        ix.q.delete_by_filter = _raise(RepoError("the archive said no"))
+        with self.assertRaises(RepoError) as caught:
+            ix.drop_repo("alpha")
+        self.assertEqual(str(caught.exception), "the archive said no")
+
+    def test_from_clearing_the_bindings(self):
+        ix = a_populated_index()
+        self.addCleanup(setattr, bindings, "forget_repo", bindings.forget_repo)
+        bindings.forget_repo = _raise(RepoError("the archive said no"))
+        with self.assertRaises(RepoError) as caught:
+            ix.drop_repo("alpha")
+        self.assertEqual(str(caught.exception), "the archive said no")
 
 
 class TestDivergence(unittest.TestCase):

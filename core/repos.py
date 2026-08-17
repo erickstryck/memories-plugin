@@ -297,6 +297,10 @@ class RepoIndex:
         listing can reach, which still compete in an `across` search — unreachable garbage.
         Chunks first with the registry failing leaves an entry pointing at zero chunks:
         visible, and a second run finishes the job. Prefer the recoverable remainder.
+
+        EACH STEP REPORTS WHAT IT ACTUALLY DID, because the order is only half the promise: a
+        failure that misnames which steps completed sends the caller looking for damage that
+        is not there, or leaves them unaware of damage that is.
         """
         from . import bindings
 
@@ -305,13 +309,33 @@ class RepoIndex:
         try:
             self.q.delete_by_filter(self.chunks_name,
                                     {"must": [{"key": "repo", "match": {"value": repo}}]})
+        except RepoError:
+            raise
         except Exception as exc:                        # noqa: BLE001
             raise RepoError(f"the chunks of {repo!r} could not be deleted, so its entry was "
                             f"kept for a second attempt: {exc}") from exc
+        # Deliberately bare, unlike its neighbours: the store adapter raises `QdrantError`,
+        # which is already a `CoreError` the CLI boundary catches, and the recoverable
+        # remainder this ordering exists to produce is exactly what a failure here leaves.
         self.q.delete_points(self.registry_name, [_point_id(f"registry:{repo}", 0)])
         # Last, and only once the archive agrees: a checkout must never claim to belong to a
         # repo that is gone, because the next index would write into a phantom.
-        unbound = bindings.forget_repo(repo)
+        try:
+            unbound = bindings.forget_repo(repo)
+        except RepoError:
+            raise
+        except Exception as exc:                        # noqa: BLE001
+            # STILL A FAILURE — three things were asked for and two were done — but an
+            # ACCURATE one. `bindings._save` writes a file, so a read-only or full state dir
+            # arrives here as a bare OSError, which reads as "the deletion failed" when the
+            # deletion succeeded; the re-run then says "is not indexed" and the whole thing
+            # looks permanently broken while nothing is. Say what is true instead.
+            raise RepoError(
+                f"the archive of {repo!r} WAS deleted, but its local bindings could not be "
+                f"cleared: {exc}. This is safe to leave: a binding naming a repo the "
+                f"registry no longer knows already reads as unbound, so no checkout writes "
+                f"into a phantom — it only keeps a dead name until the file can be written."
+            ) from exc
 
         return {"repo": repo, "unbound": unbound}
 
