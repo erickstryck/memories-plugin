@@ -287,3 +287,44 @@ class RepoIndex:
             stale=source_changed(path, md.get("src_mtime"), md.get("src_size"),
                                  md.get("src_digest")),
         )
+
+    # ---- deleting -----------------------------------------------------------
+
+    def drop_repo(self, repo: str) -> dict:
+        """Deletes a repository: chunks, then the entry, then the local bindings.
+
+        THE ORDER IS LOAD-BEARING. Registry first with the chunks failing leaves chunks no
+        listing can reach, which still compete in an `across` search — unreachable garbage.
+        Chunks first with the registry failing leaves an entry pointing at zero chunks:
+        visible, and a second run finishes the job. Prefer the recoverable remainder.
+        """
+        from . import bindings
+
+        if not self.get_repo(repo):
+            raise RepoError(f"repository {repo!r} is not indexed")
+        try:
+            self.q.delete_by_filter(self.chunks_name,
+                                    {"must": [{"key": "repo", "match": {"value": repo}}]})
+        except Exception as exc:                        # noqa: BLE001
+            raise RepoError(f"the chunks of {repo!r} could not be deleted, so its entry was "
+                            f"kept for a second attempt: {exc}") from exc
+        self.q.delete_points(self.registry_name, [_point_id(f"registry:{repo}", 0)])
+        # Last, and only once the archive agrees: a checkout must never claim to belong to a
+        # repo that is gone, because the next index would write into a phantom.
+        unbound = bindings.forget_repo(repo)
+
+        return {"repo": repo, "unbound": unbound}
+
+    def divergent_repos(self) -> list[str]:
+        """Repos with chunks and no registry entry.
+
+        This exists because the design has TWO sources of truth about which repos exist: the
+        registry, which is authoritative, and the `repo` field on every chunk, which is
+        derived. Naming the owner is half the defence; this is the other half — without it the
+        copy is free to diverge unobserved.
+        """
+        known = {r["repo"] for r in self.list_repos()}
+        seen = {(p.get("payload") or {}).get("repo")
+                for p in self.q.scroll_all(self.chunks_name)}
+
+        return sorted(r for r in seen if r and r not in known)
