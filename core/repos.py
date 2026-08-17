@@ -24,10 +24,11 @@ to the bulk pipeline, which is a separate concern with a separate failure mode (
 """
 import os
 import time
+from dataclasses import dataclass
 
 from . import ports
 from .chunk import chunk_text, mode_for_suffix
-from .docs import _iso, _point_id, _read_source, content_digest, doc_id_for
+from .docs import _iso, _point_id, _read_source, content_digest, doc_id_for, source_changed
 from .errors import CoreError
 
 
@@ -40,6 +41,19 @@ class RepoError(CoreError):
 #: unit vector avoids the zero-norm that Cosine has no answer for.
 REGISTRY_VECTOR_SIZE = 1
 REGISTRY_VECTOR = [1.0]
+
+
+@dataclass
+class RepoHit:
+    score: float
+    repo: str
+    path: str
+    start_line: int
+    end_line: int
+    mode: str
+    text: str
+    indexed_at: str
+    stale: str | None    # the reason, when the file changed since it was indexed
 
 
 class RepoIndex:
@@ -191,3 +205,69 @@ class RepoIndex:
 
         return {"bound": bound, "join": join,
                 "suggest": bindings.slug_for(os.path.basename(os.path.realpath(root)))}
+
+    # ---- searching ---------------------------------------------------------
+
+    def search(self, query: str, repo: str | None = None, across: bool = False,
+               limit: int = 8, group_size: int = 3) -> dict:
+        """Grouped hits: one repo by default, every repo when `across`.
+
+        FAILURE DOES NOT OPEN HERE, and that is the inverse of the read guard on purpose. A
+        search that cannot reach the archive and returns [] is indistinguishable from "there
+        is nothing about this", and a caller would conclude absence from an outage. It raises.
+
+        `across` asks for as many groups as the registry knows, which is exactly why the
+        registry exists: without it, how many groups to ask for would be a guess. It remains
+        best-effort over what the search reaches — never a proof of absence.
+        """
+        known = {r["repo"] for r in self.list_repos()}
+        if across:
+            if not known:
+                raise RepoError("no repository is indexed yet")
+            group_limit, filter_ = len(known), None
+        else:
+            if not repo:
+                raise RepoError("name a repository, or pass across=True")
+            if repo not in known:
+                raise RepoError(f"repository {repo!r} is not indexed")
+            group_limit = 1
+            filter_ = {"must": [{"key": "repo", "match": {"value": repo}}]}
+
+        vector = self.embedder.embed_one(query)
+        try:
+            raw = self.q.search_groups(self.chunks_name, vector, group_by="repo",
+                                       limit=group_limit, group_size=group_size,
+                                       filter_=filter_)
+        except RepoError:
+            raise
+        except Exception as exc:                        # noqa: BLE001
+            raise RepoError(f"the repository archive could not be searched: {exc}") from exc
+
+        groups = []
+        for group in raw[:limit]:
+            hits = [self._to_hit(h) for h in group.get("hits", [])]
+            if hits:
+                groups.append({"repo": group.get("id"), "hits": hits})
+
+        return {"scope": "across" if across else "repo", "repo": None if across else repo,
+                "groups": groups, "truncated": len(raw) > limit}
+
+    def _to_hit(self, raw: dict) -> RepoHit:
+        payload = raw.get("payload") or {}
+        md = payload.get("metadata") or {}
+        path = md.get("path", "?")
+
+        return RepoHit(
+            score=float(raw.get("score") or 0.0),
+            repo=payload.get("repo", "?"),
+            path=path,
+            start_line=int(md.get("start_line") or 0),
+            end_line=int(md.get("end_line") or 0),
+            mode=md.get("mode", "snapshot"),
+            text=payload.get("document", ""),
+            indexed_at=md.get("indexed_at", "?"),
+            # Reported, never hidden: a chunk from an older state of the file must degrade to
+            # "this changed" instead of answering as if it were current.
+            stale=source_changed(path, md.get("src_mtime"), md.get("src_size"),
+                                 md.get("src_digest")),
+        )
