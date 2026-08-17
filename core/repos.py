@@ -171,3 +171,23 @@ class RepoIndex:
             raise RepoError(f"the repository registry could not be read: {exc}") from exc
 
         return sorted((r for r in rows if r.get("repo")), key=lambda r: r["repo"])
+
+    def candidates_for(self, root: str, remotes: list[str]) -> dict:
+        """The choice to offer for this working copy. Presenting it is the host's job.
+
+        `bound` is set only when the binding points at a repo the registry still knows: a
+        stale binding must behave as unbound, or this checkout writes into a phantom repo.
+        """
+        from . import bindings
+
+        known = self.list_repos()
+        by_name = {r["repo"] for r in known}
+        bound = bindings.get(root)
+        if bound and bound not in by_name:
+            bound = None
+        wanted = {bindings.normalize_remote(r) for r in remotes or [] if r}
+        join = [r for r in known
+                if wanted & {bindings.normalize_remote(x) for x in r.get("remotes") or []}]
+
+        return {"bound": bound, "join": join,
+                "suggest": bindings.slug_for(os.path.basename(os.path.realpath(root)))}

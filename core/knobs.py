@@ -18,6 +18,21 @@ quietly disagreed with it. Migrating them is its own task, on a live path, with 
 the older bare one, so an operator who exported the old spelling keeps working.
 """
 import os
+from pathlib import Path
+
+
+def state_dir() -> Path:
+    """Where this plugin keeps state, honouring QCTX_STATE_DIR.
+
+    It lives here and not beside the code that first needed it: reading one env var and
+    building a path is exactly what this module is for, and its previous home talks to Qdrant
+    and is imported LAZILY so the common path does not pay for it. A pure helper inside a
+    network module forces every caller to choose between an unwanted import and a copy.
+
+    Read at CALL time, not at import: a constant frozen at import would be frozen at a moment
+    that varies between hosts.
+    """
+    return Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
 
 def env(name: str, legacy: str, default: str) -> str:

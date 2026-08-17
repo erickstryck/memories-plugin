@@ -21,12 +21,11 @@ that rare branch, and a test on each host proves the common path never even impo
 WHAT A FAILURE COSTS. Nothing but the better half of a message: "already indexed, search it"
 degrades to "index it". Never the block, never the read.
 """
-import os
 import threading
-from pathlib import Path
 
 import core
 from core.breaker import Breaker
+from core.knobs import state_dir
 
 #: Seconds allowed PER Qdrant call. A backstop, and explicitly not the thing that keeps this
 #: step inside its budget — see `IDS_DEADLINE_S`.
@@ -57,16 +56,6 @@ BREAKER_SECONDS = 300.0
 #: circuit-broken is the QDRANT BACKEND, which both hosts talk to, so what one learns about it
 #: holds for the other.
 BREAKER_NAME = "bigfile-docs-breaker"
-
-
-def state_dir() -> Path:
-    """Where the breaker keeps its one timestamp.
-
-    Read at CALL time, not at import: this module is imported lazily on the rare path, and a
-    constant frozen at import would be frozen at a moment that varies between hosts. Same
-    variable `recall.py` reads, so a deployer who moved the state moved all of it.
-    """
-    return Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
 
 
 def indexed_ids(cfg) -> set | None:
