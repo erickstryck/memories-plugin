@@ -377,10 +377,20 @@ class TestTheEntryRecordsWHATWasIndexedAndWHEN(unittest.TestCase):
         # A COPY, and not the entry itself. `FakeVectorStore` stores the payload it is
         # handed, so the "before" picture is the very dict the next write mutates: read
         # without copying, this assertion compares an object with itself and holds nothing.
+        # A SENTINEL, not the live stamp, and that is the whole test. `_iso` formats with
+        # `timespec="seconds"`, so a stamp written by `add_files` and one written by
+        # `register` a millisecond later are the IDENTICAL STRING — comparing two live
+        # clock reads holds nothing, and this assertion passed while `register` stamped.
+        # A value no clock on this machine can produce is what makes an overwrite visible.
         indexed = dict(ix.get_repo("alpha"))
+        indexed["indexed_at"] = "2020-01-01T00:00:00+00:00"
+        ix._write_entry(indexed)
+
         ix.register("alpha", "Alpha", [], "/home/me/alpha-2")
+
         after = ix.get_repo("alpha")
-        self.assertEqual(after["indexed_at"], indexed["indexed_at"])
+        self.assertEqual(after["indexed_at"], "2020-01-01T00:00:00+00:00",
+                         "declaring a second checkout claimed an indexing that never happened")
         self.assertEqual((after["files"], after["chunks"]),
                          (indexed["files"], indexed["chunks"]))
         self.assertEqual(len(after["checkouts"]), 2, "it still accumulated the checkout")

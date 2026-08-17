@@ -1447,6 +1447,24 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
         self.assertEqual(len(cli["groups"][0]["hits"]), 6)
         self.assertEqual(len(cli["groups"][0]["hits"]), len(tool["groups"][0]["hits"]))
 
+    def test_a_hit_reaches_BOTH_hosts_as_an_object_and_not_as_a_repr(self):
+        """`search_payload` converts hits on both surfaces, and the count assertions above
+        cannot see whether it ran: a length survives `default=str` rendering each hit as
+        "RepoHit(score=0.66, ...)". The hermes side is the worse half — `_ok` is
+        `json.dumps(..., default=str)`, so an unconverted hit reaches THE MODEL as a string
+        it cannot address a file by. Reading a field is what holds the shape, and it has to
+        be read on both hosts or only one of them is held."""
+        self.ix.add_files("alpha", [self.paths[0]])
+        cli = self._through_the_cli(self.cli.cmd_repos_search, query="invoice",
+                                    repo="alpha", limit=3)
+        tool = self._through_the_tool("repos_search", query="invoice", repo="alpha", limit=3)
+        for host, out in (("cli", cli), ("hermes", tool)):
+            hit = out["groups"][0]["hits"][0]
+            with self.subTest(host=host):
+                self.assertIsInstance(hit, dict, f"{host} sent a repr, not an object")
+                self.assertTrue(hit["path"], f"{host} sent no path to read the file from")
+        self.assertEqual(cli["groups"], tool["groups"])
+
     def test_an_empty_across_search_says_the_SAME_sentence_on_both_hosts(self):
         """The sentence that must never vary between hosts, because it is the one the spec
         makes cardinal: `--all` never affirms absence. Nothing is indexed here, so both
