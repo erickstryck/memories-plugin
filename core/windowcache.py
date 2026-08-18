@@ -66,6 +66,30 @@ def get(endpoint: str, model: str) -> tuple[int, bool]:
     return window, time.time() < expires
 
 
+def age_seconds(endpoint: str, model: str) -> float | None:
+    """How long ago this entry was written, or `None` when nothing is cached for it.
+
+    Exists for the one diagnostic that has to tell "no window known" apart from "a window
+    WAS learned, N hours ago" — without it, both print identically and the user has no way
+    to see a broken probe. Derived as `expires_at - TTL_SECONDS`, which assumes the entry
+    was written with the default TTL: every real writer (`hosts.hermes.endpoint.
+    refresh_window`) does. A caller that wrote with a different `ttl` only skews the
+    reported age; `get`'s own freshness bit is unaffected either way.
+    """
+    row = _load().get(_key(endpoint, model))
+    if not isinstance(row, dict):
+        return None
+    try:
+        window = int(row.get("window") or 0)
+        expires = float(row.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return None
+    if window <= 0 or expires <= 0:
+        return None
+
+    return max(0.0, time.time() - (expires - TTL_SECONDS))
+
+
 def put(endpoint: str, model: str, window: int, ttl: float = TTL_SECONDS) -> None:
     """Records a window. A value of zero or less is NOT stored.
 
@@ -82,7 +106,15 @@ def put(endpoint: str, model: str, window: int, ttl: float = TTL_SECONDS) -> Non
     data = _load()
     data[_key(endpoint, model)] = {"window": window, "expires_at": time.time() + ttl}
     try:
-        tmp = _path() + ".tmp"
+        # `os.getpid()` in the temp name: two hermes sessions refreshing at once both open
+        # a FIXED `.tmp` name, and after the first `os.replace` the loser's still-open
+        # descriptor writes into the inode the first one just published. `_load` catches
+        # `ValueError` and readers never see a torn file — `os.replace` is atomic — so this
+        # already self-heals to a cache miss rather than a corruption anyone observes. Naming
+        # the temp file per-process removes the race outright instead of just tolerating it.
+        # `core/bindings.py` writes its own state through the same fixed-name pattern; it is
+        # not touched here.
+        tmp = f"{_path()}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=1, sort_keys=True)
         os.replace(tmp, _path())

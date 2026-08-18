@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -96,6 +97,45 @@ class TestItNeverRaises(unittest.TestCase):
         os.environ["QCTX_STATE_DIR"] = blocked
         self.assertEqual(windowcache.get("http://x/v1", "m"), (0, False))
         windowcache.put("http://x/v1", "m", 524288)     # must not raise
+
+
+class TestTheTempFileIsNamedPerProcess(unittest.TestCase):
+    """Two hermes sessions refreshing at once both used to open a FIXED `.tmp` name; after
+    the first `os.replace`, the loser's still-open descriptor wrote into the inode the first
+    one just published. Readers never saw a torn file — `os.replace` is atomic and `_load`
+    catches `ValueError` — so it already degraded to a cache miss and self-healed. Naming the
+    temp file per-process removes the race outright instead of merely tolerating it."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_the_temp_file_used_during_put_carries_this_process_id(self):
+        captured = {}
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            captured["src"] = src
+
+            return real_replace(src, dst)
+
+        with unittest.mock.patch("os.replace", spy_replace):
+            windowcache.put("http://x/v1", "m", 12345)
+        self.assertIn(f".{os.getpid()}.tmp", captured.get("src", ""),
+                     "the temp file name does not carry this process's pid")
+
+
+class TestAge(unittest.TestCase):
+    def setUp(self):
+        a_state_dir()
+
+    def test_nothing_cached_has_no_age(self):
+        self.assertIsNone(windowcache.age_seconds("http://x/v1", "m"))
+
+    def test_a_fresh_write_is_close_to_zero_seconds_old(self):
+        windowcache.put("http://x/v1", "m", 524288)
+        age = windowcache.age_seconds("http://x/v1", "m")
+        self.assertIsNotNone(age)
+        self.assertLess(age, 5.0)
 
 
 if __name__ == "__main__":

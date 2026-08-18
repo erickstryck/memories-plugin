@@ -1053,6 +1053,77 @@ class TestTheBigFileGuardCheck(CutoverCase):
         self.assertLine(out, "context window declared: 654321")
         self.assertNoLine(out, "qctx config set context-window")
 
+    def with_endpoint(self, base_url="https://server.example/api/v1"):
+        """`CONFIG_YAML` with an active `model:` block that also names an endpoint — the
+        shape `hosts.hermes.endpoint.from_hermes_config` reads — so the cache-based branch
+        below has something to resolve the window against."""
+        self.config_yaml.write_text(
+            CONFIG_YAML.replace("model:\n  default: MiniMax-M2.7\n",
+                                f"model:\n  default: MiniMax-M2.7\n  base_url: {base_url}\n"))
+
+        return base_url
+
+    def _seed_window_cache(self, base_url, model, window, ttl=None):
+        """Writes into the SAME cache `refresh_window` fills, under THIS test's own
+        `QCTX_STATE_DIR` — never a value the script invents, and never the real state
+        directory. A subprocess, and not an in-process call: the script itself always runs
+        as a subprocess, so this keeps the two on the same footing regarding environment."""
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from core import windowcache\n"
+            "windowcache.put(%r, %r, %r%s)\n"
+        ) % (str(REPO), base_url, model, window, f", ttl={ttl}" if ttl is not None else "")
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             env=self.env())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_a_window_learned_from_the_endpoint_is_reported_and_not_called_inert(self):
+        """Re-review round 2 found the diagnostic LYING: after this feature shipped, it kept
+        printing 'no ceiling is known … the guard is installed and inert' whether the probe
+        had learned a real window or had learned nothing at all — the exact failure this
+        feature exists to remove. The cache is the one place that tells the two apart."""
+        base = self.with_endpoint()
+        self._seed_window_cache(base, "MiniMax-M2.7", 524288)
+        out = self.run_script()
+        self.assertLine(out, "window learned from the endpoint: 524288 tokens")
+        self.assertLine(out, "fresh")
+        self.assertNoLine(out, "is installed and inert")
+
+    def test_a_stale_learned_window_is_still_reported_as_learned_not_unknown(self):
+        """Stale beats absent — the guard's own cascade never discards a stale cached
+        window — so the diagnostic must say STALE, not fall silent about it."""
+        base = self.with_endpoint()
+        self._seed_window_cache(base, "MiniMax-M2.7", 262144, ttl=-3600)
+        out = self.run_script()
+        self.assertLine(out, "window learned from the endpoint: 262144 tokens")
+        self.assertLine(out, "STALE")
+        self.assertNoLine(out, "is installed and inert")
+
+    def test_the_learned_window_outranks_the_ceiling_table(self):
+        """A model the ceiling table ALSO knows must still report the LEARNED value and not
+        the table's: `core/windows.py`'s own cascade consults the cache before the ceiling,
+        and this diagnostic has to agree with the guard it is describing."""
+        base = self.with_endpoint()
+        self.config_yaml.write_text(
+            self.config_yaml.read_text().replace("MiniMax-M2.7", "claude-opus-5"))
+        self._seed_window_cache(base, "claude-opus-5", 999000)
+        out = self.run_script()
+        self.assertLine(out, "window learned from the endpoint: 999000 tokens")
+        self.assertNoLine(out, "falls back to the ceiling")
+
+    def test_no_endpoint_configured_the_cache_branch_is_silent(self):
+        """Without a `base_url` there is nothing to key the cache on, and the diagnostic
+        must fall through to the ceiling/unknown branches exactly as it did before this
+        round's fix — the default fixture carries no endpoint."""
+        out = self.run_script()
+        self.assertNoLine(out, "window learned from the endpoint")
+
+    def test_no_secret_is_ever_printed_by_the_cache_branch(self):
+        base = self.with_endpoint()
+        self._seed_window_cache(base, "MiniMax-M2.7", 524288)
+        out = self.run_script()
+        self.assertNoLine(out, SECRET)
+
     def test_the_dry_run_says_the_hook_is_part_of_what_changes(self):
         out = self.run_script()
         self.assertLine(out, "DRY RUN")
