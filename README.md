@@ -77,7 +77,15 @@ dependency would turn an environment failure into a silent loss of functionality
 
 ### Install on Claude Code
 
-The repository is at once a plugin and a single-plugin marketplace, so two commands do it:
+The repository is at once a plugin and a single-plugin marketplace, so two commands do it —
+**from git**, with nothing cloned by hand:
+
+```bash
+claude plugin marketplace add erickstryck/memories-plugin
+claude plugin install memories-plugin@memories-plugin
+```
+
+For **development**, add it from a path instead, and edits take effect with no reinstall:
 
 ```bash
 claude plugin marketplace add ~/dev/memories-plugin
@@ -105,6 +113,31 @@ together and recall lands twice in one prompt, which is worse than having none: 
 the context cost and adds no information.
 
 ### Install on hermes-agent
+
+One command, from git:
+
+```bash
+hermes plugins install erickstryck/memories-plugin --enable
+hermes config set memory.provider memories        # tell hermes to USE it
+```
+
+`--ref <40-char-sha>` pins an exact commit. The installer names any key missing from
+`~/.hermes/.env`, because a hermes started by systemd or the gateway has no shell — and a key
+that lives only in an interactive environment is one it will not have. **The keys never go in a
+config file.**
+
+Installing the SUBDIRECTORY (`erickstryck/memories-plugin/hosts/hermes`) is accepted syntax and
+does not work: the adapter imports `core/` from the repository root, which a subdirectory install
+does not bring. It fails silently — hermes' loader swallows a broken provider at debug level — so
+install the whole repository, which is what the root `__init__.py` is for.
+
+For **development**, keep the symlink install instead, so edits take effect immediately:
+
+```bash
+ln -s ~/dev/memories-plugin/hosts/hermes ~/.hermes/plugins/memories
+```
+
+Either way, the script below checks the result and changes nothing until you ask:
 
 ```bash
 ./scripts/hermes_cutover.sh            # reports what it would do; writes NOTHING
