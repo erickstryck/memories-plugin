@@ -30,6 +30,7 @@ from . import ports
 from .chunk import chunk_text, mode_for_suffix
 from .docs import _iso, _point_id, _read_source, content_digest, doc_id_for, source_changed
 from .errors import CoreError
+from .qdrant import QdrantError, _is_absent
 
 
 class RepoError(CoreError):
@@ -342,6 +343,12 @@ class RepoIndex:
         """
         try:
             rows = [p.get("payload") or {} for p in self.q.scroll_all(self.registry_name)]
+        except QdrantError as exc:
+            if _is_absent(exc):
+                # Nothing has ever been registered. That is an empty list, not a broken
+                # registry — and saying otherwise makes a fresh install look damaged.
+                return []
+            raise RepoError(f"the repository registry could not be read: {exc}") from exc
         except Exception as exc:                       # noqa: BLE001
             raise RepoError(f"the repository registry could not be read: {exc}") from exc
 
@@ -645,8 +652,20 @@ class RepoIndex:
         if hits is not None and len(hits) < FACET_LIMIT:
             return {h.get("value") for h in hits if h.get("value")}
 
-        return {(p.get("payload") or {}).get("repo")
-                for p in self.q.scroll_all(self.chunks_name)}
+        # An archive that was never created holds no chunks, which is EMPTY and not a failure:
+        # both collections are made on first use, so this is the state of every fresh install
+        # until something is indexed. Decided by STATUS and never by message — `_is_absent`
+        # carries the reason, and it is not hypothetical: this Qdrant sits behind a proxy that
+        # echoes upstream statuses into its own bodies, so a 502 mentioning 404 must still be a
+        # failure. Anything that is not a 404 propagates, because "no repositories" printed
+        # during an outage is a claim of absence produced by a failure.
+        try:
+            return {(p.get("payload") or {}).get("repo")
+                    for p in self.q.scroll_all(self.chunks_name)}
+        except QdrantError as exc:
+            if _is_absent(exc):
+                return set()
+            raise
 
     def divergent_repos(self, seen: set | None = None) -> list[str]:
         """Repos with chunks and NO registry entry — one of the two divergence directions.

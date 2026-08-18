@@ -499,6 +499,14 @@ def cmd_repos_list(args, cfg):
         output(out, True)
 
         return
+    if not out["repos"] and not out["divergent"] and not out["emptied"]:
+        # An empty screen reads as "the command is broken", especially right after installing —
+        # this is the FIRST thing a new user runs, and the collections do not exist until
+        # something is indexed. The same rule the search path already follows: say it.
+        print("no repository is indexed yet — declare one with `repos register <name>`, "
+              "then index files with `repos add <name> <path>...`")
+
+        return
     claimed = {r["repo"]: r.get("chunks") or 0 for r in out["repos"]}
     for r in out["repos"]:
         # "never indexed" and not a bare `?`: registering is not indexing, and the empty
