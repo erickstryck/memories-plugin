@@ -339,8 +339,20 @@ class MemoriesProvider(_Base):
         self._sweep_dead_state(round_no)
         self._last_count = len(full)
 
-        return self._with_checkpoint(
-            blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
+        result = blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET)
+
+        # The window is knowable on this host, and this is where the network is already being
+        # paid for. The guard reads the cache and never probes: it runs before every file read.
+        try:
+            from . import bigfile
+            from .endpoint import refresh_window
+
+            refresh_window(bigfile.model_of(bigfile.state_db_path(), session_id))
+        except Exception:                       # noqa: BLE001
+            pass                                # a window we did not learn is the next step
+                                                 # of the cascade, never a failed prefetch
+
+        return self._with_checkpoint(result)
 
     def _reranker_for_this_turn(self, store, suppressed: str | None) -> None:
         """Point the CACHED store's reranker at what the breaker says right now.

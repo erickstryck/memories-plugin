@@ -174,6 +174,20 @@ def _rows(db_path: str, sql: str, args=()) -> list:
         return []
 
 
+def model_of(db_path: str, session_id: str) -> str:
+    """The model this session is on, or "" when it could not be resolved.
+
+    Tries `_MODEL_QUERIES` in order — cheapest-and-real first — and stops at the first form
+    the schema accepts. See the constant's own comment for why the order is not arbitrary.
+    """
+    for sql in _MODEL_QUERIES:
+        got = _rows(db_path, sql, (session_id,))
+        if got:
+            return got[0][0] or ""
+
+    return ""
+
+
 def budget_from(db_path: str, session_id: str, window_of) -> bigfile.Budget:
     """The context budget, estimated. `window=0` when anything was unavailable — fail open.
 
@@ -186,12 +200,7 @@ def budget_from(db_path: str, session_id: str, window_of) -> bigfile.Budget:
     if not rows:
         return bigfile.Budget(window=0, used=0, exact=False)
     used = sum((len(r[0] or "") + 3) // 4 for r in rows)
-    model = ""
-    for sql in _MODEL_QUERIES:
-        got = _rows(db_path, sql, (session_id,))
-        if got:
-            model = got[0][0] or ""
-            break
+    model = model_of(db_path, session_id)
 
     return bigfile.Budget(window=int(window_of(model) or 0), used=used, exact=False)
 
@@ -233,7 +242,12 @@ def _run() -> str:
     # raises from inside it, before a Config exists — so a typo in an env var must not become
     # a file nobody can read. main()'s catch-all turns it into an allow.
     cfg = core.load()
-    budget = budget_from(db_path, session_id, lambda model: windows.window_for(model, cfg))
+
+    from hosts.hermes.endpoint import from_hermes_config
+
+    base, _key = from_hermes_config()
+    budget = budget_from(db_path, session_id,
+                         lambda model: windows.window_for(model, cfg, base))
 
     # PASS ONE: no `indexed_ids`, no network. This is the path every read takes.
     verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
