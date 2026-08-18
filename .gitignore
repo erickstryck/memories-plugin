@@ -12,3 +12,10 @@ config.json
 # Worktrees live here (the bigfile-guard feature created one before this was ignored).
 # An unignored worktree directory can commit an entire second checkout into the repo.
 .claude/worktrees/
+
+# Execution workspaces: ledgers, task briefs, implementer reports and review packages. The
+# skill that creates them writes a .gitignore INSIDE its own subdirectory, which works until
+# the directory is made some other way — and then one `git add -A` publishes the lot. On a
+# PUBLIC repository that is machine paths and internal notes, so the rule belongs here, where
+# it does not depend on another tool remembering.
+.superpowers/

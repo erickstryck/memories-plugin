@@ -1167,7 +1167,7 @@ No `hermes_cutover.sh`, na seção de checagens, reporte se o `$HERMES_HOME/conf
 hooks:
   - event: pre_tool_call
     matcher: read_file
-    command: python3 /home/erick/dev/memories-plugin/hosts/hermes/bigfile.py
+    command: python3 $REPO_ROOT/hosts/hermes/bigfile.py
 ```
 
 > **EMENDA de 2026-08-16, na implementação da T7 — o YAML acima está ERRADO e não registra
