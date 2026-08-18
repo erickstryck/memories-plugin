@@ -264,6 +264,42 @@ class TestPrefetch(unittest.TestCase):
         self.assertNotIn("There is no recorded precedent", out)
         self.assertIn("not evidence that no precedent exists", out)
 
+    def test_a_result_with_no_hits_still_refreshes_the_window_cache(self):
+        """Fresh install, empty memory collection: `_prefetch` returns the empty block at a
+        `return` that runs AFTER `store.recall` already paid for the network. A refresh call
+        that only ran on the with-hits path below it would never run here, and the window
+        cache would stay empty forever — the guard would allow every read, permanently, with
+        no error anywhere, for any model absent from the ceiling table.
+
+        `HERMES_HOME` is pinned to an empty temp directory so this never reaches a real
+        `~/.hermes/config.yaml`."""
+        from core.retrieval import Outcome
+        p = self._provider([], Outcome(candidates=0))
+        with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp()}), \
+             unittest.mock.patch("hosts.hermes.endpoint.refresh_window") as spy:
+            p.prefetch("an absent subject")
+        self.assertTrue(spy.called, "the empty-result path never refreshed the window cache")
+
+    def test_the_store_raising_still_refreshes_the_window_cache(self):
+        """The same gap, one step earlier: `store.recall` itself can raise (Qdrant down),
+        and `prefetch`'s own catch-all turns that into an UNAVAILABLE block. The window probe
+        is an unrelated round trip to a different server entirely and must not be skipped
+        just because THIS one failed."""
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class Broken:
+            def recall(self, *a, **kw):
+                raise RuntimeError("qdrant down")
+
+        p._store = Broken()
+        p._state_dir = Path(tempfile.mkdtemp())
+        with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp()}), \
+             unittest.mock.patch("hosts.hermes.endpoint.refresh_window") as spy:
+            out = p.prefetch("a real question about the archive")
+        self.assertIn("UNAVAILABLE", out)
+        self.assertTrue(spy.called, "store.recall raising skipped the window refresh too")
+
     def test_a_failure_reaches_the_MODEL_and_not_only_the_log(self):
         """The central contract: silent to the user, never to the model."""
         p = MemoriesProvider()

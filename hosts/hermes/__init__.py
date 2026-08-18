@@ -314,7 +314,30 @@ class MemoriesProvider(_Base):
         # perfectly reachable. `core.build_memory` always sets it (to None when no
         # cross-encoder is configured), so in production this reads the real value.
         top_k = self.TOP_K if getattr(store, "reranker", None) else self.TOP_K_STRICT
-        hits, outcome = store.recall(angles, policy, top_k, suppressed=suppressed)
+        try:
+            hits, outcome = store.recall(angles, policy, top_k, suppressed=suppressed)
+        finally:
+            # The window is knowable on this host, and this is where the network is already
+            # being paid for — on EVERY path from here, not only the one with hits: a fresh
+            # hermes install, or an empty memory collection, returns NO hits on every single
+            # prefetch, and that used to `return` two branches below, BEFORE this ever ran.
+            # The cache then stayed empty forever, step 2 of the cascade never fired, and for
+            # a model absent from the ceiling table the window resolved to 0 — the guard
+            # allowed every read, permanently, with no error anywhere. Same gap when
+            # `store.recall` above raises, which is why this sits in `finally` and not after
+            # a `return`: the round trip was already attempted either way. Wrapped so a
+            # failure here can never turn a working recall into an unavailable block, and it
+            # still never runs on the two genuine pre-network short-circuits above (disabled
+            # recall, a trivial prompt) — neither has paid for anything yet.
+            try:
+                from . import bigfile
+                from .endpoint import refresh_window
+
+                refresh_window(bigfile.model_of(bigfile.state_db_path(), session_id))
+            except Exception:                       # noqa: BLE001
+                pass                                # a window we did not learn is the next
+                                                     # step of the cascade, never a failed
+                                                     # prefetch
 
         if outcome is not None and outcome.rerank_error:
             breaker.arm()
@@ -339,20 +362,8 @@ class MemoriesProvider(_Base):
         self._sweep_dead_state(round_no)
         self._last_count = len(full)
 
-        result = blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET)
-
-        # The window is knowable on this host, and this is where the network is already being
-        # paid for. The guard reads the cache and never probes: it runs before every file read.
-        try:
-            from . import bigfile
-            from .endpoint import refresh_window
-
-            refresh_window(bigfile.model_of(bigfile.state_db_path(), session_id))
-        except Exception:                       # noqa: BLE001
-            pass                                # a window we did not learn is the next step
-                                                 # of the cascade, never a failed prefetch
-
-        return self._with_checkpoint(result)
+        return self._with_checkpoint(
+            blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
 
     def _reranker_for_this_turn(self, store, suppressed: str | None) -> None:
         """Point the CACHED store's reranker at what the breaker says right now.
