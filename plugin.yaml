@@ -1,0 +1,24 @@
+# What `hermes plugins install` reads. Only fields the installer actually consumes are here —
+# `provides_tools` is deliberately absent: the installer resolves those names against hermes'
+# TOOLSET registry, and this plugin's 20 tools are exposed through the memory provider instead.
+# Declaring them would make `plugins show` look richer and answer wrongly.
+manifest_version: 1
+name: memories
+version: 0.1.0
+kind: standalone
+description: >-
+  Long-term memory, document indexing and repository search in Qdrant, shared with the
+  claude-code host. Registers as hermes' memory provider and adds a big-file read guard.
+
+# The installer checks these against ~/.hermes/.env and NAMES the ones that are missing. That
+# check is the point of declaring them: a hermes started by systemd or the gateway has no shell,
+# so a key that lives only in an interactive shell's environment is a key it will not have — and
+# the failure looks like an archive that is simply empty. The keys never go in a config file.
+requires_env:
+  - name: QDRANT_SERVICE_API_KEY
+    description: Qdrant API key. QCTX_QDRANT_API_KEY and QDRANT_API_KEY are also accepted.
+  - name: SERVER_API_KEY
+    description: embedding-server API key. QCTX_API_KEY is also accepted.
+
+# Stdlib only, on purpose: a missing dependency inside a hook is a silent loss of functionality.
+python_dependencies: []
