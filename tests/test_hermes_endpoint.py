@@ -26,10 +26,27 @@ def a_hermes_home(text: str = CONFIG) -> str:
     return home
 
 
+def _set_env(case: unittest.TestCase, **values) -> None:
+    """Sets environment variables for the duration of one test, restoring exactly what was
+    there before it — absent, or whatever value it held — once the test ends, via
+    `addCleanup` so restoration runs even when the test fails.
+
+    `HERMES_HOME` locates the HOST: a value this file leaves behind can leak into another
+    test module and mask a test that would otherwise have reached the real hermes home. Every
+    variable this file sets goes through here rather than a bare `os.environ[...] = ...`.
+    """
+    for key, value in values.items():
+        previous = os.environ.get(key)
+        os.environ[key] = value
+        if previous is None:
+            case.addCleanup(os.environ.pop, key, None)
+        else:
+            case.addCleanup(os.environ.__setitem__, key, previous)
+
+
 class TestReadingTheHermesConfig(unittest.TestCase):
     def setUp(self):
-        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
-        os.environ["MY_KEY_VAR"] = "secret-value"
+        _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), MY_KEY_VAR="secret-value")
 
     def test_it_reads_the_base_url_and_resolves_the_key_from_the_environment(self):
         """`key_env` names a VARIABLE, not a secret. The config holds the name; the value
@@ -60,6 +77,22 @@ class TestReadingTheHermesConfig(unittest.TestCase):
             self.assertEqual(endpoint.from_hermes_config(home), ("", ""))
         finally:
             os.chmod(os.path.join(home, "config.yaml"), 0o644)
+
+    def test_a_crlf_config_still_finds_the_model_block(self):
+        """A CRLF-saved config leaves a trailing `\\r` before every `\\n`, including right
+        after `model:`, and this is a defense in `_model_block` itself, called directly with
+        an in-memory string that still carries `\\r`: `open()` in `from_hermes_config` reads
+        in the default text mode, whose universal-newline translation already collapses
+        `\\r\\n` to `\\n` before this function ever runs — measured, so no end-to-end fixture
+        through `a_hermes_home` can make the pre-fix regex fail at all. This still matters
+        because `_model_block` is not guaranteed to always be fed a freshly-`open()`ed
+        string."""
+        text = ("model:\r\n"
+                "  provider: custom\r\n"
+                "  base_url: https://server.example/api/v1\r\n"
+                "  key_env: MY_KEY_VAR\r\n")
+        self.assertNotEqual(endpoint._model_block(text), "",
+                            "the model: block must be found even with CRLF line endings")
 
 
 # --- Fixtures shaped after a REAL ~/.hermes/config.yaml -----------------------------------
@@ -113,8 +146,7 @@ class TestTheActiveBlockIsWhatAnswers(unittest.TestCase):
     regardless of where in the file it sits."""
 
     def setUp(self):
-        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
-        os.environ["MY_KEY_VAR"] = "secret-value"
+        _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), MY_KEY_VAR="secret-value")
 
     def test_the_active_blocks_interpolated_api_key_resolves_from_the_environment(self):
         """The real config credits the active model with `api_key: ${VAR}` — `${...}`
@@ -129,7 +161,7 @@ class TestTheActiveBlockIsWhatAnswers(unittest.TestCase):
         in the text, on purpose. A fix that merely changed which occurrence `re.search`
         prefers, rather than actually scoping to the `model:` block, would still pass a
         fixture where the catalogue came second — this one would not."""
-        os.environ["OLD_KEY_VAR"] = "should-never-be-read"
+        _set_env(self, OLD_KEY_VAR="should-never-be-read")
         base, key = endpoint.from_hermes_config(a_hermes_home(CONFIG_CATALOGUE_FIRST))
         self.assertEqual(base, "https://server.example/api/v1")
         self.assertEqual(key, "secret-value")
@@ -138,7 +170,7 @@ class TestTheActiveBlockIsWhatAnswers(unittest.TestCase):
             self):
         """The active block's own `api_key: ${VAR}` must win over a `key_env:` that belongs
         to a DIFFERENT entry in the catalogue, even one naming the same base_url."""
-        os.environ["CATALOGUE_KEY_VAR"] = "should-never-be-read"
+        _set_env(self, CATALOGUE_KEY_VAR="should-never-be-read")
         base, key = endpoint.from_hermes_config(a_hermes_home(CONFIG_CATALOGUE_OWN_KEY))
         self.assertEqual(base, "https://server.example/api/v1")
         self.assertEqual(key, "secret-value")
@@ -197,8 +229,7 @@ memory:
 
 class TestAFlushLeftCommentDoesNotCloseTheBlock(unittest.TestCase):
     def setUp(self):
-        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
-        os.environ["MY_KEY_VAR"] = "secret-value"
+        _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), MY_KEY_VAR="secret-value")
 
     def test_a_flush_left_comment_between_model_and_its_first_key_does_not_hide_base_url(self):
         """This is the fixture that reproduces the risk: a comment landing right after
@@ -213,7 +244,7 @@ class TestAFlushLeftCommentDoesNotCloseTheBlock(unittest.TestCase):
         precedes it: if it swallowed the catalogue below, that catalogue's OWN key_env —
         absent from the active block entirely — would suddenly outrank the active block's
         api_key, exactly the failure the scoping fix exists to prevent."""
-        os.environ["SHOULD_NOT_BE_READ_KEY"] = "should-never-be-read"
+        _set_env(self, SHOULD_NOT_BE_READ_KEY="should-never-be-read")
         base, key = endpoint.from_hermes_config(a_hermes_home(CONFIG_COMMENT_AFTER_BLOCK))
         self.assertEqual(base, "https://server.example/api/v1")
         self.assertEqual(key, "secret-value")
@@ -228,9 +259,8 @@ class TestAFlushLeftCommentDoesNotCloseTheBlock(unittest.TestCase):
 
 class TestRefreshing(unittest.TestCase):
     def setUp(self):
-        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
-        os.environ["HERMES_HOME"] = a_hermes_home()
-        os.environ["MY_KEY_VAR"] = "secret-value"
+        _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), HERMES_HOME=a_hermes_home(),
+                  MY_KEY_VAR="secret-value")
 
     def test_a_fresh_cache_is_NOT_probed_again(self):
         from core import windowcache
@@ -259,8 +289,18 @@ class TestRefreshing(unittest.TestCase):
         self.assertEqual(got, 204800)
 
     def test_with_no_endpoint_configured_it_does_nothing_quietly(self):
-        os.environ["HERMES_HOME"] = tempfile.mkdtemp()
+        _set_env(self, HERMES_HOME=tempfile.mkdtemp())
         self.assertEqual(endpoint.refresh_window("m", probe=lambda *a, **k: 999), 0)
+
+    def test_an_empty_model_id_is_never_probed(self):
+        """`model_of` returns "" when `state.db` is locked or the session row is not yet
+        written. An empty id can never match a real `/models` entry, so probing for it is a
+        5s round trip that would repeat on every single turn, forever — unlike a real model
+        whose probe merely failed once."""
+        calls = []
+        got = endpoint.refresh_window("", probe=lambda *a, **k: calls.append(1) or 999)
+        self.assertEqual(got, 0)
+        self.assertEqual(calls, [], "an empty model id was probed anyway")
 
 
 if __name__ == "__main__":

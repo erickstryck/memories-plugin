@@ -153,6 +153,12 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 100_000):
     ordering regresses — the spy's call count is what reports the regression instead.
     `SystemExit` is caught rather than allowed to end the run: exit 2 IS the block signal,
     so it is a result to assert, not a failure.
+
+    `HERMES_HOME` is pinned to an EMPTY temp directory: `_run()` now also calls
+    `from_hermes_config()`, and this is an in-process call, not the subprocess `run_guard`
+    below — with no override it falls back to the developer's own `~/.hermes/config.yaml`.
+    Read-only, so nothing is written, but a test in this repo must not depend on a file
+    outside it; `unittest.mock.patch.dict` restores whatever was there once the run ends.
     """
     out = io.StringIO()
     cfg = types.SimpleNamespace(context_window=window)
@@ -160,6 +166,7 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 100_000):
     with unittest.mock.patch.object(adapter.core, "load", loader or (lambda: cfg)), \
          unittest.mock.patch.object(inventory, "indexed_ids", ids_spy), \
          unittest.mock.patch.object(sys, "stdin", io.StringIO(payload)), \
+         unittest.mock.patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp()}), \
          contextlib.redirect_stdout(out):
         try:
             adapter.main()

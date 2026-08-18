@@ -67,8 +67,12 @@ def _model_block(text: str) -> str:
     servers hermes is NOT currently using — cannot answer for the active endpoint merely
     because a whole-file search reached it first. "" when there is no top-level `model:` key
     at all.
+
+    `[ \t\r]*` and not `[ \t]*` after `model:`: a CRLF config leaves a trailing `\r` before
+    the `\n` this looks for, and without it in the class the line never matches at all — the
+    same silent, no-error failure a flush-left comment produced before this function existed.
     """
-    found = re.search(r"^model:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", text, re.M | re.S)
+    found = re.search(r"^model:[ \t\r]*\n(.*?)(?=^[^\s#]|\Z)", text, re.M | re.S)
 
     return found.group(1) if found else ""
 
@@ -139,6 +143,13 @@ def refresh_window(model: str, *, probe=None) -> int:
 
     `probe` is injected only so tests can drive it without a server.
     """
+    if not model:
+        # `state.db` locked, or the session row not yet written: `model_of` returns "" for
+        # both. An empty model id can never match a real entry at `/models`, so probing for
+        # it is a 5s round trip that is guaranteed useless — and unlike a probe that learns
+        # nothing for a REAL model, this one would repeat on every single turn forever,
+        # because `put` correctly refuses to cache a window against no model at all.
+        return 0
     base, key = from_hermes_config()
     if not base:
         return 0
