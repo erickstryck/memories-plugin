@@ -155,6 +155,77 @@ class TestTheActiveBlockIsWhatAnswers(unittest.TestCase):
                 self.assertEqual(base, "https://server.example/api/v1")
 
 
+# --- Comment lines in a heavily-commented real config --------------------------------------
+# Measured against the real ~/.hermes/config.yaml: 36 flush-left comment lines, none inside
+# the `model:` block today. A block-end lookahead that treated ANY flush-left character as
+# "the next key" would close the block the moment one landed there — one hermes upgrade or
+# one user note away — and it fails with no error anywhere: base_url vanishes from the
+# captured block, the cascade falls to the ceiling table, and the guard sleeps.
+
+CONFIG_COMMENT_BEFORE_KEYS = """\
+model:
+# a flush-left note the user left here
+  provider: custom
+  base_url: https://server.example/api/v1
+  key_env: MY_KEY_VAR
+memory:
+  provider: memories
+"""
+
+CONFIG_COMMENT_AFTER_BLOCK = """\
+model:
+  provider: custom
+  base_url: https://server.example/api/v1
+  api_key: ${MY_KEY_VAR}
+# a flush-left note between sections
+custom_providers:
+  - name: Should-Not-Answer
+    base_url: https://should-not-be-read.example/api/v1
+    key_env: SHOULD_NOT_BE_READ_KEY
+"""
+
+CONFIG_COMMENT_INDENTED = """\
+model:
+  provider: custom
+  # an indented note
+  base_url: https://server.example/api/v1
+  key_env: MY_KEY_VAR
+memory:
+  provider: memories
+"""
+
+
+class TestAFlushLeftCommentDoesNotCloseTheBlock(unittest.TestCase):
+    def setUp(self):
+        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        os.environ["MY_KEY_VAR"] = "secret-value"
+
+    def test_a_flush_left_comment_between_model_and_its_first_key_does_not_hide_base_url(self):
+        """This is the fixture that reproduces the risk: a comment landing right after
+        `model:` and before `provider:`/`base_url:` must not make the rest of the block
+        invisible to the parser."""
+        base, key = endpoint.from_hermes_config(a_hermes_home(CONFIG_COMMENT_BEFORE_KEYS))
+        self.assertEqual(base, "https://server.example/api/v1")
+        self.assertEqual(key, "secret-value")
+
+    def test_a_flush_left_comment_after_the_block_does_not_swallow_the_next_section(self):
+        """The block must stop at the next REAL key, not merely skip the comment that
+        precedes it: if it swallowed the catalogue below, that catalogue's OWN key_env —
+        absent from the active block entirely — would suddenly outrank the active block's
+        api_key, exactly the failure the scoping fix exists to prevent."""
+        os.environ["SHOULD_NOT_BE_READ_KEY"] = "should-never-be-read"
+        base, key = endpoint.from_hermes_config(a_hermes_home(CONFIG_COMMENT_AFTER_BLOCK))
+        self.assertEqual(base, "https://server.example/api/v1")
+        self.assertEqual(key, "secret-value")
+
+    def test_an_indented_comment_inside_the_block_is_harmless(self):
+        """An indented `#` was never flush-left and never threatened the boundary; this
+        pins that the fix did not accidentally make indentation matter for comments."""
+        base, key = endpoint.from_hermes_config(a_hermes_home(CONFIG_COMMENT_INDENTED))
+        self.assertEqual(base, "https://server.example/api/v1")
+        self.assertEqual(key, "secret-value")
+
+
 class TestRefreshing(unittest.TestCase):
     def setUp(self):
         os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()

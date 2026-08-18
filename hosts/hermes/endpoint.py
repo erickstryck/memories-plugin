@@ -52,14 +52,23 @@ def _home(home: str | None = None) -> str:
 
 def _model_block(text: str) -> str:
     """The text INSIDE the top-level `model:` block only, from just after the flush-left
-    `model:` line to the next flush-left key (or the end of the file).
+    `model:` line to the next flush-left KEY (or the end of the file).
+
+    A flush-left `#` comment does not end the block. Measured against a real
+    `~/.hermes/config.yaml`: it carries 36 flush-left comment lines, none inside the `model:`
+    block today — but a lookahead that treated any flush-left non-whitespace as "the next
+    key" would close the block the moment one landed there, one hermes upgrade or one user
+    note away, and it would fail SILENTLY: `base_url` vanishes from the captured text, the
+    cascade falls to the ceiling table, and the guard sleeps with no error anywhere. So the
+    boundary is "a flush-left line whose first character is neither whitespace nor `#`" —
+    only a real key closes the block; a comment, flush-left or indented, is walked over.
 
     Scoped like this so a `custom_providers:` catalogue elsewhere in the file — which lists
     servers hermes is NOT currently using — cannot answer for the active endpoint merely
     because a whole-file search reached it first. "" when there is no top-level `model:` key
     at all.
     """
-    found = re.search(r"^model:[ \t]*\n(.*?)(?=^\S|\Z)", text, re.M | re.S)
+    found = re.search(r"^model:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", text, re.M | re.S)
 
     return found.group(1) if found else ""
 
