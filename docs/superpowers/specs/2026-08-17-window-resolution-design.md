@@ -37,6 +37,17 @@ registro das duas está em `progress.md` e na memória `000300fe`; o resumo:
 usuário: `GET <base_url>/models` devolve `max_model_len: 524288` para `Qwen3.8-27B`, **idêntico ao
 `524.3K` que a interface do hermes exibe**.
 
+E vale além do servidor dele — três formatos medidos no mesmo dia:
+
+| servidor | onde a janela está | medido |
+|---|---|---|
+| vLLM (o do usuário) | `max_model_len`, no topo | 524.288 |
+| OpenRouter | `context_length`, no topo | 414/414 modelos |
+| llama.cpp (o de embeddings dele) | **`meta.n_ctx`** — aninhado | 8.192 |
+
+Três servidores, três formas. É por isso que a sonda procura numa lista de CAMINHOS e não num
+campo, e por que a lista é declarada incompleta em vez de fingir cobertura.
+
 **E o `models_dev_cache.json` do hermes NÃO serve**, embora tenha o dado. `get_model_context_length`
 resolve em dez passos e, para provedores que sondam ao vivo, o passo 1 **ignora o cache de
 propósito**; o cache é o passo 5f. Ele dizia 262.144 onde o real é 524.288 — errado por 2×, e na
@@ -95,16 +106,37 @@ faria dois setups se contaminarem.
 Lê `base_url` e o **nome** da variável de chave (`key_env`) do config do próprio hermes, e lê essa
 variável do ambiente — que o processo do hermes já tem, porque é ele quem carrega o plugin. Chama
 `GET <base_url>/models` e procura, na entrada cujo `id` casa com o modelo da sessão, um destes
-campos, nesta ordem:
+**caminhos**, o primeiro que dê um inteiro positivo — e a ordem é a decisão:
 
 ```
-max_model_len      (vLLM — é o caso medido)
-context_length     (Ollama e outros)
-context_window
+top_provider.context_length   (OpenRouter — o provedor que a requisição REALMENTE atinge)
+max_model_len                 (vLLM — medido: 524.288 no servidor do usuário)
+context_length                (OpenRouter agregado, e outros — medido: 414/414 modelos)
+meta.n_ctx                    (llama.cpp — medido: 8.192; ANINHADO, não no topo)
 ```
 
-**A lista é assumidamente incompleta, e isso vai no docstring.** Campo ausente, entrada ausente,
-endpoint fora do ar ou config ilegível: todos caem para o degrau seguinte. Nada é inventado.
+**Por que essa ordem, e por que ela inverte a assimetria neste ponto.** O OpenRouter publica DOIS
+campos que discordam em **34 dos 414 modelos** (medido): `context_length` é o agregado — a maior
+janela entre todos os provedores que servem aquele modelo — e `top_provider.context_length` é a do
+provedor que a requisição de fato atinge. Para `nvidia/nemotron-3.5-lightning`: 1.000.000 contra
+262.144.
+
+Em todo o resto desta feature, errar para grande é a escolha segura, porque grande demais só faz a
+guarda dormir. Aqui o agregado é grande demais **por construção**: pedir 1.000.000 quando o provedor
+real entrega 262.144 faz a guarda dormir exatamente quando precisava acordar. A regra se **refina**
+em vez de se contradizer — preferir o valor com maior chance de ser REAL, e usar teto só quando não
+há valor real nenhum. O `top_provider` vem primeiro por isso, não por ser menor.
+
+**A lista de nomes E DE LUGARES é assumidamente incompleta, e isso vai no docstring.** Ela saiu de
+medição contra três servidores diferentes, e a última entrada só existe porque o llama.cpp aninha
+sob `meta` — uma busca só no topo não o acharia.
+
+**Não verificado, e registrado como tal:** OpenAI e Anthropic nativas exigem credencial que não
+estava disponível para medir. Esta spec não afirma nada sobre elas; a cascata as trata como
+qualquer caso sem campo — desce um degrau.
+
+Campo ausente, entrada ausente, endpoint fora do ar ou config ilegível: todos caem para o degrau
+seguinte. **Nada é inventado, e nenhuma heurística estima uma janela a partir de outra coisa.**
 
 Acoplamento aceito e declarado: ler o config de outro projeto é dependência de um formato que pode
 mudar. É o mesmo acoplamento que o adaptador já tem com o `state.db` do hermes, e a defesa é a
@@ -139,7 +171,12 @@ pode produzir uma janela menor que a verdade sem passar pelo usuário.
   satisfazendo **um** degrau, porque fixture que satisfaz dois não prova nenhum.
 - **A guarda NUNCA sonda**: prova por execução, patchando a rede para levantar e afirmando que o
   caminho comum da guarda decide mesmo assim.
-- **Os três nomes de campo**, e um quarto nome desconhecido que tem de cair para a tabela.
+- **Os quatro caminhos**, um por vez, incluindo o **aninhado** (`meta.n_ctx`) — que uma busca só no
+  topo não acharia — e um quinto nome desconhecido, que tem de cair para a tabela.
+- **A ordem entre os dois campos do OpenRouter**: resposta com `context_length` e
+  `top_provider.context_length` DIVERGENTES tem de resolver pelo segundo. Fixture com os números
+  medidos (1.000.000 contra 262.144), porque fixture onde os dois concordam não prova ordem
+  nenhuma.
 - **Falha que desce, nunca sobe**: para cada linha da tabela acima, afirmar que a janela resultante
   é **maior ou igual** à que o degrau seguinte daria — nunca menor.
 - **Chaveamento por `(endpoint, modelo)`**: mesmo modelo em dois endpoints não compartilha valor.
