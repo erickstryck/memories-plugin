@@ -221,11 +221,51 @@ class TestManifest(unittest.TestCase):
         self.assertTrue("register_memory_provider" in head or "MemoryProvider" in head)
 
 
-class TestPrefetch(unittest.TestCase):
+class _NoRealHermesHome(unittest.TestCase):
+    """Base for every class here that calls `prefetch`, pinning `HERMES_HOME` at a temp dir.
+
+    WHY IT EXISTS. `_prefetch` refreshes the window cache on every path that already paid for
+    network, and that refresh reads hermes' own `config.yaml` to learn which endpoint serves
+    the model. With `HERMES_HOME` unset, that resolves to the DEVELOPER's `~/.hermes` — so
+    these tests read a file outside the repository, and on a machine whose config carries a
+    `base_url` they would go on to reach for a real endpoint. It stayed harmless only by
+    accident: `_session_id` defaults to "", no session row matches, and the lookup
+    short-circuits before the network. An accident is not an invariant, and the next test that
+    happens to set a session id would have inherited a live dependency on someone's home
+    directory.
+
+    Restoration goes through `addCleanup`, so it runs even when a test fails. `HERMES_HOME`
+    locates the HOST: a value left behind here leaks into other test modules.
+    """
+
+    def setUp(self):
+        super().setUp()
+        previous = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = tempfile.mkdtemp()
+        if previous is None:
+            self.addCleanup(os.environ.pop, "HERMES_HOME", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "HERMES_HOME", previous)
+
+
+class TestPrefetch(_NoRealHermesHome):
     """The read direction, through the hermes entry point.
 
     The provider is driven with fakes injected into its store slot, so these run offline.
     """
+
+    def test_NO_test_here_reads_the_developers_own_hermes_config(self):
+        """The guard on the guard. `_prefetch` reads hermes' `config.yaml` to learn the
+        endpoint, so with `HERMES_HOME` unset these tests read a file outside the repository —
+        whatever happens to be in the home directory of whoever runs them. This asserts the
+        base class actually pinned it, which is the one thing that cannot be verified by the
+        other tests passing: they passed before the pin too."""
+        home = os.environ.get("HERMES_HOME", "")
+        self.assertTrue(home, "HERMES_HOME is unset: prefetch would read the real ~/.hermes")
+        self.assertNotEqual(Path(home).resolve(), (Path.home() / ".hermes").resolve(),
+                            "HERMES_HOME points at the real hermes home")
+        self.assertFalse((Path(home) / "config.yaml").exists(),
+                         f"the pinned home is not empty: {home}")
 
     def _provider(self, hits, outcome):
         from core.retrieval import Outcome  # noqa: F401  (documents the shape below)
@@ -459,7 +499,7 @@ class TestPrefetch(unittest.TestCase):
         self.assertEqual(Counting.calls, 0, "the legacy name must disable it too")
 
 
-class TestTheBreakerDegradesONETurnAndNotTheWholeSession(unittest.TestCase):
+class TestTheBreakerDegradesONETurnAndNotTheWholeSession(_NoRealHermesHome):
     """A rerank failure must cost the turns the breaker is open for, and not one more.
 
     This host is the only one that can get this wrong, and it did. The claude-code hook is a
@@ -652,7 +692,7 @@ class TestEnsureStoreTimeouts(unittest.TestCase):
         self.assertAlmostEqual(store.q.timeout, expected, places=6)
 
 
-class TestCheckpointCadence(unittest.TestCase):
+class TestCheckpointCadence(_NoRealHermesHome):
     """The write nudge. It rides along in prefetch, and the reason is structural:
     on_turn_start runs every turn and CARRIES the number, but returns None — so it cannot
     inject. The only injection points hermes offers are prefetch and system_prompt_block.
@@ -992,7 +1032,7 @@ class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
                                                f"coded default")
 
 
-class TestCheckpointFailureDoesNotCostRecall(unittest.TestCase):
+class TestCheckpointFailureDoesNotCostRecall(_NoRealHermesHome):
     """The checkpoint and the recall now share one return value. A failure inside the
     checkpoint half must be worth at most one skipped nudge — never the loss of a recall
     block that had already been built successfully.
