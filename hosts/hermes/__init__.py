@@ -316,28 +316,16 @@ class MemoriesProvider(_Base):
         top_k = self.TOP_K if getattr(store, "reranker", None) else self.TOP_K_STRICT
         try:
             hits, outcome = store.recall(angles, policy, top_k, suppressed=suppressed)
-        finally:
-            # The window is knowable on this host, and this is where the network is already
-            # being paid for — on EVERY path from here, not only the one with hits: a fresh
-            # hermes install, or an empty memory collection, returns NO hits on every single
-            # prefetch, and that used to `return` two branches below, BEFORE this ever ran.
-            # The cache then stayed empty forever, step 2 of the cascade never fired, and for
-            # a model absent from the ceiling table the window resolved to 0 — the guard
-            # allowed every read, permanently, with no error anywhere. Same gap when
-            # `store.recall` above raises, which is why this sits in `finally` and not after
-            # a `return`: the round trip was already attempted either way. Wrapped so a
-            # failure here can never turn a working recall into an unavailable block, and it
-            # still never runs on the two genuine pre-network short-circuits above (disabled
-            # recall, a trivial prompt) — neither has paid for anything yet.
-            try:
-                from . import bigfile
-                from .endpoint import refresh_window
+        except Exception:                           # noqa: BLE001
+            # The archive is unreachable; the MODEL endpoint is a different server and says
+            # nothing about it, so this failure must not cost us the window. `except Exception`
+            # and NOT `finally`: a `finally` also runs while a BaseException propagates, so
+            # Ctrl-C used to buy the user a multi-second probe before their interrupt was
+            # allowed through — and a BaseException from the probe would have replaced the
+            # KeyboardInterrupt they asked for. Being cancelled is not a failure of anything.
+            self._refresh_window(session_id)
 
-                refresh_window(bigfile.model_of(bigfile.state_db_path(), session_id))
-            except Exception:                       # noqa: BLE001
-                pass                                # a window we did not learn is the next
-                                                     # step of the cascade, never a failed
-                                                     # prefetch
+            raise
 
         if outcome is not None and outcome.rerank_error:
             breaker.arm()
@@ -353,6 +341,7 @@ class MemoriesProvider(_Base):
             session_state.prune(state)
             session_state.save(path, state)
             self._last_count = 0
+            self._refresh_window(session_id)
 
             return self._with_checkpoint(blocks.empty_block(outcome, len(angles)))
 
@@ -361,9 +350,41 @@ class MemoriesProvider(_Base):
         session_state.save(path, state)
         self._sweep_dead_state(round_no)
         self._last_count = len(full)
+        self._refresh_window(session_id)
 
         return self._with_checkpoint(
             blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
+
+    def _refresh_window(self, session_id: str) -> None:
+        """Teaches the window cache what this session's model endpoint reports, if anything.
+
+        WHY IT LIVES HERE AND NOT AT ONE `return`. The window is knowable on this host, and
+        this method is called from every path of `_prefetch` that has ALREADY paid for a
+        network round trip — including the one with no hits. A fresh hermes install, or an
+        empty memory collection, returns no hits on every single prefetch; a refresh that only
+        ran on the with-hits path would never run at all there, the cache would stay empty
+        forever, step 2 of the cascade would never fire, and for a model absent from the
+        ceiling table the window would resolve to 0. The guard would then allow every read,
+        permanently, with no error anywhere. It is deliberately NOT called from the two genuine
+        pre-network short-circuits (recall disabled, a trivial prompt): neither has paid for
+        anything, and putting a network call behind a user's explicit "recall off" would be a
+        worse bug than the one this closes.
+
+        WHY IT GOES LAST. It talks to a network with a multi-second timeout, which makes it the
+        most interruptible thing in the method. Every caller runs it AFTER the breaker and
+        `session_state.save`, so a turn killed mid-probe still keeps the round number and the
+        seen-set it had already earned.
+
+        Never raises: a window we did not learn is simply the next step of the cascade, and it
+        must never turn a working recall into an unavailable block.
+        """
+        try:
+            from . import bigfile
+            from .endpoint import refresh_window
+
+            refresh_window(bigfile.model_of(bigfile.state_db_path(), session_id))
+        except Exception:                           # noqa: BLE001 — see the docstring
+            pass
 
     def _reranker_for_this_turn(self, store, suppressed: str | None) -> None:
         """Point the CACHED store's reranker at what the breaker says right now.

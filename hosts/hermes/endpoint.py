@@ -32,6 +32,7 @@ are accepted; `key_env` is tried first since it already names the variable direc
 """
 import os
 import re
+import time
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -42,6 +43,29 @@ from core import windowcache, windowprobe  # noqa: E402
 
 #: Short: this runs from `prefetch`, which the user is waiting on.
 PROBE_TIMEOUT_S = 5.0
+
+#: How long a probe that learned nothing is left alone before being tried again.
+RETRY_AFTER_S = 900.0
+
+#: `(endpoint, model)` -> when it is worth probing again, for probes that learned NOTHING.
+#:
+#: WHY THIS IS NOT IN THE CACHE FILE. `windowcache.put` refuses to store a zero, and that is
+#: correct: absence and "the endpoint answered zero" have to stay distinct, or the cascade
+#: would stop at a step that knows nothing. The cost of that correctness is that a failed
+#: probe leaves NOTHING behind, so the next turn probes again — with the archive reachable and
+#: the model endpoint down, that is PROBE_TIMEOUT_S added to every single turn, forever.
+#:
+#: This is the missing half, and it belongs in memory rather than on disk because it is a
+#: statement about a request that just failed, not a fact about the model. It must not outlive
+#: the process, and it must not be read by the other host, which has no endpoint at all. The
+#: hermes provider is one long-lived object per process, so an in-process dict is exactly the
+#: lifetime wanted.
+_RETRY_AFTER: dict[tuple[str, str], float] = {}
+
+
+def forget_failures() -> None:
+    """Drops every back-off. For tests, and for a caller that knows the network changed."""
+    _RETRY_AFTER.clear()
 
 
 def _home(home: str | None = None) -> str:
@@ -156,11 +180,20 @@ def refresh_window(model: str, *, probe=None) -> int:
     known, fresh = windowcache.get(base, model)
     if fresh:
         return known
+    slot = (base, model)
+    if time.time() < _RETRY_AFTER.get(slot, 0.0):
+        # A probe for this pair failed recently. Returning the known value — usually 0, and a
+        # stale one when we have it — costs nothing and keeps the turn fast; the cascade reads
+        # both the same way it would have anyway.
+        return known
     call = probe or windowprobe.probe
     learned = call(base, key, model, timeout=PROBE_TIMEOUT_S)
     if learned > 0:
         windowcache.put(base, model, learned)
+        _RETRY_AFTER.pop(slot, None)
 
         return learned
+
+    _RETRY_AFTER[slot] = time.time() + RETRY_AFTER_S
 
     return known

@@ -261,6 +261,11 @@ class TestRefreshing(unittest.TestCase):
     def setUp(self):
         _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), HERMES_HOME=a_hermes_home(),
                   MY_KEY_VAR="secret-value")
+        # The back-off is process-global by design, so it outlives a test the way an env var
+        # would. A test that probed and failed would otherwise deny the NEXT test its probe —
+        # which is exactly how this line came to be written.
+        endpoint.forget_failures()
+        self.addCleanup(endpoint.forget_failures)
 
     def test_a_fresh_cache_is_NOT_probed_again(self):
         from core import windowcache
@@ -301,6 +306,53 @@ class TestRefreshing(unittest.TestCase):
         got = endpoint.refresh_window("", probe=lambda *a, **k: calls.append(1) or 999)
         self.assertEqual(got, 0)
         self.assertEqual(calls, [], "an empty model id was probed anyway")
+
+
+class TestAProbeThatLearnedNothingBacksOff(unittest.TestCase):
+    """`put` refuses to cache a zero, deliberately — absence and "answered zero" have to stay
+    different, or the cascade would stop at a step that knows nothing. The cost of that
+    correctness is that a probe which learns nothing leaves NOTHING behind, so the next turn
+    probes again, and the turn after that, forever. With the archive reachable and the model
+    endpoint down, that is PROBE_TIMEOUT_S added to every single turn.
+
+    The back-off lives in this process and not in the cache file on purpose: it is a statement
+    about a request that just failed, not a fact about the model, and it must not outlive the
+    process or be read by the other host."""
+
+    def setUp(self):
+        _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), HERMES_HOME=a_hermes_home(),
+                 MY_KEY_VAR="secret-value")
+        endpoint.forget_failures()
+        self.addCleanup(endpoint.forget_failures)
+
+    def test_a_second_call_after_a_failed_probe_does_NOT_probe_again(self):
+        calls = []
+        for _ in range(3):
+            endpoint.refresh_window("m", probe=lambda *a, **k: calls.append(1) or 0)
+        self.assertEqual(len(calls), 1, f"the failed probe was retried {len(calls)} times")
+
+    def test_the_back_off_EXPIRES_so_a_server_that_came_back_is_found(self):
+        """A back-off that never expired would be worse than the repetition it replaces: the
+        endpoint returning is the case we most want to notice."""
+        endpoint.refresh_window("m", probe=lambda *a, **k: 0)
+        endpoint.forget_failures()          # what the passage of RETRY_AFTER_S does
+        got = endpoint.refresh_window("m", probe=lambda *a, **k: 524288)
+        self.assertEqual(got, 524288)
+
+    def test_the_back_off_is_PER_MODEL_and_per_endpoint(self):
+        """One model being unavailable says nothing about another on the same server."""
+        endpoint.refresh_window("m", probe=lambda *a, **k: 0)
+        calls = []
+        endpoint.refresh_window("other", probe=lambda *a, **k: calls.append(1) or 524288)
+        self.assertEqual(len(calls), 1, "a different model was denied its first probe")
+
+    def test_a_SUCCESSFUL_probe_leaves_no_back_off_behind(self):
+        endpoint.refresh_window("m", probe=lambda *a, **k: 524288)
+        from core import windowcache
+        windowcache.put("https://server.example/api/v1", "m", 524288, ttl=-1)   # ficou velho
+        calls = []
+        endpoint.refresh_window("m", probe=lambda *a, **k: calls.append(1) or 262144)
+        self.assertEqual(len(calls), 1, "a stale entry was not refreshed after an earlier win")
 
 
 if __name__ == "__main__":

@@ -300,6 +300,53 @@ class TestPrefetch(unittest.TestCase):
         self.assertIn("UNAVAILABLE", out)
         self.assertTrue(spy.called, "store.recall raising skipped the window refresh too")
 
+    def test_a_KEYBOARD_INTERRUPT_does_not_pay_for_a_probe_before_it_lands(self):
+        """Ctrl-C is the one interruption the user times with their own patience. The refresh
+        used to sit in a `finally`, which runs for BaseException too — so cancelling a turn
+        cost up to PROBE_TIMEOUT_S of probing before the interrupt was allowed through, and a
+        BaseException raised by the probe itself would have REPLACED the KeyboardInterrupt the
+        user asked for. Recall FAILING is an `Exception` and still refreshes, because the model
+        endpoint is a different server from the archive; being CANCELLED is not a failure of
+        anything and must cost nothing."""
+        p = MemoriesProvider()
+        p._cfg = object()
+
+        class Cancelled:
+            def recall(self, *a, **kw):
+                raise KeyboardInterrupt()
+
+        p._store = Cancelled()
+        p._state_dir = Path(tempfile.mkdtemp())
+        with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp()}), \
+             unittest.mock.patch("hosts.hermes.endpoint.refresh_window") as spy:
+            # `_prefetch` and not `prefetch`: the public wrapper catches BaseException on
+            # purpose, because a prefetch must never break the turn. What is being pinned here
+            # is that the handler INSIDE `_prefetch` lets a cancellation through untouched.
+            with self.assertRaises(KeyboardInterrupt):
+                p._prefetch("a question the user gave up on", "s1")
+        self.assertFalse(spy.called, "Ctrl-C paid for a window probe before landing")
+
+    def test_the_refresh_runs_AFTER_the_state_is_written(self):
+        """A turn killed during the probe used to lose bookkeeping that the previous ordering
+        had already written: the refresh preceded the breaker and `session_state.save`. The
+        probe is the most interruptible thing in this method — it talks to a network with a
+        multi-second timeout — so it goes LAST, and whatever is killed mid-probe, the round
+        number and the seen-set survive it."""
+        from core.retrieval import Outcome
+        from hosts.hermes import session_state
+        order = []
+        p = self._provider([], Outcome(candidates=0))
+        real_save = session_state.save
+        with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp()}), \
+             unittest.mock.patch.object(
+                 session_state, "save",
+                 lambda path, state: (order.append("save"), real_save(path, state))[1]), \
+             unittest.mock.patch("hosts.hermes.endpoint.refresh_window",
+                                 lambda *a, **k: order.append("refresh")):
+            p.prefetch("an absent subject")
+        self.assertEqual(order, ["save", "refresh"],
+                         f"the probe did not run last: {order}")
+
     def test_a_failure_reaches_the_MODEL_and_not_only_the_log(self):
         """The central contract: silent to the user, never to the model."""
         p = MemoriesProvider()
