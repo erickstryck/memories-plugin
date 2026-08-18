@@ -355,13 +355,23 @@ fi
 # The marker the loader's cheap text scan looks for, before importing anything
 # (`_is_memory_provider_dir`, first 8192 bytes). Without it the directory is not even
 # considered a provider — and the failure looks like "the provider does not exist".
-if head -c 8192 "$TARGET/__init__.py" 2>/dev/null \
-   | grep -qE "register_memory_provider|MemoryProvider"; then
-  ok "the adapter carries the string discovery greps for"
-else
-  fail "$TARGET/__init__.py has neither register_memory_provider nor MemoryProvider in"
-  say "        its first 8192 bytes — discovery would skip the directory entirely"
-fi
+#
+# NO PIPELINE HERE, AND THAT IS THE POINT. This was `head -c 8192 … | grep -qE …`, which
+# under `set -o pipefail` fails INTERMITTENTLY: `grep -q` exits the moment it matches, and
+# if it wins the race against `head`'s next write, `head` dies of SIGPIPE, the pipeline
+# reports 141, and a check that PASSED is reported as failed. Measured on 2026-08-18: 1
+# failure in 600 runs on a busy machine, 0 in 400 on an idle one — which is exactly why it
+# only ever showed up in a full test run, and why it was written off as a flaky test. It was
+# not: the script really does refuse to apply, at random, on a correct installation. A shell
+# `case` reads the bytes once and decides with no second process to lose a race to.
+marker_head=$(head -c 8192 "$TARGET/__init__.py" 2>/dev/null || true)
+case "$marker_head" in
+  *register_memory_provider*|*MemoryProvider*)
+    ok "the adapter carries the string discovery greps for" ;;
+  *)
+    fail "$TARGET/__init__.py has neither register_memory_provider nor MemoryProvider in"
+    say "        its first 8192 bytes — discovery would skip the directory entirely" ;;
+esac
 
 # Where the provider being REPLACED actually lives, which decides what is being replaced:
 # a working provider, or one that never loaded. Only the two directory sources can be

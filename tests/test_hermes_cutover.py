@@ -1130,5 +1130,96 @@ class TestTheBigFileGuardCheck(CutoverCase):
         self.assertLine(out, "pre_tool_call")
 
 
+
+class TestNoCheckIsDECIDEDByAPipeline(unittest.TestCase):
+    """The bug that was mistaken for a flaky test, pinned so it cannot come back.
+
+    `head -c 8192 … | grep -qE …` decided the discovery check, under `set -o pipefail`. `grep -q`
+    exits the instant it matches; when it won the race against `head`'s next write, `head` died
+    of SIGPIPE, the pipeline reported 141, and a check that had PASSED was reported as failed.
+
+    Measured on 2026-08-18: 1 failure in 600 runs of that exact pipeline on a busy machine, 0 in
+    400 on an idle one. That load-dependence is why it only ever appeared inside a full suite run
+    and was written off as a flaky test for weeks. It was not a test problem: on a correct
+    installation the script would refuse to apply, at random, and blame the adapter for it.
+
+    THE RULE THIS HOLDS, which is broader than the one bug: under `pipefail` the exit status of a
+    pipeline is not a property of the question being asked — any reader that stops early can
+    turn a true answer into a false one. So no check in this script may be decided by one.
+    """
+
+    #: `| grep -q`, `| grep -qE`, `| head -1`, and friends — a reader that can exit early.
+    EARLY_EXIT_READERS = re.compile(r"\|\s*(grep\s+-[a-zA-Z]*q|head\b|sed\s+-n\s*'?1q)")
+
+    def test_the_script_sets_pipefail_so_this_rule_is_load_bearing(self):
+        """If it ever stops setting pipefail, this whole class is about a risk that is gone —
+        and a test whose reason has expired should say so rather than pass by accident."""
+        self.assertRegex(SCRIPT.read_text(), r"(?m)^set -[a-z]*e[a-z]*u[a-z]*o pipefail|^set -o pipefail")
+
+    def test_no_early_exiting_reader_decides_a_condition(self):
+        """Only pipelines in a CONDITION matter: `if …`, `while …`, `&&`/`||`. A pipeline whose
+        output is printed cannot silently invert a decision."""
+        offenders = []
+        for number, line in enumerate(SCRIPT.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            in_condition = stripped.startswith(("if ", "elif ", "while ", "until ")) \
+                or " && " in stripped or " || " in stripped
+            if in_condition and self.EARLY_EXIT_READERS.search(stripped):
+                offenders.append(f"{SCRIPT.name}:{number}: {stripped}")
+        self.assertEqual(offenders, [], "a check is decided by a pipeline that can lose a race:\n"
+                                        + "\n".join(offenders))
+
+
+class TestTheDiscoveryMarkerCheckStillDecidesBOTHWays(unittest.TestCase):
+    """Rewriting the check must not have made it always-true, which is the cheap way to make a
+    flake go away and the reason to test both directions rather than just the green one."""
+
+    def test_the_marker_present_is_recognised(self):
+        self.assertTrue(_marker_check_says_ok("class MemoryProvider:\n"))
+
+    def test_the_marker_present_LATE_in_a_big_file_is_recognised(self):
+        """Within the 8192 bytes the loader itself reads — the check exists to mirror that
+        window, so a marker at byte 8000 must still count."""
+        filler = "# " + "x" * 60 + "\n"
+        text = filler * 100 + "def register_memory_provider():\n"
+        self.assertLess(len(text.encode()), 8192)
+        self.assertTrue(_marker_check_says_ok(text))
+
+    def test_the_marker_ABSENT_is_still_a_failure(self):
+        self.assertFalse(_marker_check_says_ok("# nothing the loader greps for\n"))
+
+    def test_the_marker_BEYOND_the_window_is_a_failure(self):
+        """The loader reads 8192 bytes and no more, so a marker at byte 9000 is invisible to it
+        and the check has to agree — reporting a provider hermes would skip is the failure this
+        check exists to prevent."""
+        text = ("# " + "y" * 78 + "\n") * 120 + "class MemoryProvider:\n"
+        self.assertGreater(len("".join(text).encode()), 8192)
+        self.assertFalse(_marker_check_says_ok(text))
+
+
+def _marker_check_says_ok(file_text: str) -> bool:
+    """Runs the script's own check, extracted verbatim, over a file holding `file_text`.
+
+    Extracted rather than restated: a copy of the logic here would be a second implementation
+    that could agree with a broken script. The lines come from the script itself.
+    """
+    lines = SCRIPT.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("marker_head="))
+    end = next(i for i, ln in enumerate(lines[start:], start) if ln.strip() == "esac")
+    body = "\n".join(lines[start:end + 1])
+    body = body.replace('ok "', 'echo "OK:').replace('fail "', 'echo "FAIL:').replace('say "', ': "')
+    with tempfile.TemporaryDirectory() as box:
+        target = Path(box) / "hermes"
+        target.mkdir()
+        (target / "__init__.py").write_text(file_text)
+        out = subprocess.run(["bash", "-c", f'set -euo pipefail\nTARGET="{target}"\n{body}'],
+                             capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, f"the extracted check itself errored: {out.stderr}"
+
+    return "OK:" in out.stdout
+
+
 if __name__ == "__main__":
     unittest.main()
