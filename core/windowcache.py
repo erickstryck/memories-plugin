@@ -81,8 +81,8 @@ def put(endpoint: str, model: str, window: int, ttl: float = TTL_SECONDS) -> Non
         return
     data = _load()
     data[_key(endpoint, model)] = {"window": window, "expires_at": time.time() + ttl}
-    tmp = _path() + ".tmp"
     try:
+        tmp = _path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=1, sort_keys=True)
         os.replace(tmp, _path())

@@ -85,6 +85,18 @@ class TestItNeverRaises(unittest.TestCase):
         windowcache.put("http://x/v1", "m", 0)
         self.assertEqual(windowcache.get("http://x/v1", "m"), (524288, True))
 
+    def test_put_does_not_RAISE_when_the_state_dir_cannot_be_created(self):
+        """`get` already degrades to a miss here because its path call sits inside its own
+        try. `put` must degrade the same way: the module promises a cache that cannot be
+        written is a miss, and two entry points failing differently under one condition is
+        how that promise gets trusted for behaviour it does not have."""
+        blocked = os.path.join(tempfile.mkdtemp(), "state")
+        with open(blocked, "w") as fh:
+            fh.write("a file, not a directory")
+        os.environ["QCTX_STATE_DIR"] = blocked
+        self.assertEqual(windowcache.get("http://x/v1", "m"), (0, False))
+        windowcache.put("http://x/v1", "m", 524288)     # must not raise
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
