@@ -64,10 +64,22 @@ language, not just semantics. Consequences in the design:
 
 ## Installation
 
+**From zero to working, in order.** Each step is expanded below; nothing here is optional except
+where it says so, and the two steps people skip are 3 and 5 — both fail silently.
+
+| # | step | why it is not optional |
+|---|---|---|
+| 1 | a reachable Qdrant, and an embedding endpoint | there is nothing to search without them |
+| 2 | `qctx config set` the **addresses** into the file | a process without your shell reads the file, and only the file |
+| 3 | `export` the **two keys** — and for hermes, also `~/.hermes/.env` | keys never enter the config file; a shell-less hermes has none otherwise |
+| 4 | `qctx config set memory-collection <name>` | it is empty on purpose, so nothing can write into the wrong archive |
+| 5 | install on the host — and on hermes, run the cutover too | `plugins install` cannot register a shell hook, so the read guard is not installed by it |
+| 6 | `qctx setup`, then the no-shell check | the only way to know steps 2 and 3 actually took |
+
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 889 collected, 871 offline; no network, no deps
+python3 -m unittest discover -s tests    # 995 collected, 976 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -93,6 +105,18 @@ claude plugin install memories-plugin@memories-plugin
 ```
 
 Then **open a new terminal** — the harness reads `settings.json` at start-up.
+
+To pick up a newer commit later, the plugin must be named **with its marketplace**; the bare name
+answers `Plugin "memories-plugin" not found`, which reads like a broken install and is not one:
+
+```bash
+claude plugin marketplace update memories-plugin
+claude plugin update memories-plugin@memories-plugin      # name@marketplace, not just the name
+```
+
+The version it reports is the **commit SHA**, because the manifests declare no version on purpose
+— a hand-maintained number goes stale and this one already had (0.3.0 declared, 0.2.0 installed).
+`claude plugin details memories-plugin` lists what it found: three skills, two hooks.
 
 That registers, with no path for you to maintain (the hooks resolve
 `${CLAUDE_PLUGIN_ROOT}` themselves):
@@ -137,12 +161,32 @@ For **development**, keep the symlink install instead, so edits take effect imme
 ln -s ~/dev/memories-plugin/hosts/hermes ~/.hermes/plugins/memories
 ```
 
-Either way, the script below checks the result and changes nothing until you ask:
+**Installing is not the whole job on this host, and the missing half is silent.** A hermes plugin
+manifest has no field for shell hooks — they live only in `~/.hermes/config.yaml`, behind a
+first-use consent allowlist — so `plugins install` gives you memory and the 20 tools, and the
+big-file read guard is **not** registered. That is what the script below is for:
 
 ```bash
 ./scripts/hermes_cutover.sh            # reports what it would do; writes NOTHING
 ./scripts/hermes_cutover.sh --apply    # installs, with a dated backup of every file it edits
 ```
+
+It reports the credentials, the URLs a shell-less hermes would find, the symlink, the provider
+selection and the guard — and `--apply` writes only what is missing. It accepts either install
+shape: a symlink at the repository root (what a git install produces) and one at `hosts/hermes`
+both load, and it leaves whichever you have alone.
+
+**Then approve the hook once.** After registration `hermes hooks list` shows it
+`✗ not allowlisted`: the first file read of a new session asks at the TTY, and **a hermes with no
+TTY skips the hook silently** until it has been approved once. Approving records it in
+`~/.hermes/shell-hooks-allowlist.json`, which every later run — TTY or not — then honours.
+
+```bash
+hermes hooks list        # ✓ allowed, with the approval timestamp, once it is done
+```
+
+Do **not** reach for `hooks_auto_accept: true` to skip that step: it auto-approves every future
+hook from anywhere, which is a policy change, not a fix for this one.
 
 Run the first form first and read it. It checks the credentials, the collections, the
 provider entry, the hook block and whether the context window is declared, and prints the
@@ -349,6 +393,47 @@ qctx setup
 `qctx setup` is the one command to run when something is wrong: it probes Qdrant, the
 embedding endpoint (detecting the model's real dimension), the re-rank endpoint and every
 collection, and prints the exact command that fixes each gap.
+
+### The case that breaks silently: a process with no shell
+
+Everything above works for a program **you** started from **your** terminal, because it
+inherits your environment. A hermes launched by systemd, by the gateway, or by cron inherits
+nothing — and the symptom is not an error. It is an archive that looks simply **empty**.
+
+Two habits hide this, and both were measured on a working machine:
+
+- **Exporting the URLs instead of writing them.** `export QDRANT_URL=…` makes every command
+  work in your shell while `config.json` stays empty. Step 2 above says the addresses go in the
+  **file** for exactly this reason.
+- **`qctx config show` MIXES the file and the environment.** It prints a complete-looking
+  picture while the file holds empty strings. To see what a shell-less process would read, read
+  the file: `cat ~/.config/memories-plugin/config.json`.
+
+So, for hermes specifically, the two keys need a second home — the one hermes itself loads:
+
+```bash
+umask 077 && cat >> ~/.hermes/.env <<'ENV'
+QDRANT_SERVICE_API_KEY=...
+SERVER_API_KEY=...
+ENV
+chmod 600 ~/.hermes/.env
+```
+
+`~/.hermes/.env` is hermes' own credential file, and it is the only reason a shell-less hermes
+has keys at all. It is **not** the plugin's config: the plugin still refuses secrets in its own
+file, and `config set` will tell you so.
+
+**Verify it the way that actually proves it** — an empty environment plus only that file, which
+is what systemd gives you:
+
+```bash
+env -i HOME="$HOME" PATH=/usr/bin:/bin bash -c '
+  set -a; . ~/.hermes/.env; set +a
+  qctx setup'
+```
+
+Every line must be `[ok]`. If Qdrant or the embedding endpoint fails **there** while passing in
+your own shell, the gap is one of the two above.
 
 ### The long version
 

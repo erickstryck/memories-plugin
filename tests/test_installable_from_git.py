@@ -226,5 +226,51 @@ class TestTheClaudeManifestsStayTRUE(unittest.TestCase):
         self.assertIn("Validation passed", out.stdout + out.stderr)
 
 
+class TestTheREADMEStatesWhatFAILSSILENTLY(unittest.TestCase):
+    """The README is the only place a new machine gets told what breaks without saying so.
+
+    Three failures on this plugin produce no error at all — a shell-less process with no keys, a
+    config file left empty while the shell has the values, and a read guard that `plugins install`
+    cannot register. Each was measured on a working installation, and each looked like "the archive
+    is just empty". What is pinned here is that the README NAMES them; the wording is free.
+    """
+
+    def readme(self) -> str:
+        return (REPO / "README.md").read_text()
+
+    def test_it_says_the_keys_need_a_second_home_for_a_shell_less_hermes(self):
+        text = self.readme()
+        self.assertIn(".hermes/.env", text)
+        self.assertRegex(text, r"(?i)systemd|no shell|shell-less")
+
+    def test_it_warns_that_config_show_MIXES_file_and_environment(self):
+        """The trap that hid this for weeks: the diagnostic looked complete while the file was
+        empty, because it reads both and prints one picture."""
+        self.assertRegex(self.readme(), r"(?i)config show.{0,80}(mix|both)")
+
+    def test_it_says_plugins_install_does_NOT_register_the_guard(self):
+        """A reader who assumes the install did everything gets a guard that never fires and
+        nothing anywhere saying why."""
+        text = self.readme()
+        self.assertRegex(text, r"(?i)(no field for shell hooks|not.{0,20}registered)")
+        self.assertIn("hermes_cutover.sh", text)
+
+    def test_it_says_the_hook_needs_approving_ONCE(self):
+        """`✗ not allowlisted` is the state right after a correct install, and a hermes with no
+        TTY skips the hook until it has been approved."""
+        text = self.readme()
+        self.assertRegex(text, r"(?i)allowlist")
+        self.assertRegex(text, r"(?i)TTY")
+
+    def test_it_gives_the_no_shell_VERIFICATION_and_not_only_the_warning(self):
+        """A warning without a check is advice. `env -i` is the recipe that proves it."""
+        self.assertIn("env -i", self.readme())
+
+    def test_it_names_the_marketplace_form_of_the_update_command(self):
+        """`claude plugin update <bare name>` answers "not found", which reads like a broken
+        install. The form that works carries the marketplace."""
+        self.assertIn("memories-plugin@memories-plugin", self.readme())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
