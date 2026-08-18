@@ -63,11 +63,27 @@ class TestItNeverRaises(unittest.TestCase):
 
     def test_a_window_of_zero_or_less_is_NOT_stored(self):
         """Storing 0 would make the cache assert 'this endpoint says unknown' — and the next
-        step of the cascade would never be consulted."""
+        step of the cascade would never be consulted. Verify by reading the cache file."""
         windowcache.put("http://x/v1", "m", 0)
         windowcache.put("http://x/v1", "n", -5)
+        # Verify they were NOT stored by checking the file directly
+        cache_path = os.path.join(windowcache.state_dir(), windowcache.FILENAME)
+        if os.path.exists(cache_path):
+            with open(cache_path) as fh:
+                data = json.load(fh)
+            self.assertNotIn("http://x/v1|m", data)
+            self.assertNotIn("http://x/v1|n", data)
+        # Also verify get returns (0, False) for both
         self.assertEqual(windowcache.get("http://x/v1", "m"), (0, False))
         self.assertEqual(windowcache.get("http://x/v1", "n"), (0, False))
+
+    def test_a_zero_does_not_DESTROY_a_window_we_already_knew(self):
+        """The guard's real job. A probe that learns nothing calls nobody's put — but if it
+        ever did, overwriting a measured window with zero would send the cascade back to a
+        ceiling it had already improved on."""
+        windowcache.put("http://x/v1", "m", 524288)
+        windowcache.put("http://x/v1", "m", 0)
+        self.assertEqual(windowcache.get("http://x/v1", "m"), (524288, True))
 
 
 if __name__ == "__main__":
