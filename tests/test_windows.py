@@ -64,5 +64,68 @@ class TestTheTableHoldsCeilingsAndNotNominalWindows(unittest.TestCase):
         self.assertEqual(windows.window_for("claude-opus-6", a_config()), 0)
 
 
+class TestTheCascade(unittest.TestCase):
+    """Four steps, and each fixture satisfies EXACTLY ONE of them. A fixture that satisfies
+    two proves neither — the lesson this repo paid for twice."""
+
+    def setUp(self):
+        import tempfile
+        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+
+    def test_declared_beats_everything_including_a_cached_probe(self):
+        from core import windowcache
+        windowcache.put("http://x/v1", "claude-opus-5", 111_111)
+        cfg = type("C", (), {"context_window": 333_000})()
+        self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 333_000)
+
+    def test_a_cached_probe_beats_the_ceiling_table(self):
+        """The table says 1,000,000 for this name. A real endpoint saying 204,800 is closer
+        to the truth than a ceiling, and the whole point of probing."""
+        from core import windowcache
+        windowcache.put("http://x/v1", "claude-opus-5", 204_800)
+        cfg = type("C", (), {"context_window": 0})()
+        self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 204_800)
+
+    def test_the_table_answers_when_nothing_was_probed(self):
+        cfg = type("C", (), {"context_window": 0})()
+        self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 1_000_000)
+
+    def test_an_unknown_model_with_no_probe_is_still_zero(self):
+        cfg = type("C", (), {"context_window": 0})()
+        self.assertEqual(windows.window_for("MiniMax-M2.7", cfg, "http://x/v1"), 0)
+
+    def test_with_NO_endpoint_the_cache_is_not_consulted_at_all(self):
+        """claude-code has no endpoint to offer, and passing none must behave exactly as it
+        did before this cascade existed."""
+        from core import windowcache
+        windowcache.put("", "claude-opus-5", 42)
+        cfg = type("C", (), {"context_window": 0})()
+        self.assertEqual(windows.window_for("claude-opus-5", cfg), 1_000_000)
+
+    def test_a_cached_value_is_used_even_when_STALE(self):
+        from core import windowcache
+        windowcache.put("http://x/v1", "MiniMax-M2.7", 204_800, ttl=-1)
+        cfg = type("C", (), {"context_window": 0})()
+        self.assertEqual(windows.window_for("MiniMax-M2.7", cfg, "http://x/v1"), 204_800)
+
+
+class TestTheResolverNeverReachesTheNetwork(unittest.TestCase):
+    """The guard calls this before EVERY file read. A probe here would be a network call on
+    the hot path, and the reason the cache exists at all."""
+
+    def test_resolving_with_the_socket_broken_still_answers(self):
+        import socket
+        import tempfile
+        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        original = socket.socket.connect
+        socket.socket.connect = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("window_for reached the network"))
+        try:
+            cfg = type("C", (), {"context_window": 0})()
+            self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 1_000_000)
+        finally:
+            socket.socket.connect = original
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
