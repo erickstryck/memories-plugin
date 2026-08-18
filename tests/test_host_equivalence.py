@@ -2020,6 +2020,28 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
         self.assertIn("context_window", section)
         self.assertIn("QCTX_CONTEXT_WINDOW", section)
 
+    def test_it_says_where_the_window_comes_from_on_each_host(self):
+        """The window resolution differs by host, and a reader who does not know that will
+        declare `context_window` on a host that no longer needs it, or fail to declare it on
+        the host that does."""
+        section = guard_section()
+        for needle in ("context_window", "/models", "ceiling"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+
+
+class TestTheClaudeCodeSideDidNotChange(unittest.TestCase):
+    """The cascade added a step that only one host can fill. The other must resolve exactly
+    as it did before — a silent change there would move the guard's threshold for everyone
+    on the host that cannot even use the new step."""
+
+    def test_resolving_without_an_endpoint_gives_the_table_value(self):
+        from core import windows
+        cfg = type("C", (), {"context_window": 0})()
+        self.assertEqual(windows.window_for("claude-opus-5", cfg), 1_000_000)
+        self.assertEqual(windows.window_for("claude-haiku-4-5", cfg), 200_000)
+        self.assertEqual(windows.window_for("nao-existe", cfg), 0)
+
 
 #: Every file the guard is made of, on both hosts. The property below is about the guard as
 #: a whole, so the list is the whole guard: a call added to any one of them is a call the

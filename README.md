@@ -238,6 +238,25 @@ qctx config set context-window 200000      # or export QCTX_CONTEXT_WINDOW
 `./scripts/hermes_cutover.sh` reports whether that value is declared, and what ceiling it
 would fall back to if not.
 
+**Where the window comes from, and why it differs by host.** The guard decides by percentage
+of what REMAINS, so it needs the window. It resolves in four steps, and each is consulted only
+when the one before it did not answer:
+
+1. `context_window` in your config — declaring it wins over everything.
+2. A window the model's endpoint reported, cached. **hermes only**, because it is the only
+   host that records which endpoint serves the model; the value is refreshed from `/models`
+   by the hook that already talks to the network, never by the guard itself.
+3. The **ceiling** table by model name — the LARGEST window any variant of that name can
+   have, because the transcript records the bare name and a 200k variant is indistinguishable
+   from a 1M one.
+4. Zero, which ALLOWS: blocking on a window we are unsure of is the one failure this guard
+   must not produce.
+
+On claude-code, step 2 never fires: the host hands the window to its status line and not to
+hooks, measured. So there the table decides — and it is right for a 1M variant and generous
+for a 200k one. **If you run a 200k session, declare `context_window`**, or the guard will
+believe there is five times more room than there is.
+
 **The price is the price of the READ, not of the file.** One call loads at most 2,000 lines
 (and on hermes at most 100,000 characters as well), so that is what it is charged. A 3.2 MB
 file of 8,000 lines costs ~200k tokens, not ~800k. The honest consequence: the guard fires

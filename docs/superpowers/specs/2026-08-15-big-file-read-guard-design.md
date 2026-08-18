@@ -113,6 +113,12 @@ Daí a decisão: **tabela como TETO, config do usuário vence**.
 > `context_window`. Inerte até configurar é o modo de falha que este design já escolheu;
 > jaula não é.
 
+> **EMENDA de 2026-08-17.** A afirmação "a janela máxima NÃO é legível de disco em nenhum host"
+> vale para o claude-code — os quatro caminhos foram medidos — e **deixou de valer para o
+> hermes**: o endpoint que serve o modelo a informa por `/models`, e o adaptador passou a lê-la.
+> A tabela de tetos continua sendo o degrau seguinte, não o primeiro. Ver
+> `docs/superpowers/specs/2026-08-17-window-resolution-design.md`.
+
 ## Arquitetura
 
 ```
