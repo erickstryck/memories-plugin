@@ -1221,5 +1221,35 @@ def _marker_check_says_ok(file_text: str) -> bool:
     return "OK:" in out.stdout
 
 
+class TestEitherInstallShapeIsLeftAlone(unittest.TestCase):
+    """Two symlink targets are correct, and the script has to accept both.
+
+    `$ROOT/hosts/hermes` is the adapter directory; `$ROOT` is the repository root, whose
+    `__init__.py` re-exports the same provider so that `hermes plugins install owner/repo` — which
+    clones the WHOLE repository into `plugins/<name>/` — works. Both load, verified against
+    hermes' own loader.
+
+    THE BUG THIS HOLDS, and it was mine: the report learned to accept both and the apply did not,
+    so for one run `--apply` silently repointed a root link somebody had made on purpose while the
+    report called the install fine. One fact in two places, and only one of them fixed.
+    """
+
+    def test_the_report_accepts_a_link_at_the_repository_ROOT(self):
+        source = SCRIPT.read_text()
+        self.assertIn('[ "$current_target" = "$ROOT" ]', source,
+                      "the report would call a root link wrong")
+
+    def test_the_APPLY_leaves_a_root_link_alone(self):
+        """The half that was missed. The condition has to sit beside the write, not only in the
+        report, or the two can disagree again."""
+        source = SCRIPT.read_text()
+        self.assertRegex(source, r'if \[ -L "\$LINK" \] && \[ "\$\(readlink "\$LINK"\)" = "\$ROOT" \]',
+                         "apply does not special-case a root link")
+        write_index = source.index('ln -sfn "$TARGET" "$LINK"')
+        guard_index = source.index('= "$ROOT" ]; then\n  ok "symlink left as it is')
+        self.assertLess(guard_index, write_index,
+                        "the guard must be reached BEFORE the write that repoints the link")
+
+
 if __name__ == "__main__":
     unittest.main()

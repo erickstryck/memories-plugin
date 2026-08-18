@@ -306,10 +306,16 @@ note "memory.memory_enabled: ${enabled:-<unset>} (gates hermes' built-in store, 
 say ""
 say "=== install location ==="
 
+# TWO targets are correct, and this used to know only one. `$ROOT/hosts/hermes` is the adapter
+# directory; `$ROOT` itself is the repository root, whose `__init__.py` re-exports the same
+# provider so that `hermes plugins install owner/repo` — which clones the WHOLE repository into
+# `plugins/<name>/` — works. Both load: verified against hermes' own `_load_provider_from_dir`,
+# 20 tools either way. Insisting on one of them would have this script silently undo a link
+# somebody made on purpose, and the report would call a working install wrong.
 if [ -L "$LINK" ]; then
   current_target="$(readlink "$LINK")"
-  if [ "$current_target" = "$TARGET" ]; then
-    ok "already installed: $LINK -> $TARGET"
+  if [ "$current_target" = "$TARGET" ] || [ "$current_target" = "$ROOT" ]; then
+    ok "already installed: $LINK -> $current_target"
   else
     note "$LINK points at $current_target — will repoint it at $TARGET"
   fi
@@ -714,7 +720,15 @@ fi
 if ! mkdir -p "$PLUGINS"; then
   fail "could not create $PLUGINS — the symlink has nowhere to go"
 fi
-if [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
+# LEAVES A LINK THAT ALREADY WORKS ALONE. `$ROOT` and `$ROOT/hosts/hermes` both load — the
+# repository root's `__init__.py` re-exports the same provider so a `hermes plugins install`
+# clone works — and this used to repoint either one at `$TARGET` unconditionally. The report
+# above learned to accept both first, and for one run this half did not: it silently undid a
+# root link somebody had made on purpose while the report called the install fine. Same fact,
+# two places, and only one of them was fixed; the condition now lives beside the write.
+if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$ROOT" ]; then
+  ok "symlink left as it is: $LINK -> $ROOT (the repository root loads too)"
+elif [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
   if ln -sfn "$TARGET" "$LINK"; then
     ok "symlink in place"
   else
