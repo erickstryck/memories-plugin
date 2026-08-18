@@ -176,6 +176,28 @@ class Qdrant:
 
         return res.get("points", []), res.get("next_page_offset")
 
+    def facet(self, name: str, key: str, limit: int, exact: bool = True) -> list[dict]:
+        """Distinct values of one payload key, counted BY THE SERVER: `[{"value", "count"}]`.
+
+        The alternative is scrolling every point to collect a handful of names, which is what
+        this exists to replace. It needs a payload index on `key` — without one the server
+        answers 400 ("No appropriate index for faceting"), measured — so callers must be ready
+        for `QdrantError` rather than assume availability.
+
+        `exact` defaults to True: the approximate mode is for dashboards, and every caller here
+        uses the result to decide something.
+
+        IT TRUNCATES AT `limit`, SILENTLY. Measured on 2026-08-18 against a probe collection
+        holding 7 distinct values: asked with limit=3 it answered 3 rows, with nothing in the
+        response to say the other 4 existed. A caller that cannot tolerate a partial answer must
+        treat `len(result) >= limit` as "unknown" — see `repos.FACET_LIMIT`.
+        """
+        body = {"key": key, "limit": limit, "exact": exact}
+        out = self.request("POST", f"/collections/{name}/facet", body)
+        hits = ((out or {}).get("result") or {}).get("hits")
+
+        return hits if isinstance(hits, list) else []
+
     def scroll_all(self, name: str, filter_: dict | None = None, with_vector: bool = False):
         """Iterates the whole collection, paging. A generator, so nothing is materialized."""
         offset = None

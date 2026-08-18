@@ -39,6 +39,12 @@ class RepoError(CoreError):
 #: The registry stores no meaning in its vector — it is a key-value table that happens to
 #: live in Qdrant, read by scroll and never by similarity. Size 1 says so out loud, and a
 #: unit vector avoids the zero-norm that Cosine has no answer for.
+#: How many distinct repo names a single facet may answer with. A facet AT this number is
+#: discarded rather than trusted (see `_repos_with_chunks`), so this is the point at which the
+#: listing stops being cheap — not a cap on how many repositories may exist. Set far above any
+#: plausible number of repositories on one machine, so the fallback stays theoretical.
+FACET_LIMIT = 1000
+
 REGISTRY_VECTOR_SIZE = 1
 REGISTRY_VECTOR = [1.0]
 
@@ -611,12 +617,34 @@ class RepoIndex:
             ) from exc
 
     def _repos_with_chunks(self) -> set:
-        """Every repo name the ARCHIVE holds a chunk under. One scroll, two readers.
+        """Every repo name the ARCHIVE holds a chunk under. Asked of the server, not the wire.
 
-        Both divergence directions need this same set, and it is the expensive read of the
-        listing (the whole chunk collection), so it is taken once and handed to both rather
-        than scrolled twice for one command.
+        Both divergence directions need this same set, so it is taken once and handed to both
+        rather than read twice for one command.
+
+        WHY IT IS A FACET AND NOT A SCROLL. The question is "which distinct values does one
+        indexed key have", and the chunk collection already carries the keyword index on `repo`
+        that a facet needs. Scrolling to answer it means pulling every point and every payload
+        of the whole archive over the wire to end up with a handful of names — a cost that grows
+        with the archive while the answer does not.
+
+        WHY A FACET AT THE LIMIT IS THROWN AWAY. `facet` truncates at its limit and says nothing
+        about having done so, so at the limit "all the values" and "the first N of more" are the
+        same response. A missing name here is not a slower answer, it is a WRONG one:
+        `divergent_repos` reports the repos the listing cannot otherwise name, so a name dropped
+        from this set is a repo that holds chunks, cannot be dropped by name, and has just become
+        invisible — precisely what that read exists to prevent. So an answer that MIGHT be short
+        is discarded for the scroll, which cannot truncate. `QdrantError` lands in the same
+        place: an older server, or a collection whose index was never created, gets the slow
+        read rather than a failed listing.
         """
+        try:
+            hits = self.q.facet(self.chunks_name, "repo", FACET_LIMIT)
+        except Exception:                              # noqa: BLE001 — see the docstring
+            hits = None
+        if hits is not None and len(hits) < FACET_LIMIT:
+            return {h.get("value") for h in hits if h.get("value")}
+
         return {(p.get("payload") or {}).get("repo")
                 for p in self.q.scroll_all(self.chunks_name)}
 
