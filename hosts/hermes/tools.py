@@ -376,6 +376,12 @@ def _repos_list(args: dict, cfg) -> str:
     return _ok(_repos(cfg).list_request())
 
 
+def _repos_refresh(args: dict, cfg) -> str:
+    repo = _require(args, "repo")
+
+    return _ok(_repos(cfg).refresh(repo))
+
+
 def _repos_register(args: dict, cfg) -> str:
     repo = _require(args, "repo")
 
@@ -768,6 +774,25 @@ SCHEMAS = [
         },
     },
     {
+        "name": "repos_refresh",
+        "description": ("Reindex the files of one repository that CHANGED on disk since they "
+                        "were indexed. The archive is permanent, so a file edited after "
+                        "indexing returns text that is no longer there — every search hit "
+                        "says so with a 'stale' reason, and this is what fixes it. Only "
+                        "changed files are re-embedded; unchanged ones cost nothing. A file "
+                        "that was deleted is REPORTED as missing and its chunks are kept, "
+                        "because deletion here is explicit and permanent (repos_drop). Use it "
+                        "when a search comes back marked stale, or after pulling changes."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string",
+                         "description": "The repository to refresh, as shown by repos_list."},
+            },
+            "required": ["repo"],
+        },
+    },
+    {
         "name": "repos_list",
         "description": ("List the indexed repositories, with their labels, checkouts, how "
                         "many files and chunks their last indexing wrote and when that was "
@@ -866,6 +891,7 @@ ROUTES = {
     "docs_drop": _docs_drop,
     "repos_register": _repos_register,
     "repos_list": _repos_list,
+    "repos_refresh": _repos_refresh,
     "repos_search": _repos_search,
     "repos_add": _repos_add,
     "repos_drop": _repos_drop,

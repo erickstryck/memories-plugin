@@ -36,7 +36,20 @@ output says so — that line is never absence, it is "the rest were never judged
 
 Each hit is `score  path:start-end`, grouped by repository. A `[stale]` flag means the
 file on disk changed after it was indexed: the chunk still points at the right place, but
-read the file rather than trusting the text. Re-index with `qctx repos add` to clear it.
+read the file rather than trusting the text. **It has a repair**, and only the changed files
+cost anything:
+
+```bash
+qctx repos refresh my-project     # reindex what changed; unchanged files are free
+```
+
+A file that was DELETED comes back as `missing` and its chunks are kept — deleting an archive
+here is explicit and permanent (`repos drop`), so `missing` is a signal to decide, not an
+automatic removal.
+
+To stop doing it by hand, `qctx repos install-hook my-project` writes a git `post-commit` that
+refreshes in the background after each commit. It never commits, stages or pushes anything, it
+cannot fail a commit, and it refuses to overwrite a `post-commit` another tool already owns.
 
 **When nothing matches, the output says so in a sentence.** An empty screen would read as
 "there is nothing about this", which is the one conclusion this must never let you draw

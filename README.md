@@ -576,6 +576,8 @@ the CLI name is on the left, the hermes tool name on the right.
 | `repos add` | `repos_add` | index the given files under it |
 | `repos search` | `repos_search` | search one repository, or `--all` to ask which ones mention it |
 | `repos list` | `repos_list` | every repository, with counts and when it was last indexed |
+| `repos refresh` | `repos_refresh` | reindex the files that changed on disk since indexing |
+| `repos install-hook` | — *(CLI only)* | a git `post-commit` that refreshes after each commit |
 | `repos drop` | `repos_drop` | delete a repository archive, permanently |
 
 ### Configuration and diagnostics — CLI only

@@ -570,6 +570,48 @@ def cmd_repos_add(args, cfg):
         print(f"  skipped {path}: {why}")
 
 
+def cmd_repos_refresh(args, cfg):
+    report = core.build_repos(cfg).refresh(args.repo)
+    if args.json:
+        output(report, True)
+
+        return
+    counts = {}
+    for row in report:
+        counts[row["action"]] = counts.get(row["action"], 0) + 1
+        if row["action"] != "ok":
+            print(f"{row['action']:<10} {row['path']}"
+                  + (f"  ({row['reason']})" if row.get("reason") else ""))
+    if not report:
+        # The same rule the listing follows: an empty screen reads as a broken command.
+        print(f"nothing is indexed under {args.repo!r}")
+
+        return
+    print(f"\n{counts.get('reindexed', 0)} reindexed, {counts.get('ok', 0)} unchanged, "
+          f"{counts.get('missing', 0)} missing, {counts.get('skipped', 0)} skipped")
+
+
+def cmd_repos_install_hook(args, cfg):
+    from core import githook
+
+    result = githook.install(args.repo, args.path or os.getcwd(), force=args.force)
+    if args.json:
+        output(result, True)
+
+        return
+    if result["action"] == "installed":
+        print(f"post-commit hook installed at {result['hook']}")
+        print(f"commits in {result['root']} now refresh {args.repo!r} in the background")
+    elif result["action"] == "already":
+        print(f"already installed at {result['hook']}")
+    else:
+        # A hook belonging to husky, pre-commit or the user is not ours to overwrite: writing
+        # over another tool's file is worse than not installing.
+        print(f"{result['hook']} exists and is not ours — nothing was written.")
+        print("Add this line to it yourself:\n")
+        print(f"    {result['line']}")
+
+
 def cmd_repos_drop(args, cfg):
     out = core.build_repos(cfg).drop_request(args.repo, args.yes)
     if args.json:
@@ -748,6 +790,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("repo")
     p.add_argument("paths", nargs="+")
     p.set_defaults(fn=cmd_repos_add)
+
+    p = repsub.add_parser("refresh", help="reindex the files that changed on disk")
+    p.add_argument("repo")
+    p.set_defaults(fn=cmd_repos_refresh)
+
+    p = repsub.add_parser("install-hook",
+                          help="install a git post-commit hook that refreshes on every commit")
+    p.add_argument("repo")
+    p.add_argument("--path", help="the working copy (default: the current directory)")
+    p.add_argument("--force", action="store_true",
+                   help="replace a hook this plugin wrote before")
+    p.set_defaults(fn=cmd_repos_install_hook)
 
     p = repsub.add_parser("drop", help="delete a repository archive, permanently")
     p.add_argument("repo")

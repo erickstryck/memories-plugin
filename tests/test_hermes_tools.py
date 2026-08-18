@@ -35,6 +35,7 @@ EXPECTED = {
     "memory_update", "memory_delete", "memory_list", "memory_search_collections",
     "docs_index", "docs_keep", "docs_search", "docs_list", "docs_refresh", "docs_drop",
     "repos_list", "repos_search", "repos_add", "repos_drop", "repos_register",
+    "repos_refresh",
 }
 FORBIDDEN = {"setup", "config_set", "config_detect", "config_show", "collections"}
 

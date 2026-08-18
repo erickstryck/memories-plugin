@@ -1020,8 +1020,12 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: Deliberately not tools. Configuration belongs to the operator: a `config set` tool
     #: would let the model point the archive somewhere else mid-conversation, and `setup` is
     #: interactive. The CLI keeps all of them.
+    #: `repos_install_hook` joins them for a different reason, and it is worth naming: it
+    #: writes an EXECUTABLE FILE into the user's own git repository. A person typing that
+    #: command has decided to; a model calling it mid-conversation has decided for them, in a
+    #: directory the plugin does not own. The CLI keeps it.
     NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
-                         "config_detect"}
+                         "config_detect", "repos_install_hook"}
 
     def setUp(self):
         from hosts.hermes import tools
@@ -1057,16 +1061,25 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
         other is exactly the divergence this file exists to catch."""
         from hosts.hermes import tools as hermes_tools
 
-        cli_verbs = {"list", "search", "add", "drop", "register"}
+        # `install-hook` is absent on purpose and not an omission: see NOT_FOR_THE_MODEL.
+        cli_verbs = {"list", "search", "add", "drop", "register", "refresh"}
         # SCHEMAS is the surface the host actually consumes
         # (hosts/hermes/__init__.py:251 deep-copies it); dispatch() routes the calls.
         hermes_names = {t["name"] for t in hermes_tools.SCHEMAS
                         if t["name"].startswith("repos_")}
         self.assertEqual({n.split("repos_", 1)[1] for n in hermes_names}, cli_verbs)
-        # And the same set from the CLI's own walk, so this cannot pass by both sides
-        # being wrong in the same way: the verbs above are asserted to be REAL.
-        self.assertEqual({n.split("repos_", 1)[1] for n in self.cli_names
-                          if n.startswith("repos_")}, cli_verbs)
+        # And the same set from the CLI's own walk, so this cannot pass by both sides being
+        # wrong in the same way: the verbs above are asserted to be REAL. Expressed as the
+        # INVARIANT rather than a second literal list — the CLI's repository verbs, minus the
+        # ones deliberately withheld from the model, are exactly what hermes exposes — so a
+        # future withheld verb needs one edit and not two that can disagree.
+        from_cli = {n.split("repos_", 1)[1] for n in self.cli_names if n.startswith("repos_")}
+        withheld = {n.split("repos_", 1)[1] for n in self.NOT_FOR_THE_MODEL
+                    if n.startswith("repos_")}
+        self.assertEqual(from_cli - withheld, cli_verbs)
+        self.assertTrue(withheld <= from_cli,
+                        f"a verb is withheld from the model that the CLI does not have: "
+                        f"{withheld - from_cli}")
 
 
 class TestTheToolsDoWhatTheCLIDoes(unittest.TestCase):

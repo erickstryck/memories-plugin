@@ -28,7 +28,8 @@ from dataclasses import dataclass
 
 from . import ports
 from .chunk import chunk_text, mode_for_suffix
-from .docs import _iso, _point_id, _read_source, content_digest, doc_id_for, source_changed
+from .docs import (GONE, _iso, _point_id, _read_source, content_digest, doc_id_for,
+                    source_changed)
 from .errors import CoreError
 from .qdrant import QdrantError, _is_absent
 
@@ -353,6 +354,75 @@ class RepoIndex:
             raise RepoError(f"the repository registry could not be read: {exc}") from exc
 
         return sorted((r for r in rows if r.get("repo")), key=lambda r: r["repo"])
+
+    def refresh(self, repo: str) -> list[dict]:
+        """Reindexes the files of `repo` whose content changed on disk since indexing.
+
+        WHY IT EXISTS. The archive is permanent by design, so a file edited after indexing
+        returns text that is no longer there. Search already SAYS so — every hit carries a
+        `stale` reason — and that warning was the entire repair story for repositories, while
+        `docs` has had `refresh` since the library existed. Same permanence, same problem, and
+        only one of the two had the fix.
+
+        NOTHING HERE RUNS BY ITSELF. This plugin has no daemon and no watcher, deliberately
+        (`core/docs.py` states the rule and the reason). What calls this is a git `post-commit`
+        hook the user installs on purpose, or the user.
+
+        EACH PATH IS JUDGED ONCE. A file is stored as N chunks carrying the same source
+        metadata; judging per chunk would re-embed it N times and report it N times.
+
+        A FILE THAT VANISHED IS REPORTED, NOT DELETED. Deletion in this plugin is explicit and
+        permanent — `drop_request` refuses without confirmation — so a repair does not quietly
+        remove an archive. Its hits stay, and they stay MARKED, which is a visible state the
+        user can act on; dropping them here would be a deletion nobody asked for.
+
+        ONE BAD FILE DOES NOT END THE BATCH, the rule `add_files` already follows: a batch stops
+        being usable the moment one unreadable member can abort it.
+        """
+        self._require_slug(repo)
+        known = {r["repo"] for r in self.list_repos()}
+        if repo not in known:
+            raise RepoError(f"repository {repo!r} is not indexed")
+
+        report = []
+        for path, md in sorted(self._indexed_sources(repo).items()):
+            reason = source_changed(path, md.get("src_mtime"), md.get("src_size"),
+                                    md.get("src_digest"))
+            if reason == GONE:
+                report.append({"path": path, "action": "missing", "reason": reason})
+                continue
+            if reason is None:
+                report.append({"path": path, "action": "ok"})
+                continue
+            # `add_files` replaces this path's chunks rather than adding to them, and reports
+            # rather than raising — so a file that became unreadable between the scan and here
+            # lands as a skip instead of ending the refresh.
+            out = self.add_files(repo, [path])
+            if out.get("skipped"):
+                report.append({"path": path, "action": "skipped",
+                               "reason": out["skipped"][0].get("reason", "unreadable")})
+                continue
+            report.append({"path": path, "action": "reindexed", "chunks": out.get("chunks", 0),
+                           "reason": reason})
+
+        return report
+
+    def _indexed_sources(self, repo: str) -> dict:
+        """`path -> source metadata`, one entry per FILE, for the chunks of one repository.
+
+        Filtered by `repo` server-side: the archive is a single collection keyed by that field,
+        and a scan without the filter would judge — and re-embed — every repository on the
+        machine.
+        """
+        found = {}
+        filter_ = {"must": [{"key": "repo", "match": {"value": repo}}]}
+        for point in self.q.scroll_all(self.chunks_name, filter_=filter_):
+            md = (point.get("payload") or {}).get("metadata") or {}
+            path = md.get("path")
+            if path and path not in found:
+                found[path] = md
+
+        return found
 
     def candidates_for(self, root: str, remotes: list[str]) -> dict:
         """The choice to offer for this working copy. Presenting it is the host's job.
