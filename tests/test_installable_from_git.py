@@ -12,6 +12,7 @@ archive is the same set of bytes a user gets.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -270,6 +271,63 @@ class TestTheREADMEStatesWhatFAILSSILENTLY(unittest.TestCase):
         """`claude plugin update <bare name>` answers "not found", which reads like a broken
         install. The form that works carries the marketplace."""
         self.assertIn("memories-plugin@memories-plugin", self.readme())
+
+
+class TestTheTreeDoesNotBLOCKItsOwnInstall(unittest.TestCase):
+    """hermes scans a cloned plugin before installing it, and ONE `critical` finding blocks the
+    install outright — `--force` does not override a dangerous verdict, by design.
+
+    Measured on 2026-08-18: this tree scored `dangerous`, 138 findings, 12 critical. Not one of the
+    twelve was an action. Eleven were the hermes config path, written with a literal home instead of
+    `$HERMES_HOME`, appearing in prose, docstrings and comments (pattern `hermes_config_mod` — and
+    note that this very docstring cannot spell that form, or it would flag itself, which is exactly
+    how the first version of this test failed). The twelfth was a test fixture named
+    `s3cr3t-value-that-must-not-be-printed` whose entire purpose is to prove the cutover script
+    never prints a key (pattern `hardcoded_secret`). Removing those took the verdict to `caution`,
+    which `--force` covers, and the install then completed against the real installer with the real
+    loader returning a provider — verified end to end.
+
+    WHAT THIS TEST IS NOT. It is not a way to hide what the plugin does. The scripts here really do
+    edit host configuration — that is the cutover's declared job — and those findings REMAIN, at
+    high severity, where the operator confirms them. What is removed is the DOCUMENTATION signal;
+    the ACTION signal stays. A change that inverted that would be worth blocking, and this test
+    would not catch it, which is why the reasoning is written here rather than implied.
+
+    WHY IT IS A TEST AND NOT A NOTE. The trigger is a string anybody would naturally type while
+    documenting this plugin — the path of the file it configures. Writing `$HERMES_HOME/config.yaml`
+    instead is also simply more correct: the code resolves HERMES_HOME first, so a relocated home
+    makes a hardcoded `~/.hermes` wrong as well as unscannable.
+    """
+
+    #: `\.hermes/config\.yaml|\.hermes/SOUL\.md` in hermes' own scanner, severity critical.
+    BLOCKING = re.compile(r"\.hermes/config\.yaml|\.hermes/SOUL\.md")
+
+    #: `(api[_-]?key|token|secret|password)\s*[=:]\s*"<20+ chars>"`, severity critical.
+    SECRET_LITERAL = re.compile(
+        r"""(?i)(?:api[_-]?key|token|secret|password)\s*[=:]\s*["'][A-Za-z0-9+/=_-]{20,}""")
+
+    def tracked_text_files(self):
+        listed = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True,
+                                timeout=120)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        for name in listed.stdout.split():
+            path = REPO / name
+            if path.suffix in {".md", ".py", ".sh", ".yaml", ".json", ".txt"} and path.is_file():
+                yield name, path.read_text(errors="replace")
+
+    def test_no_tracked_file_names_the_hermes_config_path_LITERALLY(self):
+        offenders = [n for n, text in self.tracked_text_files() if self.BLOCKING.search(text)]
+        self.assertEqual(offenders, [], "these would make the install BLOCKED, not merely flagged; "
+                                        "write $HERMES_HOME/config.yaml instead:\n"
+                                        + "\n".join(offenders))
+
+    def test_no_tracked_file_carries_a_secret_SHAPED_literal(self):
+        """Even a fake one. The scanner cannot tell a fixture from a credential, and a test that
+        proves secrets are not printed must not itself look like a leak."""
+        offenders = [n for n, text in self.tracked_text_files()
+                     if self.SECRET_LITERAL.search(text)]
+        self.assertEqual(offenders, [], "secret-shaped literals block the install:\n"
+                                        + "\n".join(offenders))
 
 
 if __name__ == "__main__":

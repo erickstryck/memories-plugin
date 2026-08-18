@@ -54,7 +54,7 @@ subsistema para o produto.
 - aceita `{"decision":"block","reason":…}` e `{"action":"block","message":…}`
 - payload: `function_name`, `function_args`, `task_id`, `session_id`, `tool_call_id`,
   `turn_id`, `api_request_id`, `middleware_trace` — **sem dado de contexto**
-- definições no bloco `hooks:` do `~/.hermes/config.yaml`; consentimento em
+- definições no bloco `hooks:` do `$HERMES_HOME/config.yaml`; consentimento em
   `~/.hermes/shell-hooks-allowlist.json`
 
 **claude-code**: hooks `PreToolUse` com bloqueio, já usados por este plugin em

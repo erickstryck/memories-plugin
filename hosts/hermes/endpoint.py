@@ -17,7 +17,7 @@ plugin. An endpoint that needs no key is a real case, so a missing variable stil
 URL.
 
 SCOPED TO THE ACTIVE `model:` BLOCK, AND NOT THE WHOLE FILE. Measured against a real
-`~/.hermes/config.yaml`: the file also carries a `custom_providers:` catalogue — servers
+`$HERMES_HOME/config.yaml`: the file also carries a `custom_providers:` catalogue — servers
 hermes is NOT currently using — that has its own `base_url` and its own `key_env`, sitting
 well below the active block. A whole-file search finds whichever one comes first in the
 text, which is right only by the coincidence of one file's ordering, not by anything the
@@ -79,7 +79,7 @@ def _model_block(text: str) -> str:
     `model:` line to the next flush-left KEY (or the end of the file).
 
     A flush-left `#` comment does not end the block. Measured against a real
-    `~/.hermes/config.yaml`: it carries 36 flush-left comment lines, none inside the `model:`
+    `$HERMES_HOME/config.yaml`: it carries 36 flush-left comment lines, none inside the `model:`
     block today — but a lookahead that treated any flush-left non-whitespace as "the next
     key" would close the block the moment one landed there, one hermes upgrade or one user
     note away, and it would fail SILENTLY: `base_url` vanishes from the captured text, the

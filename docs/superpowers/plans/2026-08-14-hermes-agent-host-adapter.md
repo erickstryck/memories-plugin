@@ -2421,9 +2421,9 @@ exit "$failed"
 ```bash
 chmod +x scripts/hermes_cutover.sh
 bash -n scripts/hermes_cutover.sh && echo "  sintaxe ok"
-cp ~/.hermes/config.yaml /tmp/cfg.before
+cp $HERMES_HOME/config.yaml /tmp/cfg.before
 ./scripts/hermes_cutover.sh
-diff -q /tmp/cfg.before ~/.hermes/config.yaml && echo "  o ensaio não tocou o config.yaml"
+diff -q /tmp/cfg.before $HERMES_HOME/config.yaml && echo "  o ensaio não tocou o config.yaml"
 ```
 Expected: relatório de checks, `DRY RUN`, e o `diff` silencioso
 

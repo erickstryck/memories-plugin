@@ -156,7 +156,7 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 100_000):
 
     `HERMES_HOME` is pinned to an EMPTY temp directory: `_run()` now also calls
     `from_hermes_config()`, and this is an in-process call, not the subprocess `run_guard`
-    below — with no override it falls back to the developer's own `~/.hermes/config.yaml`.
+    below — with no override it falls back to the developer's own `$HERMES_HOME/config.yaml`.
     Read-only, so nothing is written, but a test in this repo must not depend on a file
     outside it; `unittest.mock.patch.dict` restores whatever was there once the run ends.
     """

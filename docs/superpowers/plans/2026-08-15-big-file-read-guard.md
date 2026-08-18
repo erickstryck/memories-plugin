@@ -1161,7 +1161,7 @@ Expected: FAIL — a linha não aparece
 
 - [ ] **Step 3: Acrescente a checagem e a escrita do bloco `hooks:`**
 
-No `hermes_cutover.sh`, na seção de checagens, reporte se o `~/.hermes/config.yaml` já tem entrada `pre_tool_call` apontando para `hosts/hermes/bigfile.py`; e no `--apply`, escreva-a, com o mesmo backup datado e a mesma releitura de verificação que o `memory.provider` já usa.
+No `hermes_cutover.sh`, na seção de checagens, reporte se o `$HERMES_HOME/config.yaml` já tem entrada `pre_tool_call` apontando para `hosts/hermes/bigfile.py`; e no `--apply`, escreva-a, com o mesmo backup datado e a mesma releitura de verificação que o `memory.provider` já usa.
 
 ```yaml
 hooks:

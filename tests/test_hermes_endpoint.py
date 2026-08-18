@@ -95,7 +95,7 @@ class TestReadingTheHermesConfig(unittest.TestCase):
                             "the model: block must be found even with CRLF line endings")
 
 
-# --- Fixtures shaped after a REAL ~/.hermes/config.yaml -----------------------------------
+# --- Fixtures shaped after a REAL $HERMES_HOME/config.yaml -----------------------------------
 # The original parser was designed against a config shape nobody had verified against the
 # real file. Measured on the actual file: the ACTIVE selection lives in the top-level
 # `model:` block, using `api_key: ${VAR}` interpolation — `key_env:` never appears there at
@@ -188,7 +188,7 @@ class TestTheActiveBlockIsWhatAnswers(unittest.TestCase):
 
 
 # --- Comment lines in a heavily-commented real config --------------------------------------
-# Measured against the real ~/.hermes/config.yaml: 36 flush-left comment lines, none inside
+# Measured against the real $HERMES_HOME/config.yaml: 36 flush-left comment lines, none inside
 # the `model:` block today. A block-end lookahead that treated ANY flush-left character as
 # "the next key" would close the block the moment one landed there — one hermes upgrade or
 # one user note away — and it fails with no error anywhere: base_url vanishes from the

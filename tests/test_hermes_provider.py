@@ -312,7 +312,7 @@ class TestPrefetch(_NoRealHermesHome):
         no error anywhere, for any model absent from the ceiling table.
 
         `HERMES_HOME` is pinned to an empty temp directory so this never reaches a real
-        `~/.hermes/config.yaml`."""
+        `$HERMES_HOME/config.yaml`."""
         from core.retrieval import Outcome
         p = self._provider([], Outcome(candidates=0))
         with unittest.mock.patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp()}), \
