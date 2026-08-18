@@ -62,6 +62,24 @@ language, not just semantics. Consequences in the design:
 - In **memory** search, the re-rank keeps the veto: there precision matters more than
   reach, and a false positive pollutes the agent's context.
 
+## Contributing
+
+`main` is protected. What that means depends on who you are:
+
+- **Outside contributors** — fork, open a pull request. Direct pushes are refused, conversations
+  on a PR must be resolved before it merges, and `main` can be neither force-pushed nor deleted by
+  anyone at all, including the owner.
+- **The owner** pushes to `main` directly. That is deliberate: this is a personal plugin with one
+  maintainer, and a PR to oneself is a form with no reader. The rules exist to keep *someone else's*
+  change reviewed, not to stage a review that never happens.
+
+There is no CI yet, so a pull request is not gated on the tests. Run them before opening one — the
+suite is offline, needs no network and no dependencies:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 ## Installation
 
 **From zero to working, in order.** Each step is expanded below; nothing here is optional except
