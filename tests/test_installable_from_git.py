@@ -131,7 +131,7 @@ class TestTheHermesManifestDescribesWhatSHIPS(unittest.TestCase):
         answering less."""
         keys = top_level_keys(REPO / "plugin.yaml")
         self.assertNotIn("provides_tools", keys)
-        for required in ("manifest_version", "name", "version", "description"):
+        for required in ("manifest_version", "name", "description"):
             with self.subTest(field=required):
                 self.assertIn(required, keys)
 
@@ -179,16 +179,24 @@ class TestTheClaudeManifestsStayTRUE(unittest.TestCase):
                     seen += 1
         self.assertGreaterEqual(seen, 3, "the three hooks this plugin ships are not all declared")
 
-    def test_the_version_lives_in_ONE_place(self):
-        """It used to be in both manifests, and the copies had already drifted from the
-        installed record (0.3.0 declared, 0.2.0 installed — measured). Two copies of one fact
-        is the drift; the marketplace entry inherits from plugin.json."""
+    def test_NO_manifest_declares_a_version(self):
+        """The commit is the version, on both hosts, and this test is the decision.
+
+        A hand-maintained version string had already gone stale here: the manifests said 0.3.0
+        while `claude plugin list` reported 0.2.0 installed — measured. claude-code auto-versions
+        from the commit SHA when the field is absent, so every push is deliverable rather than
+        waiting on someone remembering to bump; hermes reads the field for display only and its
+        `plugins update` is a git pull. `--ref <sha>` is how a specific commit gets pinned.
+
+        The claude validator WARNS about the absent field and still passes. The warning is the
+        price of the field never lying, which is the trade being made on purpose."""
         plugin, marketplace = self.manifests()
-        self.assertIn("version", plugin)
+        self.assertNotIn("version", plugin, "plugin.json declares a version to go stale")
+        self.assertNotIn("version", top_level_keys(REPO / "plugin.yaml"),
+                         "plugin.yaml declares a version to go stale")
         for entry in marketplace["plugins"]:
             with self.subTest(plugin=entry["name"]):
-                self.assertNotIn("version", entry,
-                                 "the marketplace entry carries a second version to forget")
+                self.assertNotIn("version", entry)
 
     def test_the_marketplace_points_at_this_repository(self):
         """`source: ./` is what makes one repository both the plugin and its marketplace, which
