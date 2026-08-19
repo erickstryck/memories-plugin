@@ -39,10 +39,27 @@ class TestTheQueue(unittest.TestCase):
         self.assertEqual(jobs.next_pending()["repo"], "alpha")
 
     def test_next_pending_SKIPS_what_is_already_running(self):
-        """One job at a time: two processes on the same repo would duplicate the work."""
+        """One job at a time: two workers on one repository duplicate the work without
+        finishing sooner.
+
+        TWO jobs, deliberately. With only a running one the pending list is empty and
+        `next_pending` returns None without ever consulting the guard — the test would pass
+        with the guard deleted, which is exactly what the mutation probe measured.
+        """
         jobs.enqueue("alpha", "index", ["/a.py"])
         jobs.update("alpha", state=jobs.RUNNING)
-        self.assertIsNone(jobs.next_pending())
+        jobs.enqueue("beta", "index", ["/b.py"])
+        self.assertIsNone(jobs.next_pending(),
+                          "a second job was handed out while one was already running")
+
+    def test_next_pending_RESUMES_once_nothing_is_running(self):
+        """The other half. A guard that never hands out work would satisfy the test above,
+        so something has to prove the queue still moves."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING)
+        jobs.enqueue("beta", "index", ["/b.py"])
+        jobs.update("alpha", state=jobs.DONE)
+        self.assertEqual(jobs.next_pending()["repo"], "beta")
 
     def test_enqueuing_the_same_repo_again_REPLACES_the_job(self):
         """Asking again means asking about the current state of the disk, not summing onto the
