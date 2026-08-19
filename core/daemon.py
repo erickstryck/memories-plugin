@@ -267,23 +267,34 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
 
 
 def _run_one(job: dict, work) -> None:
-    repo = job["repo"]
+    """Runs one job and records its outcome ON THAT JOB, never on whatever the repository has
+    by the time it finishes.
+
+    EVERY WRITE HERE IS A COMPARE-AND-SET on the job's `id`. Job files are addressed by
+    repository, so `add-all` typed while the daemon is mid-job replaces the record — and the
+    daemon then stamped ITS result onto the newcomer. REPRODUCED before the fix: the new job
+    ended `state=done, done=0, total=2` with neither of its files indexed, and `status` called
+    it a success. With `only_if`, the stale write simply does not land: the new job stays
+    PENDING and the next cycle picks it up, which is what queueing it meant.
+    """
+    repo, jid = job["repo"], job.get("id")
     if jobs.cancel_requested(repo):
-        jobs.update(repo, state=jobs.CANCELLED)
+        jobs.update(repo, only_if=jid, state=jobs.CANCELLED)
 
         return
-    jobs.update(repo, state=jobs.RUNNING, daemon_pid=os.getpid(), error="")
+    jobs.update(repo, only_if=jid, state=jobs.RUNNING, daemon_pid=os.getpid(), error="")
     try:
         work(job)
     except Exception as exc:                        # noqa: BLE001 — see the docstring of `run`
-        jobs.update(repo, state=jobs.FAILED, error=f"{type(exc).__name__}: {exc}"[:400])
+        jobs.update(repo, only_if=jid, state=jobs.FAILED,
+                    error=f"{type(exc).__name__}: {exc}"[:400])
 
         return
     if jobs.cancel_requested(repo):
-        jobs.update(repo, state=jobs.CANCELLED)
+        jobs.update(repo, only_if=jid, state=jobs.CANCELLED)
 
         return
-    jobs.update(repo, state=jobs.DONE, current="")
+    jobs.update(repo, only_if=jid, state=jobs.DONE, current="")
 
 
 def _write_record(entry: dict) -> bool:

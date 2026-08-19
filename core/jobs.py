@@ -12,6 +12,7 @@ activity. `reap` is what turns that into an honest "interrupted".
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 
 from .errors import CoreError
@@ -51,7 +52,7 @@ def enqueue(repo: str, kind: str, paths: list[str], total: int | None = None) ->
     job = {"repo": repo, "kind": kind, "paths": list(paths),
            "total": len(paths) if total is None else int(total),
            "done": 0, "current": "", "state": PENDING, "error": "",
-           "daemon_pid": 0, "queued_at": time.time()}
+           "daemon_pid": 0, "queued_at": time.time(), "id": uuid.uuid4().hex}
     
     if not _write(repo, job):
         raise JobError(f"could not queue job for {repo}: state directory is unavailable")
@@ -87,11 +88,19 @@ def all_jobs() -> list[dict]:
     return out
 
 
-def update(repo: str, **fields) -> dict | None:
+def update(repo: str, only_if: str | None = None, **fields) -> dict | None:
     """Merges `fields` into the job. None when there is no job — it never CREATES one.
 
     Creating one here would let a late update resurrect a job that had already finished, which
     is exactly the kind of state that outlives the thing it describes.
+
+    `only_if` IS THE JOB'S `id`, AND WITHOUT IT THIS FUNCTION WRITES TO WHATEVER JOB THE REPO
+    HAS NOW — not the one the caller is holding. A job file is addressed by repository, so a
+    daemon that started job A, and finished it after the user queued job B, stamped its result
+    onto B. REPRODUCED: `state=done, done=0, total=2` with B's paths never indexed, and
+    `status` reporting success. Passing `only_if` makes the write a compare-and-set: it lands
+    only while the job on disk is still the one being described. A caller that legitimately
+    means "whatever job is there" (a reaper cleaning up after a dead daemon) omits it.
 
     Tolerates write failures: losing one progress write is a stale number that the next write
     corrects. The cost of crashing is worse than the cost of stale progress.
@@ -99,6 +108,8 @@ def update(repo: str, **fields) -> dict | None:
     job = load(repo)
     if job is None:
         return None
+    if only_if is not None and job.get("id") != only_if:
+        return None                     # superseded: this update describes a job that is gone
     job.update(fields)
     _write(repo, job)
 

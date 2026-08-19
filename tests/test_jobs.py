@@ -219,5 +219,53 @@ class TestAJobThatOUTLIVEDItsDaemon(unittest.TestCase):
         self.assertEqual(jobs.load("alpha")["state"], jobs.PENDING)
 
 
+class TestAJobWriteLandsOnTheJobItDescribes(unittest.TestCase):
+    """Whole-project review, finding 3. Job files are addressed by REPOSITORY, so `add-all`
+    typed while the daemon is mid-job replaces the record -- and the daemon then stamped its
+    own result onto the newcomer. Reproduced before the fix: the new job ended
+    `state=done, done=0, total=2` with neither file indexed, and `status` reported success.
+    The user is told their work finished when it never started."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_finished_job_does_not_stamp_its_result_on_its_replacement(self):
+        from core import daemon
+        old = jobs.enqueue("alpha", "index", ["/a.py"])
+
+        def work(job):
+            jobs.enqueue("alpha", "index", ["/new1.py", "/new2.py"])   # arrives mid-job
+
+        daemon._run_one(old, work)
+        job = jobs.load("alpha")
+        self.assertEqual(job["state"], jobs.PENDING,
+                         "the replacement was marked finished by the job it replaced")
+        self.assertEqual(job["paths"], ["/new1.py", "/new2.py"],
+                         "this asserts the wrong thing if the replacement is not on disk")
+
+    def test_the_replacement_is_still_picked_up_afterwards(self):
+        """Not losing the write is only half of it -- the queued work must still run."""
+        from core import daemon
+        old = jobs.enqueue("alpha", "index", ["/a.py"])
+        daemon._run_one(old, lambda job: jobs.enqueue("alpha", "index", ["/new.py"]))
+        nxt = jobs.next_pending()
+        self.assertIsNotNone(nxt, "the replacement was dropped instead of run")
+        self.assertEqual(nxt["paths"], ["/new.py"])
+
+    def test_an_update_without_only_if_still_writes_to_whatever_job_is_there(self):
+        """`reap` cleans up after a daemon that died holding a job it cannot name, so the
+        unguarded form has to keep working."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        self.assertIsNotNone(jobs.update("alpha", state=jobs.FAILED))
+        self.assertEqual(jobs.load("alpha")["state"], jobs.FAILED)
+
+    def test_two_enqueues_get_different_ids(self):
+        """The guard is only as good as the identity behind it. An id that repeats -- a
+        counter, a state tuple -- lets a stale write match the new job and land anyway."""
+        first = jobs.enqueue("alpha", "index", ["/a.py"])["id"]
+        second = jobs.enqueue("alpha", "index", ["/a.py"])["id"]
+        self.assertNotEqual(first, second, "identical jobs share an id, so the guard is blind")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

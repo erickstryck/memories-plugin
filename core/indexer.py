@@ -8,6 +8,7 @@ stopping between them leaves the archive consistent, and what was indexed STAYS 
 index answers questions about the part it has, and re-running skips whatever did not change.
 """
 import os
+import subprocess
 
 from . import jobs, scan
 
@@ -43,7 +44,9 @@ def work(cfg=None, index=None, batch: int = BATCH):
             chunk = paths[start:start + batch]
             target.add_files(repo, chunk)
             done += len(chunk)
-            jobs.update(repo, done=done, current=chunk[-1])
+            # Same compare-and-set as the state writes in `daemon._run_one`: progress for a
+            # job that has been superseded must not be written onto its replacement.
+            jobs.update(repo, only_if=job.get("id"), done=done, current=chunk[-1])
 
     return run_job
 
@@ -71,8 +74,11 @@ def watcher(cfg=None, index=None):
                 # Already queued or running: a second job would only stack behind the first and
                 # describe a disk that has moved on by the time it ran.
                 continue
-            new_paths = _new_tracked_paths(entry, target, new_memo)
-            changed = set(target.changed_paths(repo)) | new_paths
+            # ONE archive fetch per repository per cycle, not two: `poll` answers both halves
+            # of the question ("what moved" and "what is already indexed") from a single read.
+            state = target.poll(repo)
+            new_paths = _new_tracked_paths(entry, state["indexed"], new_memo)
+            changed = set(state["changed"]) | new_paths
             if not changed:
                 seen.pop(repo, None)
                 continue
@@ -96,22 +102,39 @@ def watcher(cfg=None, index=None):
 
 
 def _index_stamp(root: str):
-    """`mtime_ns` of `<root>/.git/index`, or None when it cannot be read.
+    """`mtime_ns` of the git index that governs `root`, or None when it cannot be found.
 
     This is the cheapest honest answer to "could the set of TRACKED files have moved?". Every
     way a file becomes tracked — `git add`, `git rm`, a checkout, a merge, a stash — writes the
-    index, and nothing else this watcher cares about does. None means "no idea": a worktree or
-    submodule where `.git` is a file, a permission problem, a path that is not a repository at
-    all. Callers must treat None as "recompute", never as "unchanged", because guessing
-    "unchanged" here is how a newly tracked file stays unindexed forever in silence.
+    index, and nothing else this watcher cares about does.
+
+    ASKS GIT WHERE THE INDEX IS INSTEAD OF ASSUMING `<root>/.git/index`. In a WORKTREE — a
+    setup this plugin supports, see `core/bindings.py` — `.git` is a FILE holding a pointer,
+    and the real index lives under `<main repo>/.git/worktrees/<name>/index`. The assumed path
+    simply does not exist there, so the stamp was permanently None and the memo never hit: the
+    watcher re-ran `git ls-files` and re-sniffed 8 KB of every tracked file on every cycle,
+    forever, for exactly the users on the more advanced setup. `--absolute-git-dir` answers
+    correctly for both layouts.
+
+    None still means "no idea" — not a repository, git unavailable, a permission problem — and
+    callers must treat it as "recompute", never as "unchanged": guessing "unchanged" here is
+    how a newly tracked file stays unindexed forever, in silence.
     """
     try:
-        return os.stat(os.path.join(root, ".git", "index")).st_mtime_ns
-    except OSError:
+        out = subprocess.run(["git", "-C", root, "rev-parse", "--absolute-git-dir"],
+                             capture_output=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        git_dir = out.stdout.decode("utf-8", "replace").strip()
+        if not git_dir:
+            return None
+
+        return os.stat(os.path.join(git_dir, "index")).st_mtime_ns
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
-def _new_tracked_paths(entry: dict, target, memo: dict | None = None) -> set:
+def _new_tracked_paths(entry: dict, indexed: set, memo: dict | None = None) -> set:
     """Tracked, eligible files under any checkout of `entry` that the archive does not have a
     chunk for yet.
 
@@ -142,7 +165,7 @@ def _new_tracked_paths(entry: dict, target, memo: dict | None = None) -> set:
         if memo is not None:
             memo[repo] = (stamps, eligible)
 
-    return {p for p in eligible if p not in target.indexed_paths(repo)}
+    return {p for p in eligible if p not in indexed}
 
 
 def _build(cfg):
