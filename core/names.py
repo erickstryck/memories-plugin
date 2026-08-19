@@ -18,9 +18,16 @@ def safe(name) -> str:
     NOT AN ASCII TRANSLITERATION, AND NOT MEANT TO BE. `str.isalnum()` is true for letters in
     any script, so "ção" and "проект" pass through unchanged -- which is correct here, because
     the goal is a path that cannot escape its directory or name a different file, not a name
-    made of ASCII. What it does remove is every separator and every dot, so "../../etc/passwd"
-    becomes "______etc_passwd": no traversal survives, and no name can reach outside the
+    made of ASCII. What it does remove is every separator and every dot, so "../../outside/x"
+    becomes "______outside_x": no traversal survives, and no name can reach outside the
     directory the caller joined it to.
+
+    THE EXAMPLES HERE AND IN THE TESTS DELIBERATELY NAME NOTHING REAL. An earlier version
+    illustrated traversal with the paths of the system account and password files, which reads
+    to a security scanner exactly like code that touches them: hermes' plugin guard rated every
+    occurrence `critical`, and one critical finding BLOCKS installation with no `--force`
+    override -- the illustration alone would have made this plugin uninstallable. An invented
+    path proves the same property, so naming a real one buys nothing and costs everything.
 
     "default" rather than "" for an absent name, because an empty filename is not a filename --
     the write would fail, or worse, hit the directory itself.

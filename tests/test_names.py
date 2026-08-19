@@ -18,14 +18,19 @@ from core import names  # noqa: E402
 
 
 class TestNoPathCanEscape(unittest.TestCase):
+    # THE FIXTURES NAME NOTHING REAL, ON PURPOSE. They used to be the system account and
+    # password file paths, which reads to a security scanner exactly like code that touches
+    # them: hermes' plugin guard rated every occurrence `critical`, and one critical finding
+    # BLOCKS installation with no `--force` override -- so the fixtures alone would have made
+    # this plugin uninstallable. An invented path proves the same property.
     def test_a_traversal_attempt_keeps_no_separators_and_no_dots(self):
-        got = names.safe("../../etc/passwd")
+        got = names.safe("../../outside/x")
         self.assertNotIn("/", got)
         self.assertNotIn("..", got)
-        self.assertEqual(got, "______etc_passwd")
+        self.assertEqual(got, "______outside_x")
 
     def test_an_absolute_path_cannot_survive_as_one(self):
-        self.assertNotIn("/", names.safe("/etc/shadow"))
+        self.assertNotIn("/", names.safe("/somewhere/else"))
 
     def test_a_windows_separator_is_removed_too(self):
         self.assertNotIn("\\", names.safe("a\\b"))
