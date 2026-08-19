@@ -1028,9 +1028,13 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: same reason as `config_set`: they administer a background process and the consent to
     #: index a whole repository. A person typing the command decided to; a model calling it
     #: mid-conversation would be deciding for them.
+    #: `repos_init` (Task 7) is CLI-only for the same consent reason as `repos_add_all`: it
+    #: exists to OFFER indexing a working copy, and the offer is only meaningful put in front
+    #: of the person who can accept or refuse it and then type `repos add-all` themselves —
+    #: exposing it to the model would let the model see the offer with nobody there to answer.
     NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_install_hook", "repos_daemon",
-                         "repos_add_all", "repos_status", "repos_cancel"}
+                         "repos_add_all", "repos_status", "repos_cancel", "repos_init"}
 
     def setUp(self):
         from hosts.hermes import tools

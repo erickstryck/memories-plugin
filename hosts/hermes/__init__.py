@@ -233,6 +233,14 @@ class MemoriesProvider(_Base):
         hermes_home = kwargs.get("hermes_home")
         if hermes_home:
             self._state_dir = Path(hermes_home) / "memories-state"
+        # The provider runs INSIDE hermes, so this process IS the host: no tree to walk.
+        try:
+            from core import lease
+
+            lease.write(self._session_id, "hermes")
+        except Exception:                           # noqa: BLE001
+            pass                                    # a missing lease costs a daemon that ends
+                                                    # sooner, never a broken session
 
     def shutdown(self) -> None:
         self._store = None

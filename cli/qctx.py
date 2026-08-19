@@ -628,6 +628,34 @@ def cmd_repos_drop(args, cfg):
         print(f"dropped {out['repo']}; unbound {len(out['unbound'])} checkout(s)")
 
 
+def cmd_repos_init(args, cfg):
+    from core import bindings
+
+    root = bindings.git_root(args.path or os.getcwd())
+    if not root:
+        raise SystemExit("not inside a git working copy — run this from a project, or pass --path")
+    found = core.build_repos(cfg).candidates_for(root, bindings.remotes_of(root))
+    found["root"] = root
+    found["indexed"] = False
+    if args.json:
+        output(found, True)
+
+        return
+    if found["bound"]:
+        print(f"already indexed as {found['bound']!r}")
+
+        return
+    if found["join"]:
+        names = ", ".join(sorted(r["repo"] for r in found["join"]))
+        print(f"this working copy shares a remote with: {names}")
+    if found["taken"]:
+        # Named rather than merged: two unrelated checkouts with the same directory name are not
+        # the same repository, and deciding otherwise by an accident of naming is what the
+        # declared-identity rule exists to refuse.
+        print(f"the name {found['suggest']!r} already belongs to another repository")
+    print(f"index this working copy as:  qctx repos add-all {found['suggest']}")
+
+
 def cmd_repos_add_all(args, cfg):
     from core import bindings, daemon, jobs, scan
 
@@ -862,6 +890,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = repsub.add_parser("refresh", help="reindex the files that changed on disk")
     p.add_argument("repo")
     p.set_defaults(fn=cmd_repos_refresh)
+
+    p = repsub.add_parser("init", help="detect the repository here and OFFER to index it — "
+                                       "never indexes on its own")
+    p.add_argument("--path", help="the working copy (default: the current directory)")
+    p.set_defaults(fn=cmd_repos_init)
 
     p = repsub.add_parser("add-all", help="index a whole repository, in the background")
     p.add_argument("repo")
