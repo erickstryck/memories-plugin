@@ -1,6 +1,9 @@
+# The manifest the hermes loader sees in the SYMLINK development install
+# (~/.hermes/plugins/memories -> this directory). The git install reads the root
+# plugin.yaml instead; both deliberately declare no `version:` -- see the root file
+# for why. tests/test_hermes_provider.py pins the three keys the loader reads.
 name: memories
-version: 0.3.0
-description: "Long-term semantic memory with automatic recall, plus an index for long documents (permanent library and a temporary archive with TTL), on top of Qdrant. Shares its archives with the claude-code plugin."
+description: "Long-term semantic memory with automatic recall, plus indexes for long documents and for git repositories, on top of Qdrant. Shares its archives with the claude-code plugin."
 category: memory
 kind: exclusive
 license: MIT

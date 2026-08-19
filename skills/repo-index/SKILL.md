@@ -104,5 +104,10 @@ exact. Both are right, for different questions.
 
 Every operation above exists as a tool on hermes-agent with the same names and the same
 meaning: `repos_search` (`repo=`, `across=`, `limit=`), `repos_list`, `repos_register`,
-`repos_add`, `repos_drop` (`confirmed=`). The refusals are identical, and they are decided
-in one place for both hosts — see `core/repos.py`.
+`repos_add`, `repos_drop` (`confirmed=`), `repos_init` and `repos_refresh`. The refusals are
+identical, and they are decided in one place for both hosts — see `core/repos.py`.
+
+The levers that START, STOP or CANCEL indexing — `add-all`, `status`, `cancel`, `daemon` —
+are deliberately NOT tools here. They are the human's call, typed at the CLI: reading an
+archive costs nothing, but starting to index a repository spends real time and real
+embedding budget. `repos_init` is the tool for this, and it only OFFERS.

@@ -97,7 +97,7 @@ where it says so, and the two steps people skip are 3 and 5 — both fail silent
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 995 collected, 976 offline; no network, no deps
+python3 -m unittest discover -s tests    # 1140 collected, 1123 offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -134,7 +134,7 @@ claude plugin update memories-plugin@memories-plugin      # name@marketplace, no
 
 The version it reports is the **commit SHA**, because the manifests declare no version on purpose
 — a hand-maintained number goes stale and this one already had (0.3.0 declared, 0.2.0 installed).
-`claude plugin details memories-plugin` lists what it found: three skills, two hooks.
+`claude plugin details memories-plugin` lists what it found: three skills, three hooks.
 
 That registers, with no path for you to maintain (the hooks resolve
 `${CLAUDE_PLUGIN_ROOT}` themselves):
@@ -144,6 +144,7 @@ That registers, with no path for you to maintain (the hooks resolve
 | recall hook | every prompt, before the model sees it |
 | checkpoint hook | every Nth prompt, to write memories down |
 | big-file guard | before every `Read`, to refuse a read that would cost too much context |
+| lease hook | at session start, to claim the indexing daemon and end it with the session |
 | skills `memory` and `doc-index` | loaded on demand, when the model needs them |
 
 To check it took: `claude plugin list` shows it enabled, and the recall log at
@@ -207,7 +208,7 @@ ln -s ~/dev/memories-plugin/hosts/hermes ~/.hermes/plugins/memories
 
 **Installing is not the whole job on this host, and the missing half is silent.** A hermes plugin
 manifest has no field for shell hooks — they live only in `$HERMES_HOME/config.yaml`, behind a
-first-use consent allowlist — so `plugins install` gives you memory and the 20 tools, and the
+first-use consent allowlist — so `plugins install` gives you memory and the 22 tools, and the
 big-file read guard is **not** registered. That is what the script below is for:
 
 ```bash
@@ -683,10 +684,10 @@ core/       the portable core — no reference to a host or an agent
 cli/        the command-line interface over the core
 hooks/      the claude-code adapter: recall on every prompt, checkpoint every N
 hosts/
-  hermes/       the hermes-agent adapter: the provider object and its 15 tools
+  hermes/       the hermes-agent adapter: the provider object and its 22 tools
 skills/     memory, doc-index
 scripts/    cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
-tests/      720 offline tests + 17 integration
+tests/      1123 offline tests + 17 integration
 ```
 
 ## Design
@@ -771,9 +772,9 @@ on purpose, and both are data rather than prose:
 ## Status
 
 Done and tested: the core, the CLI, the three archives, the guided diagnostics, all three
-hooks, both skills and the plugin manifest for claude-code; the provider, its 15 tools,
+hooks, all three skills and the plugin manifest for claude-code; the provider, its 22 tools,
 the shared configuration wizard and the install script for hermes-agent; and the big-file
-read guard on both hosts. 720 offline tests and 17 integration tests against a real Qdrant
+read guard on both hosts. 1123 offline tests and 17 integration tests against a real Qdrant
 and real models.
 
 Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the
