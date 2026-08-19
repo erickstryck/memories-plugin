@@ -134,6 +134,38 @@ class TestOnlyONEDaemon(unittest.TestCase):
         self.assertEqual(len(spawned), 1)
         self.assertEqual(out["action"], "started")
 
+    def test_a_second_start_LOSES_the_race_and_does_not_spawn(self):
+        """The real race window is between `_claim()` succeeding and the real record being
+        written by `spawn` — two SEQUENTIAL calls (one fully finished before the next begins)
+        cannot tell an atomic claim from a plain check-then-write, since by the time the second
+        call runs, the first has already written its final record either way. So the second
+        `start()` is nested INSIDE the first one's `spawn`, landing exactly in that window: with
+        `_claim()`, the placeholder written before spawn already blocks it; with check-then-write,
+        nothing has been written yet at that point and the nested call sails through and spawns
+        a second daemon."""
+        spawned = []
+        nested = {}
+
+        def first_spawn(argv):
+            spawned.append(argv)
+            nested["result"] = daemon.start(spawn=lambda a: spawned.append(a) or 4_000_000)
+
+            return os.getpid()
+
+        first = daemon.start(spawn=first_spawn)
+        self.assertEqual(first["action"], "started")
+        self.assertEqual(nested["result"]["action"], "already")
+        self.assertEqual(len(spawned), 1, "a second daemon was spawned inside the race window")
+
+    def test_a_STALE_record_does_not_block_a_start_forever(self):
+        """A daemon killed without cleaning up leaves a record whose pid is dead. Without the
+        retry, that one crash would make every future start impossible."""
+        daemon._write_record({"pid": 4_000_000, "starttime": "1"})
+        spawned = []
+        out = daemon.start(spawn=lambda argv: spawned.append(argv) or os.getpid())
+        self.assertEqual(out["action"], "started")
+        self.assertEqual(len(spawned), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

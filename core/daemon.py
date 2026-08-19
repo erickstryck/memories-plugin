@@ -52,11 +52,19 @@ def record() -> dict | None:
 def start(spawn=None, argv: list[str] | None = None) -> dict:
     """Starts the daemon if none is running. `{"action": "started" | "already", "pid": int}`.
 
+    CLAIMS THE RECORD FILE BEFORE SPAWNING, not after. `record()` then `write()` is a
+    check-then-write: two commands invoked at the same moment can both read no daemon and both
+    spawn one — the gap is between two of OUR statements, not something the OS arbitrates.
+    `_claim()` instead creates `daemon.json` with `O_EXCL`, which the kernel guarantees only one
+    caller can do for a given path; the loser gets `FileExistsError` and never spawns. This is
+    the design's answer to "two daemons": exclusive creation decides who won, not a check.
+
     `spawn` is injected for tests; by default it launches a detached `qctx repos daemon run`.
     """
-    existing = record()
-    if existing:
-        return {"action": "already", "pid": existing.get("pid", 0)}
+    if not _claim():
+        existing = record()
+
+        return {"action": "already", "pid": existing.get("pid", 0) if existing else 0}
     launch = spawn or _spawn
     command = argv or [sys.executable, _qctx_path(), "repos", "daemon", "run"]
     pid = launch(command)
@@ -64,6 +72,53 @@ def start(spawn=None, argv: list[str] | None = None) -> dict:
                    "started_at": time.time()})
 
     return {"action": "started", "pid": pid}
+
+
+def _claim() -> bool:
+    """Exclusively creates the record file. True only for the caller that wins the race.
+
+    A `FileExistsError` means someone got there first — but "someone" might be a daemon that
+    crashed without cleaning up, and `record()` already knows how to tell the two apart: it
+    reads back as an entry only when the process it names is still alive. So on a collision we
+    ask `record()`. An entry means the file is genuinely held — return False, not ours. `None`
+    means the file is a corpse left by a dead daemon, and leaving it there would jam every future
+    `start()` on one crash forever, so we remove it and retry the claim EXACTLY ONCE. We do not
+    loop: a claim that fails twice means somebody else's `_claim()` won the newly-empty slot in
+    the interval between our unlink and our retry, which is the correct outcome of the race, not
+    a bug to spin around.
+    """
+    if _try_create():
+        return True
+    if record() is not None:
+        return False
+    try:
+        path().unlink()
+    except OSError:
+        pass
+
+    return _try_create()
+
+
+def _try_create() -> bool:
+    """Attempts the exclusive create. The placeholder written on success names THIS process —
+    not the daemon `start()` is about to spawn — so a concurrent `_claim()` that collides with us
+    while we are still between claiming and spawning reads back an alive entry (this process) and
+    correctly backs off, instead of mistaking our in-progress claim for a stale one and tearing
+    it out from under us. `_write_record` overwrites it with the real pid once spawning succeeds.
+    """
+    try:
+        path().parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path(), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError:
+        return False
+    try:
+        os.write(fd, json.dumps({"pid": os.getpid(),
+                                 "starttime": lease.process_start(os.getpid()) or ""},
+                                sort_keys=True).encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    return True
 
 
 def stop() -> bool:
