@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,7 +35,12 @@ def a_state_dir() -> str:
 class FakeIndex:
     """An index that can say what changed, with no Qdrant behind it."""
 
-    def __init__(self, changed=(), checkouts=("/tmp/alpha",), indexed=()):
+    # THE DEFAULT CHECKOUT MUST NOT NAME A PATH ANYTHING COULD CREATE. `watch` now shells out
+    # to `git ls-files` under every checkout, so a real repository sitting at this path would
+    # make `new_paths` non-empty and silently flip the enqueued job from `refresh` to `index`,
+    # failing tests that have nothing to do with checkouts. `/tmp/alpha` was one `mkdir` away
+    # from doing exactly that; a path under a directory that cannot exist is not.
+    def __init__(self, changed=(), checkouts=("/nonexistent/alpha",), indexed=()):
         self._changed = list(changed)
         self._checkouts = list(checkouts)
         self._indexed = set(indexed)
@@ -150,7 +156,7 @@ class TestWatching(unittest.TestCase):
 
     def test_a_stable_change_becomes_a_refresh_job_on_the_SECOND_sighting(self):
         """First sighting: noted. Second sighting, still changed: enqueued."""
-        ix = FakeIndex(changed=["/tmp/alpha/a.py"])
+        ix = FakeIndex(changed=["/nonexistent/alpha/a.py"])
         watch = indexer.watcher(index=ix)
         watch()
         self.assertIsNone(jobs.load("alpha"), "enqueued on the first sighting, with no debounce")
@@ -165,13 +171,89 @@ class TestWatching(unittest.TestCase):
 
     def test_it_does_not_queue_a_second_job_while_one_is_running(self):
         """Without this, every cycle would stack a refresh on top of the previous one."""
-        ix = FakeIndex(changed=["/tmp/alpha/a.py"])
+        ix = FakeIndex(changed=["/nonexistent/alpha/a.py"])
         watch = indexer.watcher(index=ix)
         watch(); watch()
         jobs.update("alpha", state=jobs.RUNNING)
         watch(); watch()
         self.assertEqual(jobs.load("alpha")["state"], jobs.RUNNING)
 
+
+
+class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
+    """Re-review of the fix wave, finding (d): `_new_tracked_paths` closed a real hole — a
+    newly `git add`ed file was invisible — but paid for it on EVERY cycle, forever. It is not
+    a cheap call: `scan.eligible` shells out to `git ls-files` and then stats AND opens the
+    first 8 KB of every tracked file to sniff binaries and minified bundles, and each call also
+    pulled a second full `indexed_paths()` scroll out of the archive. Measured by the reviewer:
+    ~5 ms for 114 files against 0.28 ms of stat, extrapolating to ~70-90 ms and up to 16 MB of
+    reads per cycle per repository — against the spec's stated 16 ms watch budget.
+
+    The answer is memoised against `mtime` of `.git/index`, because that file is written by
+    every operation that can change WHICH files are tracked and by nothing else the watcher
+    cares about. These tests hold the memo to both halves: it must actually skip the work, and
+    it must never skip it when the index moved.
+    """
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_second_cycle_over_an_untouched_git_index_repeats_neither_the_scan_nor_the_scroll(self):
+        root = a_git_repo()
+        track(root, "a.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        calls = []
+        real = indexer.scan.eligible
+
+        def counting(r, *a, **kw):
+            calls.append(r)
+
+            return real(r, *a, **kw)
+
+        with unittest.mock.patch.object(indexer.scan, "eligible", counting):
+            watch = indexer.watcher(index=ix)
+            watch()
+            watch()
+        self.assertEqual(len(calls), 1,
+                         "the tracked-file scan ran again although `.git/index` never moved")
+        self.assertEqual(len(ix.indexed_calls), 1,
+                         "a second archive scroll was paid for an unchanged git index")
+
+    def test_tracking_a_NEW_file_moves_the_index_and_forces_a_rescan(self):
+        """The half that matters for correctness: the memo must never answer "nothing new" for
+        an index that actually moved, or a file added while the daemon runs stays unindexed
+        forever — in silence, which is the failure mode this project refuses."""
+        root = a_git_repo()
+        track(root, "a.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed={os.path.abspath(
+            os.path.join(root, "a.py"))})
+        watch = indexer.watcher(index=ix)
+        watch()
+        watch()
+        self.assertIsNone(jobs.load("alpha"), "nothing new yet, so nothing should be queued")
+        fresh = track(root, "brand_new.py")
+        watch()
+        watch()
+        job = jobs.load("alpha")
+        self.assertIsNotNone(job, "a file tracked after the memo was warm was never noticed")
+        self.assertIn(os.path.abspath(fresh), job["paths"])
+
+    def test_an_unreadable_git_index_recomputes_rather_than_assuming_unchanged(self):
+        """A worktree or submodule keeps `.git` as a FILE, so there is no `.git/index` to
+        stamp. Guessing "unchanged" there would silently freeze the watcher for that checkout,
+        so the unknown stamp must fall back to doing the work."""
+        root = tempfile.mkdtemp()                      # no `.git` at all
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        calls = []
+        real = indexer.scan.eligible
+
+        with unittest.mock.patch.object(indexer.scan, "eligible",
+                                        lambda r, *a, **kw: calls.append(r) or real(r)):
+            watch = indexer.watcher(index=ix)
+            watch()
+            watch()
+        self.assertEqual(len(calls), 2,
+                         "an unstampable checkout was memoised as if it were known unchanged")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

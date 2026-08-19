@@ -7,6 +7,8 @@ CANCELLATION IS CHECKED BETWEEN BATCHES, not inside one. A batch is already inde
 stopping between them leaves the archive consistent, and what was indexed STAYS — a partial
 index answers questions about the part it has, and re-running skips whatever did not change.
 """
+import os
+
 from . import jobs, scan
 
 #: How many files go to `add_files` at once. Small enough that progress moves visibly and a
@@ -58,6 +60,7 @@ def watcher(cfg=None, index=None):
     twice with the same content, it is done being written.
     """
     seen: dict = {}
+    new_memo: dict = {}
 
     def watch() -> None:
         target = index if index is not None else _build(cfg)
@@ -67,8 +70,16 @@ def watcher(cfg=None, index=None):
             if job and job.get("state") in (jobs.PENDING, jobs.RUNNING):
                 # Already queued or running: a second job would only stack behind the first and
                 # describe a disk that has moved on by the time it ran.
+                #
+                # DROPS THE MEMO ON THE WAY PAST. `_new_tracked_paths` is memoised against the
+                # git index, which a job does NOT touch — it changes the ARCHIVE. So a job that
+                # indexes the very files the memo lists would leave that memo claiming they are
+                # still missing, and the watcher would queue them again, forever. Any job in
+                # flight, whoever queued it, invalidates the answer; this is the one place every
+                # job is seen.
+                new_memo.pop(repo, None)
                 continue
-            new_paths = _new_tracked_paths(entry, target)
+            new_paths = _new_tracked_paths(entry, target, new_memo)
             changed = set(target.changed_paths(repo)) | new_paths
             if not changed:
                 seen.pop(repo, None)
@@ -92,7 +103,23 @@ def watcher(cfg=None, index=None):
     return watch
 
 
-def _new_tracked_paths(entry: dict, target) -> set:
+def _index_stamp(root: str):
+    """`mtime_ns` of `<root>/.git/index`, or None when it cannot be read.
+
+    This is the cheapest honest answer to "could the set of TRACKED files have moved?". Every
+    way a file becomes tracked — `git add`, `git rm`, a checkout, a merge, a stash — writes the
+    index, and nothing else this watcher cares about does. None means "no idea": a worktree or
+    submodule where `.git` is a file, a permission problem, a path that is not a repository at
+    all. Callers must treat None as "recompute", never as "unchanged", because guessing
+    "unchanged" here is how a newly tracked file stays unindexed forever in silence.
+    """
+    try:
+        return os.stat(os.path.join(root, ".git", "index")).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _new_tracked_paths(entry: dict, target, memo: dict | None = None) -> set:
     """Tracked, eligible files under any checkout of `entry` that the archive does not have a
     chunk for yet.
 
@@ -108,14 +135,22 @@ def _new_tracked_paths(entry: dict, target) -> set:
     on a binary, a lockfile or the size ceiling.
     """
     repo = entry["repo"]
+    roots = list(entry.get("checkouts") or [])
+    stamps = tuple(_index_stamp(r) for r in roots)
+    if memo is not None and None not in stamps:
+        cached = memo.get(repo)
+        if cached is not None and cached[0] == stamps:
+            return cached[1]
     indexed = target.indexed_paths(repo)
     found = set()
-    for root in entry.get("checkouts") or []:
+    for root in roots:
         try:
             elig = scan.eligible(root)
         except Exception:                             # noqa: BLE001 — one bad checkout root
             continue                                  # must not blind the watcher to the rest
         found.update(p for p in elig["eligible"] if p not in indexed)
+    if memo is not None:
+        memo[repo] = (stamps, found)
 
     return found
 

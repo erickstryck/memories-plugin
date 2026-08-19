@@ -443,9 +443,16 @@ class RepoIndex:
         a restore that preserves both, an edit that swaps one same-length character — into
         calling a changed file unchanged, or an unchanged one changed. But every path this
         returns still goes through `refresh`, which DOES compare the digest before re-embedding
-        anything. So the worst a false positive here costs is one honest re-check in `refresh`;
-        it can never write a wrong chunk to the archive, which is the property that makes the
-        cheap half being wrong sometimes an acceptable trade rather than a correctness bug.
+        anything, so a false positive can never write a wrong chunk to the archive — that is
+        the property that makes the cheap half being wrong sometimes a cost question rather
+        than a correctness bug.
+
+        AND THE COST IS NOT SMALL, so do not read the paragraph above as "a false positive is
+        free". `refresh` walks EVERY indexed path and `source_changed` hashes each one whenever
+        a digest was recorded, so a single `touch` — or a checkout that rewrites mtimes — buys
+        a full read-and-SHA-1 pass over the repository plus a scroll, the very work this method
+        exists to keep off the polling path. What the cheap comparison actually buys is that
+        this is paid ONCE, when something looks different, instead of every ~5 s forever.
         """
         out = []
         for path, md in sorted(self._indexed_sources(repo).items()):
