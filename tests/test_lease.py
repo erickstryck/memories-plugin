@@ -110,7 +110,7 @@ class TestFindingTheHOST(unittest.TestCase):
         """On claude-code the hook is a subprocess: python3 -> bash -> claude. Measured on this
         machine in 2026-08-18."""
         found = lease.find_host_pid(names=(os.path.basename(sys.executable),))
-        self.assertIsNotNone(found, "não achou o próprio interpretador na árvore")
+        self.assertIsNotNone(found, "did not find the interpreter in the process tree")
         pid, start = found
         self.assertEqual(lease.process_start(pid), start)
 
