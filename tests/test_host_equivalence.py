@@ -1011,31 +1011,30 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     """The INVOCABLE surface, held to the CLI's.
 
     Recall and the checkpoint cadence are pushed at the model; these are what it can reach
-    for. The claim is not that the two surfaces are equal — five operations are deliberately
-    out of the model's reach — but that the difference is exactly those five, and that what
-    is offered on both does the same thing. Name parity alone would not show the second
-    half: see TestTheToolsDoWhatTheCLIDoes below.
+    for. The claim is not that the two surfaces are equal — a fixed set of operations,
+    named in NOT_FOR_THE_MODEL below, is deliberately out of the model's reach — but that
+    the difference is exactly that set, and that what is offered on both does the same
+    thing. Name parity alone would not show the second half: see
+    TestTheToolsDoWhatTheCLIDoes below.
     """
 
     #: Deliberately not tools. Configuration belongs to the operator: a `config set` tool
     #: would let the model point the archive somewhere else mid-conversation, and `setup` is
     #: interactive. The CLI keeps all of them.
-    #: `repos_install_hook` joins them for a different reason, and it is worth naming: it
-    #: writes an EXECUTABLE FILE into the user's own git repository. A person typing that
-    #: command has decided to; a model calling it mid-conversation has decided for them, in a
-    #: directory the plugin does not own. The CLI keeps it.
-    #: `repos_daemon`, `repos_add_all`, `repos_status` and `repos_cancel` join them for the
-    #: same reason as `config_set`: they administer a background process and the consent to
-    #: index a whole repository. A person typing the command decided to; a model calling it
-    #: mid-conversation would be deciding for them.
-    #: `repos_init` (Task 7) is deliberately NOT in this set, and it is worth naming why it
-    #: differs from its neighbour `repos_add_all` above: `repos_init` only calls
-    #: `candidates_for`, prints what it finds, and writes nothing — see its "writes nothing"
-    #: test in test_hermes_tools.py — while `repos_add_all` queues real work. The model may
-    #: reach the first freely, same as `repos_search`; only the human may reach the second.
+    #: `repos_daemon`, `repos_add_all`, `repos_status` and `repos_cancel` join them for a
+    #: different reason, and it is worth naming because it is not the same argument as
+    #: `config_set`'s: these four ACT — they queue indexing work, or start and stop a
+    #: process — rather than answer a question. A person typing the command has decided to;
+    #: a model calling it mid-conversation would be deciding for them, over a whole
+    #: repository or a background process it does not own. The CLI keeps all four.
+    #: `repos_init` (Task 7) is deliberately NOT in this set, and it is the contrast that
+    #: makes the line visible: `repos_init` only calls `candidates_for`, prints what it
+    #: finds, and writes nothing — see its "writes nothing" test in test_hermes_tools.py.
+    #: It ANSWERS rather than acts, same as `repos_search`, so it IS a tool; only its
+    #: neighbour `repos_add_all`, which queues the real work, is withheld.
     NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
-                         "config_detect", "repos_install_hook", "repos_daemon",
-                         "repos_add_all", "repos_status", "repos_cancel"}
+                         "config_detect", "repos_daemon", "repos_add_all", "repos_status",
+                         "repos_cancel"}
 
     def setUp(self):
         from hosts.hermes import tools
@@ -1056,7 +1055,7 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
         self.assertEqual(orphans, set(),
                          f"only hermes can do these: {orphans}")
 
-    def test_the_only_cli_operations_withheld_are_the_five_named_ones(self):
+    def test_the_only_cli_operations_withheld_are_the_named_ones(self):
         withheld = self.cli_names - self.tool_names
         self.assertEqual(withheld, self.NOT_FOR_THE_MODEL,
                          "the model's surface drifted from the CLI's by something other "
@@ -1071,7 +1070,6 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
         other is exactly the divergence this file exists to catch."""
         from hosts.hermes import tools as hermes_tools
 
-        # `install-hook` is absent on purpose and not an omission: see NOT_FOR_THE_MODEL.
         cli_verbs = {"list", "search", "add", "drop", "register", "refresh", "init"}
         # SCHEMAS is the surface the host actually consumes
         # (hosts/hermes/__init__.py:251 deep-copies it); dispatch() routes the calls.
