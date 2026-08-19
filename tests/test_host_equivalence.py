@@ -1028,13 +1028,14 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: same reason as `config_set`: they administer a background process and the consent to
     #: index a whole repository. A person typing the command decided to; a model calling it
     #: mid-conversation would be deciding for them.
-    #: `repos_init` (Task 7) is CLI-only for the same consent reason as `repos_add_all`: it
-    #: exists to OFFER indexing a working copy, and the offer is only meaningful put in front
-    #: of the person who can accept or refuse it and then type `repos add-all` themselves —
-    #: exposing it to the model would let the model see the offer with nobody there to answer.
+    #: `repos_init` (Task 7) is deliberately NOT in this set, and it is worth naming why it
+    #: differs from its neighbour `repos_add_all` above: `repos_init` only calls
+    #: `candidates_for`, prints what it finds, and writes nothing — see its "writes nothing"
+    #: test in test_hermes_tools.py — while `repos_add_all` queues real work. The model may
+    #: reach the first freely, same as `repos_search`; only the human may reach the second.
     NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_install_hook", "repos_daemon",
-                         "repos_add_all", "repos_status", "repos_cancel", "repos_init"}
+                         "repos_add_all", "repos_status", "repos_cancel"}
 
     def setUp(self):
         from hosts.hermes import tools
@@ -1071,7 +1072,7 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
         from hosts.hermes import tools as hermes_tools
 
         # `install-hook` is absent on purpose and not an omission: see NOT_FOR_THE_MODEL.
-        cli_verbs = {"list", "search", "add", "drop", "register", "refresh"}
+        cli_verbs = {"list", "search", "add", "drop", "register", "refresh", "init"}
         # SCHEMAS is the surface the host actually consumes
         # (hosts/hermes/__init__.py:251 deep-copies it); dispatch() routes the calls.
         hermes_names = {t["name"] for t in hermes_tools.SCHEMAS
