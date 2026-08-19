@@ -59,7 +59,7 @@ class MissingCollections(FakeVectorStore):
 
         return []
 
-    def scroll_all(self, name, filter_=None, with_vector=False):
+    def scroll_all(self, name, filter_=None, with_vector=False, payload_fields=None):
         if name in self._missing:
             raise self._error(name)
 

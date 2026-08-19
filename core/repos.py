@@ -42,7 +42,7 @@ class RepoError(CoreError):
 #: live in Qdrant, read by scroll and never by similarity. Size 1 says so out loud, and a
 #: unit vector avoids the zero-norm that Cosine has no answer for.
 #: How many distinct repo names a single facet may answer with. A facet AT this number is
-#: discarded rather than trusted (see `_repos_with_chunks`), so this is the point at which the
+#: discarded rather than trusted (see `_chunks_per_repo`), so this is the point at which the
 #: listing stops being cheap — not a cap on how many repositories may exist. Set far above any
 #: plausible number of repositories on one machine, so the fallback stays theoretical.
 FACET_LIMIT = 1000
@@ -423,7 +423,7 @@ class RepoIndex:
 
         return report
 
-    def changed_paths(self, repo: str) -> list[str]:
+    def changed_paths(self, repo: str, sources: dict | None = None) -> list[str]:
         """The indexed paths of `repo` whose file LOOKS changed on disk, compared by `mtime`
         and `size` ONLY. The cheap half of `refresh` — and it must actually BE cheap, because
         the watcher asks this question every ~5 s, forever, for every repository being
@@ -455,7 +455,8 @@ class RepoIndex:
         this is paid ONCE, when something looks different, instead of every ~5 s forever.
         """
         out = []
-        for path, md in sorted(self._indexed_sources(repo).items()):
+        for path, md in sorted((sources if sources is not None
+                                else self._indexed_sources(repo)).items()):
             try:
                 st = os.stat(path)
             except OSError:
@@ -471,6 +472,21 @@ class RepoIndex:
                 out.append(path)
 
         return out
+
+    def poll(self, repo: str) -> dict:
+        """`{"changed": [paths], "indexed": {paths}}` — everything the watcher needs, from ONE
+        fetch.
+
+        WHY THIS EXISTS RATHER THAN TWO CALLS. `changed_paths` and `indexed_paths` each pulled
+        their own copy of the same source metadata, so a watch cycle scrolled the archive
+        TWICE, every few seconds, per repository, to answer two halves of one question. They
+        stay public because they read well alone and the CLI uses them that way; this is the
+        method for the caller that wants both and runs on a loop.
+        """
+        sources = self._indexed_sources(repo)
+
+        return {"changed": self.changed_paths(repo, sources=sources),
+                "indexed": set(sources)}
 
     def indexed_paths(self, repo: str) -> set:
         """Every source path this repository has a chunk for. Public wrapper over
@@ -488,7 +504,11 @@ class RepoIndex:
         """
         found = {}
         filter_ = {"must": [{"key": "repo", "match": {"value": repo}}]}
-        for point in self.q.scroll_all(self.chunks_name, filter_=filter_):
+        # ONLY `metadata`, never the whole payload: the payload also holds each chunk's TEXT,
+        # and the watcher calls this every cycle. Fetching everything meant pulling the
+        # repository's entire indexed content over the network to read a few mtimes.
+        for point in self.q.scroll_all(self.chunks_name, filter_=filter_,
+                                       payload_fields=["metadata"]):
             md = (point.get("payload") or {}).get("metadata") or {}
             path = md.get("path")
             if path and path not in found:
@@ -661,9 +681,21 @@ class RepoIndex:
         ONE SCROLL FEEDS BOTH DIVERGENCE READS. They ask opposite questions of the same set,
         and this is already the expensive half of the listing.
         """
-        seen = self._repos_with_chunks()
+        counted = self._chunks_per_repo()
+        seen = set(counted)
+        # LIVE CHUNK COUNTS, WHEN THE FACET GAVE THEM. The registry's own `chunks`/`files` are
+        # "as of the last `add_files` that wrote something" — and the daemon calls that in
+        # batches of 8, so a 20-file `add-all` leaves the registry saying 4 and a later
+        # single-file `refresh` leaves it saying 1. The number was never a size, but the
+        # listing printed it where a size belongs. The facet counts the archive server-side and
+        # is already being asked; `live_chunks` is None only when the facet was unavailable and
+        # the fallback scroll had to be used, and the caller must then say so rather than
+        # substitute the stale figure.
+        repos = self.list_repos()
+        for r in repos:
+            r["live_chunks"] = counted.get(r["repo"], 0)
 
-        return {"repos": self.list_repos(),
+        return {"repos": repos,
                 "divergent": self.divergent_repos(seen),
                 "emptied": self.emptied_repos(seen)}
 
@@ -765,11 +797,16 @@ class RepoIndex:
                 f"{repo!r} again clears the remainder."
             ) from exc
 
-    def _repos_with_chunks(self) -> set:
-        """Every repo name the ARCHIVE holds a chunk under. Asked of the server, not the wire.
+    def _chunks_per_repo(self) -> dict:
+        """`{repo: chunk count}` for every repo the ARCHIVE holds a chunk under, with a count of
+        None when only the presence of the name could be established.
 
-        Both divergence directions need this same set, so it is taken once and handed to both
-        rather than read twice for one command.
+        Both divergence directions need these names, so they are taken once and handed to both
+        rather than read twice for one command. The COUNTS come free with the facet — the server
+        is already counting to answer it — and the listing needs them because the registry's own
+        `chunks` is per-batch, not a size (see `list_all`). The fallback scroll counts as it goes,
+        since it visits every point regardless — so a count is always available in practice, and
+        the None case is reserved for a caller that could not establish one at all.
 
         WHY IT IS A FACET AND NOT A SCROLL. The question is "which distinct values does one
         indexed key have", and the chunk collection already carries the keyword index on `repo`
@@ -792,7 +829,7 @@ class RepoIndex:
         except Exception:                              # noqa: BLE001 — see the docstring
             hits = None
         if hits is not None and len(hits) < FACET_LIMIT:
-            return {h.get("value") for h in hits if h.get("value")}
+            return {h["value"]: h.get("count") or 0 for h in hits if h.get("value")}
 
         # An archive that was never created holds no chunks, which is EMPTY and not a failure:
         # both collections are made on first use, so this is the state of every fresh install
@@ -801,13 +838,21 @@ class RepoIndex:
         # echoes upstream statuses into its own bodies, so a 502 mentioning 404 must still be a
         # failure. Anything that is not a 404 propagates, because "no repositories" printed
         # during an outage is a claim of absence produced by a failure.
+        counts: dict = {}
         try:
-            return {(p.get("payload") or {}).get("repo")
-                    for p in self.q.scroll_all(self.chunks_name)}
+            for point in self.q.scroll_all(self.chunks_name, payload_fields=["repo"]):
+                name = (point.get("payload") or {}).get("repo")
+                # COUNTS WHILE IT IS ALREADY HERE. This path visits every chunk point anyway,
+                # so tallying them costs nothing and spares the listing from having to say
+                # "size unknown" on exactly the servers that lack the facet index — the older
+                # ones, where a useful answer matters most.
+                counts[name] = (counts.get(name) or 0) + 1
         except QdrantError as exc:
             if _is_absent(exc):
-                return set()
+                return {}
             raise
+
+        return counts
 
     def divergent_repos(self, seen: set | None = None) -> list[str]:
         """Repos with chunks and NO registry entry — one of the two divergence directions.
@@ -822,7 +867,8 @@ class RepoIndex:
         the listing cannot even name; that one reports what the listing names wrongly.
         """
         known = {r["repo"] for r in self.list_repos()}
-        seen = self._repos_with_chunks() if seen is None else seen
+        counted = self._chunks_per_repo()
+        seen = set(counted) if seen is None else seen
 
         return sorted(r for r in seen if r and r not in known)
 
@@ -846,7 +892,8 @@ class RepoIndex:
         honestly. "Claims 50, has 7" is not reported, and must not be: reindexing a subset is
         the ordinary path.
         """
-        seen = self._repos_with_chunks() if seen is None else seen
+        counted = self._chunks_per_repo()
+        seen = set(counted) if seen is None else seen
 
         return sorted(r["repo"] for r in self.list_repos()
                       if (r.get("chunks") or 0) > 0 and r["repo"] not in seen)

@@ -166,8 +166,17 @@ class Qdrant:
         self.request("POST", f"/collections/{name}/points/delete?wait=true", {"filter": filter_})
 
     def scroll(self, name: str, limit: int = 256, offset=None,
-               with_vector: bool = False, filter_: dict | None = None) -> tuple[list[dict], object]:
-        body = {"limit": limit, "with_payload": True, "with_vector": with_vector}
+               with_vector: bool = False, filter_: dict | None = None,
+               payload_fields: list[str] | None = None) -> tuple[list[dict], object]:
+        """`payload_fields` names the payload keys to fetch; None means the whole payload.
+
+        Naming them matters for anything that runs on a loop. The watcher polls this every few
+        seconds only to read a handful of `metadata` fields, and the full payload carries the
+        CHUNK TEXT — so the cheap half of the change check was pulling the repository's entire
+        indexed content over the network on every cycle.
+        """
+        body = {"limit": limit, "with_vector": with_vector,
+                "with_payload": payload_fields if payload_fields else True}
         if offset is not None:
             body["offset"] = offset
         if filter_:
@@ -198,11 +207,16 @@ class Qdrant:
 
         return hits if isinstance(hits, list) else []
 
-    def scroll_all(self, name: str, filter_: dict | None = None, with_vector: bool = False):
-        """Iterates the whole collection, paging. A generator, so nothing is materialized."""
+    def scroll_all(self, name: str, filter_: dict | None = None, with_vector: bool = False,
+                   payload_fields: list[str] | None = None):
+        """Iterates the whole collection, paging. A generator, so nothing is materialized.
+
+        `payload_fields` is passed straight through — see `scroll`.
+        """
         offset = None
         while True:
-            points, offset = self.scroll(name, offset=offset, with_vector=with_vector, filter_=filter_)
+            points, offset = self.scroll(name, offset=offset, with_vector=with_vector,
+                                         filter_=filter_, payload_fields=payload_fields)
             for p in points:
                 yield p
             if offset is None:

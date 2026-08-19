@@ -114,9 +114,21 @@ class FakeVectorStore:
 
         return items[:limit], None
 
-    def scroll_all(self, name: str, filter_: dict | None = None, with_vector: bool = False):
+    def scroll_all(self, name: str, filter_: dict | None = None, with_vector: bool = False,
+                   payload_fields: list[str] | None = None):
+        """HONOURS `payload_fields` BY ACTUALLY DROPPING THE OTHERS, rather than merely
+        accepting the argument. A fake that returns the whole payload where production returns
+        one projected field hides the exact bug the projection can introduce: a caller that
+        goes on to read a key it no longer asked for works here and fails against a real
+        Qdrant. The fake has to be as poor as the real thing.
+        """
         items, _ = self.scroll(name, limit=10_000, filter_=filter_)
-        yield from items
+        for item in items:
+            if payload_fields:
+                keep = {k: v for k, v in (item.get("payload") or {}).items()
+                        if k in payload_fields}
+                item = dict(item, payload=keep)
+            yield item
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

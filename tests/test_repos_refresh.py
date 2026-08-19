@@ -277,5 +277,71 @@ class TestRefreshRespectsShouldStop(unittest.TestCase):
         self.assertEqual([r["action"] for r in report], ["reindexed"])
 
 
+class TestThePollDoesNotPullTheWholeArchiveOverTheWire(unittest.TestCase):
+    """Whole-project review, Critical 2. To answer "did anything change?", the watcher scrolled
+    every chunk of the repository WITH ITS FULL PAYLOAD -- and the payload holds each chunk's
+    TEXT. So the cheap half of the change check was dragging the repository's entire indexed
+    content across the network every ~5 s, per repository, for as long as a session stayed open.
+    Measured on the payload shape this code writes: 1358 B per point against 129 B for the one
+    field actually read, ~10.5x, or 13.6 MB against 1.3 MB per cycle for a 10k-chunk archive.
+
+    The fix asks Qdrant for `metadata` only. These tests hold BOTH halves: that the projection
+    is requested, and that the code still works when it is honoured -- `FakeVectorStore` drops
+    the unrequested keys exactly as a real server does, because a fake that returned everything
+    would let a caller read a field it no longer asks for and still pass.
+    """
+
+    def _recording(self):
+        """An index whose store records the `payload_fields` of every scroll."""
+        asked = []
+        store = FakeVectorStore()
+        original = store.scroll_all
+
+        def recording(name, filter_=None, with_vector=False, payload_fields=None):
+            asked.append(payload_fields)
+
+            return original(name, filter_=filter_, with_vector=with_vector,
+                            payload_fields=payload_fields)
+
+        store.scroll_all = recording
+        ix = RepoIndex(store, FakeEmbedder(dim=8), CHUNKS, REG, 8)
+        ix.register_request("alpha")
+
+        return ix, asked
+
+    def test_the_change_check_asks_for_METADATA_ONLY(self):
+        ix, asked = self._recording()
+        ix.add_files("alpha", [a_file("x = 1\n")])
+        asked.clear()
+        ix.changed_paths("alpha")
+        self.assertTrue(asked, "no scroll happened, so this asserts nothing")
+        for fields in asked:
+            self.assertEqual(fields, ["metadata"],
+                             f"the change check pulled {fields!r} -- the full payload carries "
+                             f"every chunk's text, and this runs every few seconds")
+
+    def test_it_still_detects_a_change_with_the_projection_in_place(self):
+        """The other half: a projection that broke detection would be worse than the cost."""
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        self.assertEqual(ix.changed_paths("alpha"), [], "unchanged file reported as changed")
+        with open(path, "w") as fh:
+            fh.write("x = 1\ny = 2\nz = 3\n")
+        self.assertEqual(ix.changed_paths("alpha"), [path],
+                         "the change was missed -- the projection dropped a field it needs")
+
+    def test_poll_reads_the_archive_ONCE_for_both_answers(self):
+        """`changed_paths` and the newly-tracked-file diff each used to fetch the same source
+        metadata, so one watch cycle scrolled the archive twice for two halves of one question."""
+        ix, asked = self._recording()
+        ix.add_files("alpha", [a_file("x = 1\n")])
+        asked.clear()
+        out = ix.poll("alpha")
+        self.assertEqual(len(asked), 1, f"poll cost {len(asked)} archive reads, not 1")
+        self.assertIn("changed", out)
+        self.assertIn("indexed", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

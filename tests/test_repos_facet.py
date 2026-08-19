@@ -1,6 +1,6 @@
 """The listing asks the SERVER for the distinct repo names, and falls back when it must.
 
-`_repos_with_chunks` fed both divergence reads by scrolling the ENTIRE chunk collection — every
+`_chunks_per_repo` fed both divergence reads by scrolling the ENTIRE chunk collection — every
 point, every payload, over the wire — to end up with a handful of names. Qdrant answers exactly
 this question server-side (`/facet` with an indexed keyword key, measured against the live
 server on 2026-08-18), and the collection already carries the index the facet needs.
@@ -45,7 +45,7 @@ class FacetingStore(FakeVectorStore):
 
         return [{"value": v, "count": 1} for v in values][:limit]
 
-    def scroll_all(self, name, filter_=None, with_vector=False):
+    def scroll_all(self, name, filter_=None, with_vector=False, payload_fields=None):
         self.scroll_calls += 1
 
         return super().scroll_all(name, filter_, with_vector)
@@ -59,13 +59,13 @@ class TestTheServerAnswersInsteadOfTheWire(unittest.TestCase):
     def test_the_names_come_from_the_facet_and_the_archive_is_NOT_scrolled(self):
         store = FacetingStore(values=["alpha", "beta"])
         ix = an_index(store)
-        self.assertEqual(ix._repos_with_chunks(), {"alpha", "beta"})
+        self.assertEqual(set(ix._chunks_per_repo()), {"alpha", "beta"})
         self.assertEqual(store.facet_calls, 1)
         self.assertEqual(store.scroll_calls, 0, "the whole archive was scrolled anyway")
 
     def test_an_empty_archive_answers_empty_without_scrolling(self):
         store = FacetingStore(values=[])
-        self.assertEqual(an_index(store)._repos_with_chunks(), set())
+        self.assertEqual(set(an_index(store)._chunks_per_repo()), set())
         self.assertEqual(store.scroll_calls, 0)
 
 
@@ -79,7 +79,7 @@ class TestWhatItDoesWhenTheFacetCannotBeTrusted(unittest.TestCase):
         ix = an_index(store)
         ix.register_request("alpha")
         ix.add_files("alpha", [_a_file()])
-        got = ix._repos_with_chunks()
+        got = set(ix._chunks_per_repo())
         self.assertEqual(store.scroll_calls, 1, "a possibly-truncated facet was trusted")
         self.assertEqual(got, {"alpha"}, "the fallback did not answer from the archive")
 
@@ -90,12 +90,12 @@ class TestWhatItDoesWhenTheFacetCannotBeTrusted(unittest.TestCase):
         ix = an_index(store)
         ix.register_request("alpha")
         ix.add_files("alpha", [_a_file()])
-        self.assertEqual(ix._repos_with_chunks(), {"alpha"})
+        self.assertEqual(set(ix._chunks_per_repo()), {"alpha"})
         self.assertEqual(store.scroll_calls, 1)
 
     def test_a_facet_row_without_a_value_is_ignored_rather_than_stored_as_None(self):
         store = FacetingStore(values=["alpha", "", None])
-        self.assertEqual(an_index(store)._repos_with_chunks(), {"alpha"})
+        self.assertEqual(set(an_index(store)._chunks_per_repo()), {"alpha"})
 
 
 class TestTheListingStillReportsBothDivergences(unittest.TestCase):

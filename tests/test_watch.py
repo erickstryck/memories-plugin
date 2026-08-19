@@ -61,6 +61,14 @@ class FakeIndex:
 
         return set(self._indexed)
 
+    def poll(self, repo):
+        """Mirrors `RepoIndex.poll`: both halves of the watch question from ONE archive read.
+
+        Counts through `indexed_calls` exactly once per call, which is what lets the tests here
+        assert how many archive reads a cycle costs.
+        """
+        return {"changed": self.changed_paths(repo), "indexed": self.indexed_paths(repo)}
+
     def add_files(self, repo, paths, **kwargs):
         self.added.extend(paths)
         self._indexed.update(paths)
@@ -225,16 +233,23 @@ class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
             watch()
         self.assertEqual(len(calls), 1,
                          "the tracked-file scan ran again although `.git/index` never moved")
+        self.assertEqual(len(ix.indexed_calls), 2,
+                         "a watch cycle read the archive more than once -- `poll` exists so "
+                         "both halves of the question share ONE fetch")
 
-    # WHAT THIS CLASS DELIBERATELY NO LONGER ASSERTS: that the archive is scrolled only once.
-    # An earlier version memoised the DIFFERENCE (eligible minus indexed) and did skip the
-    # second scroll -- but the memo then outlived the job that indexed those very files, and
-    # the watcher re-queued them forever (see TestTheWatcherDoesNotReindexForever, measured at
-    # one re-embed every 3 cycles). The memo now holds only the DISK truth, which genuinely
-    # depends on nothing but `.git/index`, and the set difference is recomputed against a live
-    # `indexed_paths()` every cycle. That is a scroll per cycle, and it is a known open cost --
-    # `changed_paths` already pays one anyway. Correctness first; the two of them should later
-    # share ONE fetch per cycle rather than each paying for their own.
+    def test_a_cycle_reads_the_archive_exactly_once(self):
+        """The archive read cannot be memoised -- indexing changes it, and a memo that outlived
+        a job made the watcher re-queue the same files forever (measured: one re-embed every 3
+        cycles, see TestTheWatcherDoesNotReindexForever). So it is paid every cycle, and the
+        thing to hold is that it is paid ONCE: `changed_paths` and the newly-tracked-file diff
+        used to fetch the same source metadata separately."""
+        root = a_git_repo()
+        track(root, "a.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        watch = indexer.watcher(index=ix)
+        watch()
+        self.assertEqual(len(ix.indexed_calls), 1,
+                         f"one cycle cost {len(ix.indexed_calls)} archive reads, not 1")
 
     def test_tracking_a_NEW_file_moves_the_index_and_forces_a_rescan(self):
         """The half that matters for correctness: the memo must never answer "nothing new" for
@@ -254,6 +269,34 @@ class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
         job = jobs.load("alpha")
         self.assertIsNotNone(job, "a file tracked after the memo was warm was never noticed")
         self.assertIn(os.path.abspath(fresh), job["paths"])
+
+    def test_a_WORKTREE_is_memoised_too_and_not_rescanned_every_cycle(self):
+        """Whole-project review, finding 5. In a worktree `.git` is a FILE holding a pointer and
+        the real index sits under `<main>/.git/worktrees/<name>/index`, so the assumed path
+        `<root>/.git/index` never existed: the stamp was permanently None, the memo never hit,
+        and the watcher re-ran `git ls-files` plus an 8 KB sniff of every tracked file on every
+        cycle -- forever, and only for users on the more advanced setup. Worktrees are
+        supported (`core/bindings.py`), so this has to be memoised like any other checkout."""
+        main = a_git_repo()
+        track(main, "a.py")
+        subprocess.run(["git", "-C", main, "commit", "-qm", "first"], check=True, timeout=60)
+        wt = os.path.join(tempfile.mkdtemp(), "wt")
+        subprocess.run(["git", "-C", main, "worktree", "add", "-q", wt],
+                       check=True, timeout=60)
+        self.assertTrue(os.path.isfile(os.path.join(wt, ".git")),
+                        "this test proves nothing unless `.git` really is a file here")
+        self.assertIsNotNone(indexer._index_stamp(wt),
+                             "the worktree's index was not found, so the memo can never hit")
+        ix = FakeIndex(changed=[], checkouts=[wt], indexed=set())
+        calls = []
+        real = indexer.scan.eligible
+        with unittest.mock.patch.object(indexer.scan, "eligible",
+                                        lambda r, *a, **kw: calls.append(r) or real(r)):
+            watch = indexer.watcher(index=ix)
+            watch()
+            watch()
+        self.assertEqual(len(calls), 1,
+                         "a worktree paid for the full tracked-file scan on every cycle")
 
     def test_an_unreadable_git_index_recomputes_rather_than_assuming_unchanged(self):
         """A worktree or submodule keeps `.git` as a FILE, so there is no `.git/index` to

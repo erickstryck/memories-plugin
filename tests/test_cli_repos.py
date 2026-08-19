@@ -287,12 +287,29 @@ class TestTheListReportsWhatWasIndexed(CLICase):
     repository from an indexed one, which is the distinction the counts bought.
     """
 
-    def test_an_indexed_repo_shows_what_its_last_indexing_wrote(self):
+    def test_an_indexed_repo_shows_ITS_SIZE_and_not_its_last_batch(self):
+        """RENAMED AND RE-AIMED. It used to assert "1 file(s)", from the registry's own
+        `files`/`chunks` -- which are "as of the last `add_files` that wrote something". The
+        daemon indexes in batches of 8, so a 20-file `add-all` ended with a 4-file batch and
+        this line printed "4 file(s)" for a 20-file repository; a later one-file `refresh` made
+        it 1. The line now prints the count the ARCHIVE reports, which is what a reader of a
+        column in this position takes it to mean."""
         self.ix.register("alpha", "Alpha", [], "/tmp/alpha")
         self.ix.add_files("alpha", [a_file("invoice total = 1\n")])
         text = self.rendered(self.cli.cmd_repos_list)
-        self.assertIn("1 file(s)", text)
         self.assertIn("chunk(s)", text)
+        self.assertNotIn("file(s)", text,
+                         "the per-batch file count is back, presented as a repository size")
+
+    def test_the_size_shown_is_the_ARCHIVE_count_not_the_last_batch(self):
+        """The measurement that motivated the change: index in two batches, the way the daemon
+        does, and the line must report the total rather than the final batch."""
+        self.ix.register("alpha", "Alpha", [], "/tmp/alpha")
+        self.ix.add_files("alpha", [a_file("first file = 1\n"), a_file("second file = 2\n")])
+        self.ix.add_files("alpha", [a_file("third file = 3\n")])
+        text = self.rendered(self.cli.cmd_repos_list)
+        self.assertIn("3 chunk(s)", text,
+                      f"the listing reported the last batch, not the repository: {text!r}")
 
     def test_a_declared_but_never_indexed_repo_says_so_instead_of_showing_a_date(self):
         """It used to show the registration time under a column called "last indexed"."""
