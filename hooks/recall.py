@@ -45,6 +45,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
+from core import names  # noqa: E402
 from core import query  # noqa: E402
 from core import session_state as st  # noqa: E402
 from core.blocks import Budget, empty_block, recall_block, split_by_budget, unavailable_block  # noqa: E402
@@ -346,8 +347,7 @@ def _run() -> None:
     # cost the search that already succeeded. Before this guard, an unwritable state dir
     # made the hook throw away results it was holding and tell the model the search had not
     # run: a safe direction with the wrong message.
-    session = "".join(c if c.isalnum() or c in "-_" else "_"
-                     for c in str(data.get("session_id") or "default"))
+    session = names.safe(data.get("session_id"))
     state_path = None
     state: dict = {"round": 0, "seen": {}}
     try:

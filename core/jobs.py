@@ -15,6 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import names
 from .errors import CoreError
 from .knobs import state_dir
 
@@ -176,11 +177,11 @@ def reap(pid_alive) -> list[str]:
 
 
 def _path(repo: str) -> Path:
-    return dir() / f"{_safe(repo)}.json"
+    return dir() / f"{names.safe(repo)}.json"
 
 
 def _cancel_path(repo: str) -> Path:
-    return dir() / f"{_safe(repo)}.cancel"
+    return dir() / f"{names.safe(repo)}.cancel"
 
 
 def _write(repo: str, job: dict) -> bool:
@@ -233,5 +234,4 @@ def _cancel_file_exists(repo: str) -> bool:
         return False
 
 
-def _safe(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(name or "default"))
+

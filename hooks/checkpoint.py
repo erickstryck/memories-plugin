@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core import names  # noqa: E402
 from core import session_state as st  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE as PROCEDURE  # noqa: E402
 
@@ -82,8 +83,7 @@ def _run() -> None:
     except Exception:
         data = {}
 
-    session = "".join(c if c.isalnum() or c in "-_" else "_"
-                     for c in str(data.get("session_id") or "default"))
+    session = names.safe(data.get("session_id"))
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     counter = STATE_DIR / f"checkpoint-{session}.count"
 

@@ -2,7 +2,8 @@
 
 A lease is a note saying "I am alive": the HOST process's pid and the moment it started. The
 daemon checks the notes each cycle and exits when none is left. The user asked for exactly
-this — "o daemon deve ser morto quando o claude ou hermes sai/morre".
+this — quoted from the request that produced it, "o daemon deve ser morto quando o
+claude ou hermes sai/morre": the daemon must be killed when claude or hermes exits or dies.
 
 WHY THE TEST IS THE PROCESS AND NOT A MESSAGE. A host that exits cleanly could tell us; a host
 killed with -9 cannot. Checking whether the process still exists covers both with one mechanism,
@@ -23,6 +24,7 @@ import os
 from pathlib import Path
 
 from .knobs import state_dir
+from .names import safe
 
 
 def dir() -> Path:                                  # noqa: A001 — the name says what it holds
@@ -94,7 +96,7 @@ def write(session_id: str, host: str, pid: int | None = None) -> dict:
              "starttime": process_start(pid) or "", "written_at": _now()}
     try:
         dir().mkdir(parents=True, exist_ok=True)
-        path = dir() / f"{_safe(session_id)}.json"
+        path = dir() / f"{safe(session_id)}.json"
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(entry, indent=1, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
@@ -149,8 +151,7 @@ def live() -> list[dict]:
     return found
 
 
-def _safe(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(name or "default"))
+
 
 
 def _now() -> float:

@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import core  # noqa: E402
-from core import blocks, query, session_state  # noqa: E402
+from core import blocks, names, query, session_state  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE, INSTRUCTIONS  # noqa: E402
 
@@ -108,9 +108,7 @@ def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     return value
 
 
-def _safe(session_id: str) -> str:
-    """A session id that is safe as a filename."""
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(session_id or "default"))
+
 
 
 class MemoriesProvider(_Base):
@@ -358,7 +356,7 @@ class MemoriesProvider(_Base):
         elif outcome is not None and outcome.by_rerank:
             breaker.clear()
 
-        path = self._state_path(f"recall-{_safe(session_id)}.json")
+        path = self._state_path(f"recall-{names.safe(session_id)}.json")
         state = session_state.load(path)
         round_no = session_state.next_round(state)
         seen = state.setdefault("seen", {})
