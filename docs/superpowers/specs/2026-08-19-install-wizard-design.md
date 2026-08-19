@@ -54,6 +54,7 @@ Ele já cortou duas peças que eu tinha proposto — ver "O que foi cortado".
 | `core/install.py` | os checks de encanamento, como **dados** | sim |
 | `cli/qctx.py: cmd_install` | renderiza, pergunta, executa, delega aos cutovers | sim |
 | `bin/qctx` | ganha o resolvedor; o mesmo arquivo serve na árvore e como cópia no PATH | +~30 linhas |
+| `core/setup.py` | ganha o check de aviso de `context_window`, que hoje ninguém faz | +~10 linhas |
 | `scripts/cutover.sh`, `scripts/hermes_cutover.sh` | **inalterados** | não |
 
 **A decisão estrutural é o que NÃO se escreve.** O estado de cada host continua sendo
@@ -113,8 +114,9 @@ decisão está do outro lado do `exec`, onde a suíte offline alcança.
 
 Quatro seções, e só a segunda é código novo:
 
-1. **alcance e configuração** — `core.setup.diagnose()`, que já existe inteiro: Qdrant,
-   embedding com a dimensão real, rerank com a escala, as coleções.
+1. **alcance e configuração** — `core.setup.diagnose()`, que já existe quase inteiro:
+   Qdrant, embedding com a dimensão real, rerank com a escala, as cinco coleções — mais o
+   aviso de `context_window` que esta spec acrescenta a ele.
 2. **encanamento** — `core/install.py`: `qctx` no PATH e resolvendo para esta árvore;
    `~/.local/bin` no PATH; launcher idêntico ao da árvore; e o **teste sem shell promovido a
    check de primeira classe** (`core.load(env={})` — hoje o README ensina isso como conselho
@@ -135,8 +137,8 @@ plano e a roda **uma vez antes de qualquer `--apply`** — que é exatamente o q
 1. **bash**: acha a árvore e o `python3`, entrega para o Python.
 2. **PATH**: instala ou atualiza `~/.local/bin/qctx`. Se o diretório não estiver no PATH,
    imprime a linha exata para o rc do shell — e **não escreve** no rc.
-3. **config**: URLs para o `config.json`; chaves com eco desligado; coleções, com as
-   sugestões que `core.setup.suggest_collections` já calcula.
+3. **config**: as duas passadas descritas abaixo — o que bloqueia primeiro, todo o resto
+   depois com Enter mantendo. Chaves com eco desligado. `vector_size` detectado.
 4. **hosts**: detecta `claude` e `hermes`; por host, instala se faltar (abaixo) e então
    plano em dry-run → confirmação → apply.
 5. **reverifica**, incluindo o check sem shell.
@@ -148,6 +150,51 @@ substituir o provedor de memória do hermes não merecem o mesmo "sim". `--yes` 
 todos, para script. Sem TTY e sem `--yes`, o comando diagnostica e sai — a mesma regra que
 `cmd_setup` já segue, e pelo mesmo motivo: um `input()` esperando resposta que não vem
 pendura a chamada de um agente.
+
+### O que se pergunta, e a prova de que nada falta
+
+Simples não pode custar completo. `Config` tem **15 campos** e o wizard tem de alcançar
+todos, então a pergunta não é quais perguntar, é em que ordem — e como provar depois que
+nenhum ficou de fora.
+
+**Duas passadas.** A primeira pede só o que bloqueia (`diagnose` chama de *blocker*); a
+segunda percorre **todo o resto** mostrando o valor atual ou o default, com Enter mantendo.
+Uma passada linear com Enter é simples de atravessar e não deixa campo inalcançável.
+
+| passada | campos | como |
+|---|---|---|
+| 1 — bloqueia | `qdrant_url`, `api_base_url`, as duas chaves, `memory_collection` | pergunta direto; a coleção com as sugestões de `suggest_collections` |
+| 2 — Enter mantém | `embed_url`, `rerank_url`, `embed_model`, `rerank_model`, as outras quatro coleções, `context_window` | valor atual entre colchetes |
+| detectado | `vector_size` | escrito do que o endpoint respondeu, como `cmd_setup` já faz |
+
+Três descobertas da auditoria, todas medidas, e nenhuma delas estava coberta pelos passos
+que eu tinha escrito:
+
+- **`rerank_url` derivado dá endereço errado nesta máquina.** Quando vazio,
+  `resolved_rerank_url()` monta `api_base_url + /rerank`. A configuração real do usuário tem
+  embedding em `:8003/v1` e rerank em `:8004/v1/rerank` — portas diferentes. Um wizard que
+  pergunta só `api_base_url` produz um rerank quebrado e um check amarelo que ninguém pediu.
+  `embed_url` tem a mesma forma e o mesmo risco.
+- **`context_window` não é checado por ninguém.** `diagnose()` não olha para ele, e a guarda
+  de arquivo grande fica **inerte** sem ele para modelo fora de `MODEL_WINDOWS` — que
+  resolve para janela 0, e 0 libera tudo (medido em 2026-08-17; o `MiniMax-M2.7` do hermes
+  cai exatamente aí). Hoje só `hermes_cutover.sh` reporta, então numa máquina só-claude nada
+  avisa. **Entra como check de aviso em `core.setup.diagnose`**, não só no wizard: quem roda
+  `qctx setup` merece o mesmo aviso, e é uma linha no lugar certo em vez de duas no errado.
+- **`embed_model` e `rerank_model` têm default** (`bge-m3`, `bge-reranker-v2-m3`) que não é
+  garantia. Servidor com outro modelo faz o check de embedding falhar dizendo que o modelo
+  não responde — com a correção a um Enter de distância, na segunda passada.
+
+**A prova.** Um teste compara a lista de campos que o wizard percorre com
+`config.DEFAULTS` menos `config.SECRET_FIELDS`, e falha se sobrar qualquer um dos dois
+lados. Campo novo em `Config` quebra o teste até ser colocado numa das passadas — é a mesma
+lição que `_check_collections` já aprendeu na marra ("ALL FIVE, and the count is the
+point": ele enumerava três de cinco e reportava `ready` numa configuração em que o acervo de
+repositórios estava por cima do de memória).
+
+O que o wizard **não** faz, e diz: subir um Qdrant ou um servidor de embedding. Sem os dois
+não há o que configurar, e é o passo 1 da tabela do README — o wizard checa, nomeia o que
+não respondeu e para ali, em vez de perguntar quinze coisas que não vão funcionar.
 
 ### Instalar no host, que nenhum cutover faz
 
@@ -224,6 +271,9 @@ Offline, com `HOME` temporário, sem rede e sem dependência — como todo o res
   árvores falsas; `QCTX_HOME` vencendo as outras três.
 - **launcher velho**: cópia diferente da árvore é detectada; idêntica não gera check.
 - **plano**: as quatro combinações de host presente (nenhum, só claude, só hermes, os dois).
+- **completude**: os campos que o wizard percorre são exatamente `DEFAULTS` menos
+  `SECRET_FIELDS`; sobrar de qualquer lado falha.
+- **`context_window`**: `diagnose()` avisa quando não está declarado e cala quando está.
 - **segredo**: depois de um apply completo, `config.json` não contém nenhuma das duas
   chaves, em nenhuma grafia.
 - **`--check` não escreve**: mtime da árvore de config e de `~/.local/bin` inalterados.
