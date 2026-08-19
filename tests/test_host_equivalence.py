@@ -1024,8 +1024,13 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: writes an EXECUTABLE FILE into the user's own git repository. A person typing that
     #: command has decided to; a model calling it mid-conversation has decided for them, in a
     #: directory the plugin does not own. The CLI keeps it.
+    #: `repos_daemon`, `repos_add_all`, `repos_status` and `repos_cancel` join them for the
+    #: same reason as `config_set`: they administer a background process and the consent to
+    #: index a whole repository. A person typing the command decided to; a model calling it
+    #: mid-conversation would be deciding for them.
     NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
-                         "config_detect", "repos_install_hook"}
+                         "config_detect", "repos_install_hook", "repos_daemon",
+                         "repos_add_all", "repos_status", "repos_cancel"}
 
     def setUp(self):
         from hosts.hermes import tools

@@ -628,6 +628,74 @@ def cmd_repos_drop(args, cfg):
         print(f"dropped {out['repo']}; unbound {len(out['unbound'])} checkout(s)")
 
 
+def cmd_repos_add_all(args, cfg):
+    from core import bindings, daemon, jobs, scan
+
+    root = bindings.git_root(args.path or os.getcwd())
+    if not root:
+        raise SystemExit("not inside a git working copy — pass --path")
+    found = scan.eligible(root)
+    dropped = ", ".join(f"{n} {k}" for k, n in sorted(found["skipped"].items()) if n)
+    print(f"{found['tracked']} tracked → {len(found['eligible'])} eligible"
+          + (f" ({dropped})" if dropped else ""))
+    if not found["eligible"]:
+        print("nothing to index")
+
+        return
+    jobs.enqueue(args.repo, "index", found["eligible"])
+    started = daemon.start()
+    print(f"queued under {args.repo!r}; daemon {started['action']} (pid {started['pid']})")
+    print("watch it with:  qctx repos status")
+
+
+def cmd_repos_status(args, cfg):
+    from core import daemon, jobs, lease
+
+    running = daemon.record()
+    rows = jobs.all_jobs()
+    if args.json:
+        output({"daemon": running, "jobs": rows, "leases": lease.live()}, True)
+
+        return
+    # Said first and plainly: every number below was written by a process that may be gone, and
+    # a reader who does not know that reads stalled progress as activity.
+    print(f"daemon: {'running (pid %d)' % running['pid'] if running else 'not running'}")
+    if not rows:
+        print("no indexing jobs")
+
+        return
+    for job in rows:
+        pct = f"{100 * job['done'] // job['total']}%" if job.get("total") else "—"
+        line = f"  {job['repo']:<24} {job['state']:<10} {job['done']}/{job['total']} {pct}"
+        print(line + (f"  {job['error']}" if job.get("error") else ""))
+
+
+def cmd_repos_cancel(args, cfg):
+    from core import jobs
+
+    if jobs.request_cancel(args.repo):
+        print(f"cancel requested for {args.repo!r} — what is already indexed stays")
+    else:
+        print(f"no job for {args.repo!r}")
+
+
+def cmd_repos_daemon(args, cfg):
+    from core import daemon, indexer
+
+    if args.action == "stop":
+        print("daemon stopped" if daemon.stop() else "no daemon was running")
+
+        return
+    if args.action == "start":
+        out = daemon.start()
+        print(f"daemon {out['action']} (pid {out['pid']})")
+
+        return
+    # `run` is what the detached process executes. It is a command rather than a flag so the
+    # daemon is startable by hand when something needs to be watched directly.
+    daemon.run(indexer.work(cfg), watch=None)
+
+
 # ---- parser ----------------------------------------------------------------
 
 def _propagate_json(parser: argparse.ArgumentParser) -> None:
@@ -794,6 +862,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = repsub.add_parser("refresh", help="reindex the files that changed on disk")
     p.add_argument("repo")
     p.set_defaults(fn=cmd_repos_refresh)
+
+    p = repsub.add_parser("add-all", help="index a whole repository, in the background")
+    p.add_argument("repo")
+    p.add_argument("--path", help="the working copy (default: the current directory)")
+    p.set_defaults(fn=cmd_repos_add_all)
+
+    p = repsub.add_parser("status", help="what is being indexed, and whether the daemon is up")
+    p.set_defaults(fn=cmd_repos_status)
+
+    p = repsub.add_parser("cancel", help="stop indexing a repository; what is indexed stays")
+    p.add_argument("repo")
+    p.set_defaults(fn=cmd_repos_cancel)
+
+    p = repsub.add_parser("daemon", help="the background indexer")
+    p.add_argument("action", choices=["start", "stop", "run"])
+    p.set_defaults(fn=cmd_repos_daemon)
 
     p = repsub.add_parser("install-hook",
                           help="install a git post-commit hook that refreshes on every commit")
