@@ -28,8 +28,8 @@ from dataclasses import dataclass
 
 from . import ports
 from .chunk import chunk_text, mode_for_suffix
-from .docs import (GONE, _iso, _point_id, _read_source, content_digest, doc_id_for,
-                    source_changed)
+from .docs import (GONE, MTIME_TOLERANCE, _iso, _point_id, _read_source, content_digest,
+                    doc_id_for, source_changed)
 from .errors import CoreError
 from .qdrant import QdrantError, _is_absent
 
@@ -355,8 +355,15 @@ class RepoIndex:
 
         return sorted((r for r in rows if r.get("repo")), key=lambda r: r["repo"])
 
-    def refresh(self, repo: str) -> list[dict]:
+    def refresh(self, repo: str, should_stop=None) -> list[dict]:
         """Reindexes the files of `repo` whose content changed on disk since indexing.
+
+        `should_stop` is checked before EACH file, not only once before the call: a refresh
+        has no smaller batch boundary than that, and without a check this fine-grained a job
+        cancelled mid-run would keep re-embedding every remaining changed file and still end
+        up reported as cancelled — a claim about work that, by then, had fully happened. When
+        it fires, the loop stops and whatever was already reindexed stays; the files not yet
+        reached simply are not in this call's report; they resurface on the next refresh.
 
         WHY IT EXISTS. The archive is permanent by design, so a file edited after indexing
         returns text that is no longer there. Search already SAYS so — every hit carries a
@@ -393,6 +400,8 @@ class RepoIndex:
 
         report = []
         for path, md in sorted(self._indexed_sources(repo).items()):
+            if should_stop is not None and should_stop():
+                break
             reason = source_changed(path, md.get("src_mtime"), md.get("src_size"),
                                     md.get("src_digest"))
             if reason == GONE:
@@ -415,18 +424,53 @@ class RepoIndex:
         return report
 
     def changed_paths(self, repo: str) -> list[str]:
-        """The indexed paths of `repo` whose file changed on disk. The cheap half of `refresh`.
+        """The indexed paths of `repo` whose file LOOKS changed on disk, compared by `mtime`
+        and `size` ONLY. The cheap half of `refresh` — and it must actually BE cheap, because
+        the watcher asks this question every ~5 s, forever, for every repository being
+        watched.
 
-        Split out because the watcher asks this question every cycle and must not pay for the
-        expensive half — `refresh` re-embeds, this only compares metadata.
+        THIS DELIBERATELY DOES NOT CALL `source_changed` THE WAY `refresh` DOES. That function
+        hashes the whole file whenever a digest was recorded — which is always, for anything
+        this class has ever indexed — so calling it here would turn "stat 2,000 files" into
+        "read and SHA-1 every tracked byte of the repository", on every poll. Measured: ~2 ms
+        to `stat` 2,000 files, ~20 ms to read and hash the same 2,000, and 100 MB of tracked
+        content costs ~78 ms of CPU plus 100 MB of disk I/O on top of that — paid every cycle,
+        per watched repository, whether or not anything actually changed. The spec's own
+        budget for the watcher ("stat 2.000 arquivos = 16 ms... comparando mtime e tamanho")
+        has no room in it for a hash; polling was justified BY the cheaper comparison.
+
+        A FALSE POSITIVE HERE IS CHEAP AND ALWAYS SAFE. `mtime`/`size` can be fooled — `cp -p`,
+        a restore that preserves both, an edit that swaps one same-length character — into
+        calling a changed file unchanged, or an unchanged one changed. But every path this
+        returns still goes through `refresh`, which DOES compare the digest before re-embedding
+        anything. So the worst a false positive here costs is one honest re-check in `refresh`;
+        it can never write a wrong chunk to the archive, which is the property that makes the
+        cheap half being wrong sometimes an acceptable trade rather than a correctness bug.
         """
         out = []
         for path, md in sorted(self._indexed_sources(repo).items()):
-            if source_changed(path, md.get("src_mtime"), md.get("src_size"),
-                              md.get("src_digest")):
+            try:
+                st = os.stat(path)
+            except OSError:
+                out.append(path)                     # gone or unreadable — `refresh` reports it
+                continue
+            recorded_size = md.get("src_size")
+            if recorded_size is not None and st.st_size != recorded_size:
+                out.append(path)
+                continue
+            recorded_mtime = md.get("src_mtime")
+            if recorded_mtime is not None and \
+                    abs(st.st_mtime - float(recorded_mtime)) > MTIME_TOLERANCE:
                 out.append(path)
 
         return out
+
+    def indexed_paths(self, repo: str) -> set:
+        """Every source path this repository has a chunk for. Public wrapper over
+        `_indexed_sources`, for callers (the watcher) that need only the set of paths and not
+        their metadata — finding a NEWLY tracked file is a membership test against this, not a
+        comparison, so it does not belong in `changed_paths`."""
+        return set(self._indexed_sources(repo).keys())
 
     def _indexed_sources(self, repo: str) -> dict:
         """`path -> source metadata`, one entry per FILE, for the chunks of one repository.

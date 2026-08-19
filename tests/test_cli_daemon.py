@@ -72,7 +72,7 @@ class TestTheWorker(unittest.TestCase):
                 super().__init__()
                 self.refreshed = []
 
-            def refresh(self, repo):
+            def refresh(self, repo, should_stop=None):
                 self.refreshed.append(repo)
 
                 return []
@@ -82,6 +82,32 @@ class TestTheWorker(unittest.TestCase):
         indexer.work(index=ix)(jobs.load("alpha"))
         self.assertEqual(ix.refreshed, ["alpha"])
         self.assertEqual(ix.added, [])
+
+    def test_a_refresh_job_PASSES_should_stop_so_a_cancel_can_interrupt_it(self):
+        """Whole-branch review finding 9: `target.refresh(repo)` used to be called with no
+        cancel check reachable inside it, so a refresh queued by the watcher and cancelled
+        mid-run would re-embed everything changed and still end up marked `cancelled` — a
+        claim about work that had fully run. This proves the WIRING: `should_stop` reaches
+        `refresh` and, when it fires, `refresh` actually stops (here, after the first file)."""
+        class RefreshIndex(FakeIndex):
+            def __init__(self):
+                super().__init__()
+                self.judged = []
+
+            def refresh(self, repo, should_stop=None):
+                for path in ("/a.py", "/b.py", "/c.py"):
+                    if should_stop is not None and should_stop():
+                        break
+                    self.judged.append(path)
+
+                return [{"path": p, "action": "reindexed"} for p in self.judged]
+
+        ix = RefreshIndex()
+        jobs.enqueue("alpha", "refresh", [])
+        jobs.request_cancel("alpha")                    # cancelled BEFORE the job even starts
+        indexer.work(index=ix)(jobs.load("alpha"))
+        self.assertEqual(ix.judged, [],
+                         "should_stop did not reach refresh, or refresh ignored it")
 
 
 if __name__ == "__main__":

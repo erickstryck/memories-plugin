@@ -25,7 +25,11 @@ FAILED = "failed"
 
 
 class JobError(CoreError):
-    """A job could not be queued. Raised only by `enqueue`, and deliberately."""
+    """Work could not be queued, or a cancellation could not be requested — the two calls
+    whose whole job is to make a promise about the disk, so a write failure they swallowed
+    would leave the caller believing something happened that never did. Raised by `enqueue`
+    and `request_cancel`, deliberately; `update` tolerates the same kind of failure because a
+    lost progress write is corrected by the next one, and there is no "next one" here."""
 
 
 def dir() -> Path:                                  # noqa: A001 — the name says what it holds
@@ -102,7 +106,8 @@ def update(repo: str, **fields) -> dict | None:
 
 
 def request_cancel(repo: str) -> bool:
-    """Asks for `repo`'s job to stop. False when there is nothing to cancel.
+    """Asks for `repo`'s job to stop. False when there is nothing to cancel OR the cancel
+    file could not be written.
 
     A flag on disk rather than a signal: the daemon reads it BETWEEN files, so it stops at a
     point where what is already indexed is consistent.
@@ -111,10 +116,19 @@ def request_cancel(repo: str) -> bool:
     read-modify-write while progress updates run, and a cancel field would be silently
     overwritten when the daemon writes progress. No locking, no race: separate files mean the
     two writers never touch the same document.
+
+    RAISES JobError WHEN THE FILE COULD NOT BE CREATED, the same answer `enqueue` gives for
+    the same reason: the CLI's "cancel requested" is a claim about the disk, and a caller that
+    swallows the write failure would print that claim while the job runs to completion,
+    unaware it was never told to stop. `update`, by contrast, tolerates a lost write because a
+    stale PROGRESS number is corrected by the next one — there is no "next one" for a cancel
+    that silently failed to land; nothing will retry it.
     """
     if load(repo) is None:
         return False
-    _create_cancel_file(repo)
+    if not _create_cancel_file(repo):
+        raise JobError(f"could not request cancellation for {repo}: see {_cancel_path(repo)}")
+
     return True
 
 
@@ -177,13 +191,16 @@ def _write(repo: str, job: dict) -> bool:
         return False
 
 
-def _create_cancel_file(repo: str) -> None:
-    """Creates a cancel file for the given repo. Tolerates failure silently."""
+def _create_cancel_file(repo: str) -> bool:
+    """Creates a cancel file for the given repo. Returns True on success, False on failure —
+    checked by `request_cancel`, which must not report a cancel that did not land."""
     try:
         dir().mkdir(parents=True, exist_ok=True)
         _cancel_path(repo).touch()
+
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _remove_cancel_file(repo: str) -> bool:

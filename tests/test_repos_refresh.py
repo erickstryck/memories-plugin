@@ -5,13 +5,17 @@ never expires holds chunks of a file as it was, so a file edited later returns t
 longer exists there. Search already SAYS so — every hit carries a `stale` reason — and that
 warning was the whole repair story for repositories. This is the other half.
 
-WHAT IT IS NOT: a watcher. Nothing here runs by itself. The trigger is a git `post-commit` hook
-the user installs deliberately (see `TestTheHookScript`), and this command is what that hook — or
-the user — calls.
+WHAT CALLS IT: the daemon's watcher, on a poll cycle that sees a file changed on disk (see
+`core/indexer.py`'s `watcher`), or a person running `qctx repos refresh` directly. An earlier
+version of this docstring named a git `post-commit` hook as the trigger and pointed at a
+`TestTheHookScript` in this file — both gone: the hook (`core/githook.py`, `repos
+install-hook`, `tests/test_githook.py`) was removed once the daemon covered everything it did
+and more (see `core/repos.py`'s `refresh` docstring for the fuller history of that claim).
 """
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -149,6 +153,128 @@ class TestEachPathIsJudgedONCE(unittest.TestCase):
         rewrite(path, "small = 1\n")
         report = ix.refresh("alpha")
         self.assertEqual(len(report), 1, f"the file was judged {len(report)} times")
+
+
+class TestChangedPathsIsMetadataOnly(unittest.TestCase):
+    """Whole-branch review finding 7: `changed_paths` used to call `source_changed`, which
+    reads and SHA-1s the whole file whenever a digest was recorded — which is always, for
+    anything this class indexed — turning a 5-second poll into "hash every tracked byte of
+    the repository, forever". It must compare `mtime`/`size` ONLY, leaving the digest check to
+    `refresh`."""
+
+    def test_a_SAME_SIZE_content_change_with_the_ORIGINAL_mtime_restored_is_MISSED(self):
+        """The proof that no hash runs here any more: `cp -p`-style tampering (same mtime,
+        same size, different bytes) is EXACTLY what a digest check exists to catch, and
+        `changed_paths` — metadata only, by design now — must NOT catch it. `refresh`, which
+        still compares the digest before re-embedding, must catch it regardless: the
+        watcher's cheap half missing something never means the archive stays wrong forever,
+        only that this poll cycle did not notice."""
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        recorded_mtime = ix._indexed_sources("alpha")[path]["src_mtime"]
+        with open(path, "w") as fh:
+            fh.write("x = 2\n")                        # same byte length as "x = 1\n"
+        os.utime(path, (recorded_mtime, recorded_mtime))  # restore the exact recorded mtime
+        self.assertEqual(ix.changed_paths("alpha"), [],
+                         "changed_paths caught a content-only change — it is reading the file")
+        report = ix.refresh("alpha")
+        self.assertEqual([r["action"] for r in report], ["reindexed"],
+                         "refresh's digest check did not catch what changed_paths missed")
+
+    def test_an_mtime_only_touch_with_UNCHANGED_content_is_a_SAFE_false_positive(self):
+        """The other side of the trade the docstring makes: metadata alone CAN be fooled the
+        other way too (a `touch` with no edit), and that is fine — `refresh` re-checks the
+        digest and reports `ok`, spending nothing on an embedding call."""
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        far_future = time.time() + 10_000
+        os.utime(path, (far_future, far_future))
+        self.assertEqual(ix.changed_paths("alpha"), [path],
+                         "a real mtime change was not flagged by changed_paths")
+        report = ix.refresh("alpha")
+        self.assertEqual([r["action"] for r in report], ["ok"],
+                         "refresh re-embedded a file whose content never changed")
+
+    def test_a_size_change_is_caught(self):
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        with open(path, "a") as fh:
+            fh.write("y = 2\n")
+        self.assertEqual(ix.changed_paths("alpha"), [path])
+
+    def test_a_file_that_vanished_is_caught(self):
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        os.unlink(path)
+        self.assertEqual(ix.changed_paths("alpha"), [path])
+
+    def test_an_untouched_file_is_not_flagged(self):
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        self.assertEqual(ix.changed_paths("alpha"), [])
+
+
+class TestRefreshRespectsShouldStop(unittest.TestCase):
+    """Whole-branch review finding 9: cancellation was never checked inside `refresh`, so a
+    watcher-queued refresh job that got cancelled mid-run would re-embed everything that
+    changed and STILL end up reported `cancelled` afterward — a claim about work that, by
+    then, had fully happened. `should_stop` gives `refresh` the same per-item boundary the
+    "index" job's batch loop already has."""
+
+    def test_should_stop_halts_before_reaching_every_changed_file(self):
+        ix = an_index("alpha")
+        p1, p2 = a_file("a = 1\n"), a_file("b = 1\n")
+        ix.add_files("alpha", [p1, p2])
+        rewrite(p1, "a = 11\n")
+        rewrite(p2, "b = 11\n")
+        calls = []
+
+        def stop_after_one():
+            calls.append(1)
+
+            return len(calls) > 1
+
+        report = ix.refresh("alpha", should_stop=stop_after_one)
+        self.assertEqual(len(report), 1, "should_stop did not halt the loop early")
+
+    def test_should_stop_TRUE_from_the_start_reindexes_nothing(self):
+        ix = an_index("alpha")
+        p1, p2 = a_file("a = 1\n"), a_file("b = 1\n")
+        ix.add_files("alpha", [p1, p2])
+        rewrite(p1, "a = 11\n")
+        rewrite(p2, "b = 11\n")
+        report = ix.refresh("alpha", should_stop=lambda: True)
+        self.assertEqual(report, [])
+
+    def test_files_NOT_reached_before_should_stop_are_still_refreshed_on_the_NEXT_call(self):
+        """What was skipped is not lost, only deferred — the next unrestricted `refresh` picks
+        it up, the same way a repository that changes every cycle eventually catches up."""
+        ix = an_index("alpha")
+        p1, p2 = a_file("a = 1\n"), a_file("b = 1\n")
+        ix.add_files("alpha", [p1, p2])
+        rewrite(p1, "a = 11\n")
+        rewrite(p2, "b = 11\n")
+        first = ix.refresh("alpha", should_stop=lambda: True)
+        self.assertEqual(first, [])
+        second = ix.refresh("alpha")
+        self.assertEqual(len(second), 2)
+        self.assertEqual({r["action"] for r in second}, {"reindexed"})
+
+    def test_should_stop_defaults_to_off(self):
+        """`refresh` called the way every existing caller (`qctx repos refresh`, and every
+        test above this class) already calls it must behave exactly as before: unconditional,
+        judging every path."""
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        rewrite(path, "x = 11\n")
+        report = ix.refresh("alpha")
+        self.assertEqual([r["action"] for r in report], ["reindexed"])
 
 
 if __name__ == "__main__":

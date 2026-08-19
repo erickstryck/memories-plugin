@@ -168,6 +168,24 @@ class TestProgressAndCancellation(unittest.TestCase):
         resurrect a job that already finished."""
         self.assertIsNone(jobs.update("never-queued", done=1))
 
+    def test_request_cancel_RAISES_when_the_cancel_file_cannot_be_written(self):
+        """The sibling of `enqueue`'s own write-failure guard, a few lines away in the source
+        and unguarded until now: `_create_cancel_file` used to swallow `OSError` and
+        `request_cancel` returned True regardless, so the CLI printed "cancel requested" while
+        the job ran to completion — nothing was ever told to stop. Same failure mode as a lost
+        `enqueue` write, same fix: raise rather than claim success the disk did not deliver.
+
+        `Path.touch()` on an EXISTING path (even a directory) just updates its mtime and does
+        not raise — unlike `unlink()`, a directory is not a barrier here. The barrier that
+        actually stops a `touch()` from CREATING a new file is a read-only parent directory."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.dir().chmod(0o500)                       # read + execute, no write: no new file
+        try:
+            with self.assertRaises(jobs.JobError):
+                jobs.request_cancel("alpha")
+        finally:
+            jobs.dir().chmod(0o700)
+
 
 class TestAJobThatOUTLIVEDItsDaemon(unittest.TestCase):
     """A file saying `running` under a daemon that has died is lying, and a state that lies is
