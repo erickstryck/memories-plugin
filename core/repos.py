@@ -68,7 +68,7 @@ def empty_note(across: bool, repo: str | None, known: int) -> str:
     """What an answer with NO groups says, in words, on every host.
 
     THE ONE SENTENCE THIS FEATURE MUST NOT GET WRONG. The grouping is best-effort over what
-    the search reached — the spec's "limite honesto" — so zero groups means "nothing came
+    the search reached — the spec's "limite honesto", its honest limit — so zero groups means "nothing came
     back above the cut", never "no repository mentions this". Rendering an empty list and
     stopping lets the caller supply the missing half of the sentence, and it supplies the
     false one: a model asking `across` reads `{"groups": []}` from a tool that promises to
@@ -436,7 +436,8 @@ class RepoIndex:
         to `stat` 2,000 files, ~20 ms to read and hash the same 2,000, and 100 MB of tracked
         content costs ~78 ms of CPU plus 100 MB of disk I/O on top of that — paid every cycle,
         per watched repository, whether or not anything actually changed. The spec's own
-        budget for the watcher ("stat 2.000 arquivos = 16 ms... comparando mtime e tamanho")
+        budget for the watcher ("stat 2.000 arquivos = 16 ms... comparando mtime e tamanho" —
+        16 ms to stat 2,000 files, comparing mtime and size)
         has no room in it for a hash; polling was justified BY the cheaper comparison.
 
         A FALSE POSITIVE HERE IS CHEAP AND ALWAYS SAFE. `mtime`/`size` can be fooled — `cp -p`,

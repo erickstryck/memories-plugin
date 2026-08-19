@@ -48,7 +48,8 @@ class Verdict:
 _SNIFF_BYTES = 8192
 
 # THE ESCAPE MARKER IS NOT DEFINED HERE, AND ITS ABSENCE IS LOAD-BEARING. The literal the
-# user types to force a read through is CONFIGURABLE (the spec, "A palavra de escape"),
+# user types to force a read through is CONFIGURABLE (the spec, "A palavra de escape" —
+# the escape word),
 # because it is text a user types and there are domains where `--full` occurs on its own —
 # anyone working on a CLI with a `--full` flag would unlock the guard by accident, which is
 # the false positive a literal marker exists to avoid.
