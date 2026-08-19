@@ -28,14 +28,43 @@ def skill_text() -> str:
     return SKILL.read_text()
 
 
-def commands_in_skill() -> list[str]:
-    """Every `qctx repos …` line inside a fenced block — the ones a reader will copy."""
+def commands_in_bash_blocks() -> list[str]:
+    """Every `qctx repos …` line inside a fenced ```bash block — the ones a reader copies as
+    a READY-TO-RUN LINE, no editing and no surrounding prose to slow them down. This is the
+    narrower of the two: used only where "is this destructive verb sitting in a paste-and-go
+    block" is literally the question, which inline code — read as part of a sentence — is not.
+    """
     out = []
     for block in re.findall(r"```bash\n(.*?)```", skill_text(), re.S):
         for line in block.splitlines():
             line = line.split("#")[0].strip()
             if line.startswith("qctx repos"):
                 out.append(line)
+
+    return out
+
+
+def commands_in_skill() -> list[str]:
+    """Every `qctx repos …` command in the skill, from a fenced ```bash block OR an inline
+    single-backtick span — every form a reader can copy the exact text of, which is the
+    question for "is every flag here real".
+
+    THE INLINE HALF WAS MISSING, and it was not a theoretical gap: the paragraph introducing
+    `init`, `add-all`, `status` and `cancel` writes each one as inline code
+    (`` `qctx repos add-all <name>` ``), never inside a fence, so those four verbs were never
+    checked against the real `--help` — the guard had a hole exactly where the newest commands
+    lived, and passing was luck, not verification.
+    """
+    out = list(commands_in_bash_blocks())
+    # Inline spans never contain a `#` comment or span multiple lines, so no split is needed —
+    # just the same "starts with qctx repos" filter, applied per backtick-delimited span.
+    for span in re.findall(r"`([^`\n]+)`", skill_text()):
+        span = span.strip()
+        # "qctx repos " (trailing space) and not bare "qctx repos": the description and the
+        # opening paragraph both use the bare form to name the tool itself, with no verb after
+        # it — including those would feed `parts[2]` below a span with nothing there to read.
+        if span.startswith("qctx repos "):
+            out.append(span)
 
     return out
 
@@ -81,7 +110,7 @@ class TestEveryCommandTheSkillShowsIsREAL(unittest.TestCase):
     def test_the_destructive_verb_is_NOT_in_a_copyable_block(self):
         """The other half of the decision above, pinned so a later edit does not undo it by
         being helpful. Every other verb belongs in a block; this one does not."""
-        self.assertNotIn("repos drop", " ".join(commands_in_skill()),
+        self.assertNotIn("repos drop", " ".join(commands_in_bash_blocks()),
                          "`repos drop` became copy-pasteable")
 
     def test_every_flag_the_skill_names_is_a_flag_the_CLI_accepts(self):

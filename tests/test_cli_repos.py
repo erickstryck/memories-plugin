@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -20,6 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from core import bindings  # noqa: E402
+from core import daemon as core_daemon  # noqa: E402
 from core.repos import RepoIndex  # noqa: E402
 from tests.fakes import (FakeEmbedder, FakeVectorStore, make_divergent,  # noqa: E402
                          make_emptied)
@@ -321,6 +323,190 @@ class TestTheListNamesWhatCannotBeListed(CLICase):
         text = self.rendered(self.cli.cmd_repos_list)
         self.assertIn("alpha", text)
         self.assertIn("ghost", text)
+
+
+def a_git_repo() -> str:
+    root = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, timeout=60)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True,
+                   timeout=60)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True, timeout=60)
+
+    return root
+
+
+def track(root: str, name: str, text: str = "x = 1\n") -> str:
+    path = os.path.join(root, name)
+    with open(path, "w") as fh:
+        fh.write(text)
+    subprocess.run(["git", "-C", root, "add", name], check=True, timeout=60)
+
+    return path
+
+
+class TestAddAllRegistersAndBindsBeforeQueueing(CLICase):
+    """Whole-branch review findings 1 and 2 — the primary documented path (`repos init` then
+    `repos add-all`) DID NOT WORK: `add-all` never registered the repository, so
+    `RepoIndex.add_files` refused the first batch and every job landed FAILED; and it never
+    bound the checkout, so `repos init` kept offering to index a working copy that was
+    already fully indexed, forever.
+
+    `daemon.start` is mocked in every case here: a live lease is written so the CODE PATH that
+    would call it is actually reached, but the real one launches a detached subprocess, which
+    "no test may start a real daemon" forbids.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from core import lease
+        lease.write("s1", "claude", pid=os.getpid())
+        patcher = unittest.mock.patch.object(
+            core_daemon, "start", return_value={"action": "started", "pid": 999})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_add_all_registers_the_repo_before_enqueueing(self):
+        root = a_git_repo()
+        track(root, "a.py")
+        self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        self.assertIsNotNone(self.ix.get_repo("newrepo"),
+                             "add-all queued work under a name that was never registered")
+
+    def test_a_job_queued_by_add_all_actually_indexes_instead_of_failing(self):
+        """Reproduces the Critical exactly: before the fix, `add_files` raised RepoError on
+        the first batch because the name was never registered, and every job landed FAILED —
+        run through `daemon._run_one`, the same code the real daemon uses to run a job and
+        set its final state, so a raised RepoError shows up here exactly as `failed`."""
+        root = a_git_repo()
+        track(root, "a.py")
+        self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        from core import daemon, indexer, jobs
+        daemon._run_one(jobs.load("newrepo"), indexer.work(index=self.ix))
+        job = jobs.load("newrepo")
+        self.assertEqual(job["state"], jobs.DONE,
+                         f"the job could not run: {job.get('error')}")
+        self.assertGreater(self.ix.get_repo("newrepo")["files"], 0)
+
+    def test_add_all_binds_the_checkout_so_init_stops_offering(self):
+        root = a_git_repo()
+        track(root, "a.py")
+        self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        from core import bindings
+        self.assertEqual(bindings.get(root), "newrepo",
+                         "the checkout was never bound — repos init would keep offering it")
+
+    def test_a_daemon_that_fails_to_start_does_not_hide_the_queued_job(self):
+        """`enqueue` runs BEFORE `daemon.start()` and raises rather than lying, so by the time
+        a start can fail the work is already on disk. Letting `DaemonError` travel to the top
+        from there printed only "could not start the daemon", and the user would reasonably
+        conclude nothing had been queued and re-run the command -- while the job sat waiting
+        for the next session. A failure that reads as "there is nothing" is the one outcome
+        this project refuses, so the queue must be reported even on this path."""
+        from core import daemon, jobs
+        root = a_git_repo()
+        track(root, "a.py")
+        with unittest.mock.patch.object(
+                core_daemon, "start",
+                side_effect=daemon.DaemonError("state directory unavailable")):
+            out = self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        self.assertIsNotNone(jobs.load("newrepo"),
+                             "the job was not queued at all, so this tests the wrong thing")
+        self.assertIn("queued under", out,
+                      "the user was told the daemon failed but not that the work survived")
+        self.assertIn("state directory unavailable", out,
+                      "the reason the daemon could not start never reached the user")
+
+    def test_registration_failure_is_reported_and_nothing_is_queued(self):
+        """A taken/invalid name must fail LOUD, not queue work that can never run."""
+        root = a_git_repo()
+        track(root, "a.py")
+        with self.assertRaises(Exception):
+            self.rendered(self.cli.cmd_repos_add_all, repo="Not A Valid Slug", path=root)
+        from core import jobs
+        self.assertIsNone(jobs.load("Not A Valid Slug"))
+
+    def test_a_second_checkout_of_an_already_registered_repo_joins_its_checkouts(self):
+        first_root = a_git_repo()
+        track(first_root, "a.py")
+        self.rendered(self.cli.cmd_repos_add_all, repo="shared", path=first_root)
+        second_root = a_git_repo()
+        track(second_root, "b.py")
+        self.rendered(self.cli.cmd_repos_add_all, repo="shared", path=second_root)
+        entry = self.ix.get_repo("shared")
+        self.assertIn(first_root, entry["checkouts"])
+        self.assertIn(second_root, entry["checkouts"])
+
+
+class TestAddAllRespectsTheLeaseGate(CLICase):
+    """Whole-branch review finding 3: from a bare terminal (no claude or hermes session),
+    `add-all` used to print "daemon started (pid N)" for a daemon that would exit on its own
+    first cycle (`daemon.run` checks `lease.live()` first) — a promise it could not keep, with
+    nothing telling the user why `status` then showed the job stuck `pending`.
+
+    THE CHOSEN ANSWER: queue the work for real either way, but only claim the daemon started
+    when a lease is actually live; otherwise say plainly that it starts once a session opens
+    (see `cmd_repos_add_all`'s docstring in cli/qctx.py for the full reasoning, and why this
+    is now true rather than aspirational: the lease write points in both hosts now also call
+    `daemon.start()`)."""
+
+    def test_with_no_live_lease_the_job_is_still_queued_but_daemon_is_not_started(self):
+        root = a_git_repo()
+        track(root, "a.py")
+        with unittest.mock.patch.object(core_daemon, "start") as started:
+            text = self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        started.assert_not_called()
+        from core import jobs
+        self.assertIsNotNone(jobs.load("newrepo"), "the job was not queued at all")
+        self.assertIn("no claude or hermes session", text.lower())
+
+    def test_with_a_live_lease_daemon_start_IS_called(self):
+        from core import lease
+        lease.write("s1", "claude", pid=os.getpid())
+        root = a_git_repo()
+        track(root, "a.py")
+        with unittest.mock.patch.object(
+                core_daemon, "start",
+                return_value={"action": "started", "pid": 999}) as started:
+            text = self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        started.assert_called_once()
+        self.assertIn("daemon started", text.lower())
+
+
+class TestStatusReapsBeforeRendering(CLICase):
+    """Whole-branch review finding 5: `reap` only ever ran from inside `daemon.run`'s own
+    loop, so `status` — the ONLY reader with no guarantee a daemon is alive to reap for it —
+    printed a frozen `running` job forever once the daemon that owned it died. The spec's own
+    testing section names this exact case, and there was previously no test file for
+    `cmd_repos_status` at all."""
+
+    def test_a_job_running_under_a_dead_daemon_is_reaped_before_status_renders(self):
+        from core import jobs
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, daemon_pid=4_000_000)  # not a live pid
+        text = self.rendered(self.cli.cmd_repos_status)
+        self.assertEqual(jobs.load("alpha")["state"], jobs.FAILED,
+                         "status did not reap a job left running by a dead daemon")
+        self.assertRegex(text, r"alpha\s+failed")
+
+    def test_a_job_of_a_still_LIVE_daemon_is_left_alone(self):
+        from core import jobs
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, daemon_pid=os.getpid())  # this process: alive
+        self.rendered(self.cli.cmd_repos_status)
+        self.assertEqual(jobs.load("alpha")["state"], jobs.RUNNING,
+                         "status reaped a job whose daemon is genuinely still alive")
+
+    def test_with_no_daemon_and_no_jobs_it_says_so_plainly(self):
+        text = self.rendered(self.cli.cmd_repos_status)
+        self.assertIn("not running", text.lower())
+        self.assertIn("no indexing jobs", text.lower())
+
+    def test_the_json_form_reflects_the_reap_too(self):
+        from core import jobs
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, daemon_pid=4_000_000)
+        out = json.loads(self.rendered(self.cli.cmd_repos_status, json=True))
+        self.assertEqual(out["jobs"][0]["state"], jobs.FAILED)
 
 
 if __name__ == "__main__":

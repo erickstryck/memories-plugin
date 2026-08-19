@@ -591,27 +591,6 @@ def cmd_repos_refresh(args, cfg):
           f"{counts.get('missing', 0)} missing, {counts.get('skipped', 0)} skipped")
 
 
-def cmd_repos_install_hook(args, cfg):
-    from core import githook
-
-    result = githook.install(args.repo, args.path or os.getcwd(), force=args.force)
-    if args.json:
-        output(result, True)
-
-        return
-    if result["action"] == "installed":
-        print(f"post-commit hook installed at {result['hook']}")
-        print(f"commits in {result['root']} now refresh {args.repo!r} in the background")
-    elif result["action"] == "already":
-        print(f"already installed at {result['hook']}")
-    else:
-        # A hook belonging to husky, pre-commit or the user is not ours to overwrite: writing
-        # over another tool's file is worse than not installing.
-        print(f"{result['hook']} exists and is not ours — nothing was written.")
-        print("Add this line to it yourself:\n")
-        print(f"    {result['line']}")
-
-
 def cmd_repos_drop(args, cfg):
     out = core.build_repos(cfg).drop_request(args.repo, args.yes)
     if args.json:
@@ -626,6 +605,178 @@ def cmd_repos_drop(args, cfg):
               f"{len(out['unbound'])} stale binding(s)")
     else:
         print(f"dropped {out['repo']}; unbound {len(out['unbound'])} checkout(s)")
+
+
+def cmd_repos_init(args, cfg):
+    from core import bindings
+
+    root = bindings.git_root(args.path or os.getcwd())
+    if not root:
+        raise SystemExit("not inside a git working copy — run this from a project, or pass --path")
+    found = core.build_repos(cfg).candidates_for(root, bindings.remotes_of(root))
+    found["root"] = root
+    found["indexed"] = False
+    if args.json:
+        output(found, True)
+
+        return
+    if found["bound"]:
+        print(f"already indexed as {found['bound']!r}")
+
+        return
+    if found["join"]:
+        names = ", ".join(sorted(r["repo"] for r in found["join"]))
+        print(f"this working copy shares a remote with: {names}")
+    if found["taken"]:
+        # Named rather than merged: two unrelated checkouts with the same directory name are not
+        # the same repository, and deciding otherwise by an accident of naming is what the
+        # declared-identity rule exists to refuse.
+        print(f"the name {found['suggest']!r} already belongs to another repository")
+    print(f"index this working copy as:  qctx repos add-all {found['suggest']}")
+
+
+def cmd_repos_add_all(args, cfg):
+    """Registers `args.repo` if needed, binds this checkout to it, and queues indexing.
+
+    REGISTERS BEFORE ENQUEUEING. `RepoIndex.add_files` refuses to write chunks under a name
+    the registry does not know — correctly, `list_repos` and `divergent_repos` both depend on
+    the registry being authoritative — so without this, the FIRST batch this job ever ran
+    would raise, and the job would land FAILED. This is the primary path the README, `repos
+    init`'s own printed advice and the skill all send the user down, so it must actually work.
+
+    CALLS `register`, NOT `register_request`, and WITH THE CHECKOUT. `register_request`'s own
+    docstring says as much: it is for a caller that has only a name, and "register still
+    accepts both [checkout and remotes]... for the caller that HAS them" — this command has
+    `root` from `bindings.git_root` above. Recording it is not optional plumbing: the
+    watcher's discovery of newly-tracked files (`core/indexer.py`'s `_new_tracked_paths`)
+    walks a repo's registered `checkouts` to know what to run `git ls-files` against, and
+    `register_request` never populates that list (every caller passes an empty checkout) — so
+    calling it here would leave the registry entry without a root the watcher could ever scan.
+    `register` is idempotent for a repeat call on the SAME checkout (accumulates without
+    duplicating) and correctly extends the list for a SECOND checkout of an already-registered
+    repo, so it is called every time rather than only when the name is brand new.
+
+    IF REGISTRATION FAILS — a taken, non-slug name, most likely — IT RAISES, same as every
+    other `CoreError` this CLI lets `main()` print and exit on. Nothing is enqueued: work that
+    cannot be written into is work that would fail its first batch, and this command must not
+    promise indexing it cannot deliver.
+
+    BINDS THE CHECKOUT TO THE REPO NAME, closing the offer `repos init` makes: `candidates_for`
+    reads `bindings.get(root)`, and until this call bound anything, that read was permanently
+    fed by an empty write half — the offer to index never went away even after a successful
+    index. This is the ONE place a checkout is accepted as "this is that repository", because
+    it is the one command that turns "detected" into "working on it".
+    """
+    from core import bindings, daemon, jobs, lease, scan
+
+    root = bindings.git_root(args.path or os.getcwd())
+    if not root:
+        raise SystemExit("not inside a git working copy — pass --path")
+    index = core.build_repos(cfg)
+    index.register(args.repo, args.repo, bindings.remotes_of(root), root)
+    bindings.bind(root, args.repo)
+    found = scan.eligible(root)
+    dropped = ", ".join(f"{n} {k}" for k, n in sorted(found["skipped"].items()) if n)
+    print(f"{found['tracked']} tracked → {len(found['eligible'])} eligible"
+          + (f" ({dropped})" if dropped else ""))
+    if not found["eligible"]:
+        print("nothing to index")
+
+        return
+    jobs.enqueue(args.repo, "index", found["eligible"])
+    if lease.live():
+        # REPORTS THE QUEUE EVEN WHEN THE START FAILS. The enqueue above already SUCCEEDED —
+        # it raises rather than lying, so reaching this line means the work is really on disk.
+        # Letting `DaemonError` travel to the top from here would print only "could not start
+        # the daemon" and leave the user believing nothing was queued, when in fact the job is
+        # waiting and the next session that opens will drain it. A failure that reads as
+        # "there is nothing" is the one outcome this project refuses.
+        try:
+            started = daemon.start()
+            print(f"queued under {args.repo!r}; "
+                  f"daemon {started['action']} (pid {started['pid']})")
+        except daemon.DaemonError as exc:
+            print(f"queued under {args.repo!r}, but the daemon could not be started: {exc}")
+            print("the job is safe and the next claude or hermes session will run it")
+    else:
+        # A daemon spawned here would exit on its very own first cycle — `daemon.run` checks
+        # `lease.live()` before touching anything else — so starting one now would only print
+        # a pid that is already gone by the time `status` is read next; that is the exact
+        # "queued... daemon started... daemon: not running, with nothing connecting the two"
+        # failure the whole-branch review reproduced. The job IS queued for real, though: the
+        # NEXT claude or hermes session to start writes a lease, and the lease write point in
+        # both hosts now also calls `daemon.start()` (see `hooks/lease.py` and
+        # `hosts/hermes/__init__.py`), so the queue drains automatically once a session opens.
+        # Refusing to queue at all was the other option; this one was chosen because the work
+        # is real and will run — just not this second — and saying so plainly is not a lie the
+        # way printing "daemon started" would be.
+        # DOES NOT OFFER `qctx repos daemon start` HERE. That command spawns `repos daemon
+        # run`, whose first act is to check for a live lease and return immediately when there
+        # is none — so from a bare terminal it prints "daemon started (pid N)" and `status`
+        # then reports "daemon: not running". Suggesting it would hand the user, as the remedy,
+        # the exact confusing failure this message exists to prevent.
+        print(f"queued under {args.repo!r} — no claude or hermes session is open right now, "
+              f"and the daemon only runs while one is. It will start automatically the next "
+              f"time a session opens; open one to have it run now.")
+    print("watch it with:  qctx repos status")
+
+
+def cmd_repos_status(args, cfg):
+    from core import daemon, jobs, lease
+
+    # REAPS BEFORE READING, because `status` is the ONLY reader that runs with no guarantee a
+    # daemon is alive to do it for itself — `reap` otherwise runs solely from inside
+    # `daemon.run`'s own loop, on ITS OWN cycle. Without this, a daemon that died mid-job
+    # leaves `jobs/<repo>.json` reading `running` forever: not stale data that self-corrects,
+    # a LIE that gets worse the longer nobody looks, because the pid it names never comes back
+    # to finish writing `done`. Same predicate `daemon.run` itself hands to `reap` — raw pid
+    # liveness, not a comparison against the CURRENT daemon record, so a job whose daemon is
+    # genuinely still running is never reaped out from under it just because some OTHER
+    # process currently holds the daemon claim.
+    jobs.reap(lambda pid: lease.process_start(pid) is not None)
+    running = daemon.record()
+    rows = jobs.all_jobs()
+    if args.json:
+        output({"daemon": running, "jobs": rows, "leases": lease.live()}, True)
+
+        return
+    # Said first and plainly: every number below was written by a process that may be gone, and
+    # a reader who does not know that reads stalled progress as activity.
+    print(f"daemon: {'running (pid %d)' % running['pid'] if running else 'not running'}")
+    if not rows:
+        print("no indexing jobs")
+
+        return
+    for job in rows:
+        pct = f"{100 * job['done'] // job['total']}%" if job.get("total") else "—"
+        line = f"  {job['repo']:<24} {job['state']:<10} {job['done']}/{job['total']} {pct}"
+        print(line + (f"  {job['error']}" if job.get("error") else ""))
+
+
+def cmd_repos_cancel(args, cfg):
+    from core import jobs
+
+    if jobs.request_cancel(args.repo):
+        print(f"cancel requested for {args.repo!r} — what is already indexed stays")
+    else:
+        print(f"no job for {args.repo!r}")
+
+
+def cmd_repos_daemon(args, cfg):
+    from core import daemon, indexer
+
+    if args.action == "stop":
+        print("daemon stopped" if daemon.stop() else "no daemon was running")
+
+        return
+    if args.action == "start":
+        out = daemon.start()
+        print(f"daemon {out['action']} (pid {out['pid']})")
+
+        return
+    # `run` is what the detached process executes. It is a command rather than a flag so the
+    # daemon is startable by hand when something needs to be watched directly.
+    daemon.run(indexer.work(cfg), watch=indexer.watcher(cfg))
 
 
 # ---- parser ----------------------------------------------------------------
@@ -795,13 +946,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("repo")
     p.set_defaults(fn=cmd_repos_refresh)
 
-    p = repsub.add_parser("install-hook",
-                          help="install a git post-commit hook that refreshes on every commit")
+    p = repsub.add_parser("init", help="detect the repository here and OFFER to index it — "
+                                       "never indexes on its own")
+    p.add_argument("--path", help="the working copy (default: the current directory)")
+    p.set_defaults(fn=cmd_repos_init)
+
+    p = repsub.add_parser("add-all", help="index a whole repository, in the background")
     p.add_argument("repo")
     p.add_argument("--path", help="the working copy (default: the current directory)")
-    p.add_argument("--force", action="store_true",
-                   help="replace a hook this plugin wrote before")
-    p.set_defaults(fn=cmd_repos_install_hook)
+    p.set_defaults(fn=cmd_repos_add_all)
+
+    p = repsub.add_parser("status", help="what is being indexed, and whether the daemon is up")
+    p.set_defaults(fn=cmd_repos_status)
+
+    p = repsub.add_parser("cancel", help="stop indexing a repository; what is indexed stays")
+    p.add_argument("repo")
+    p.set_defaults(fn=cmd_repos_cancel)
+
+    p = repsub.add_parser("daemon", help="the background indexer")
+    p.add_argument("action", choices=["start", "stop", "run"])
+    p.set_defaults(fn=cmd_repos_daemon)
 
     p = repsub.add_parser("drop", help="delete a repository archive, permanently")
     p.add_argument("repo")

@@ -1,10 +1,15 @@
 """The operations the MODEL may invoke, as hermes tool schemas.
 
-Twenty of the CLI's twenty-five. The five left out are `setup` (interactive, wants a TTY)
-and `config show/set/detect` plus `collections` — configuration belongs to the operator, and
-a `config set` tool would let the model point the archive somewhere else mid-conversation.
-The CLI still carries all twenty-five in both hosts; this is only about what the model
-reaches on its own.
+Most of the CLI, minus what belongs to the OPERATOR rather than the model: `setup`
+(interactive, wants a TTY), `config show/set/detect` and `collections` — a `config set` tool
+would let the model point the archive somewhere else mid-conversation — plus the daemon's own
+levers (`repos_daemon`, `repos_add_all`, `repos_status`, `repos_cancel`; see NOT_FOR_THE_MODEL
+in tests/test_host_equivalence.py for the exact, enforced set). `repos_add_all` in particular
+starts real background work and is a decision only a person makes; `repos_init`, which only
+ANSWERS whether a directory is an indexable repo, stays in. The CLI still carries every one of
+these in both hosts; this is only about what the model reaches on its own. Deliberately no
+count is written here: it has gone stale before, and a number nobody updates is worse than no
+number — the enforced set in test_host_equivalence.py is the one source of truth.
 
 Every handler returns a JSON STRING, and no handler raises. hermes surfaces a raise as a
 crashed turn; a JSON error is something the model can read and react to. The string part is
@@ -413,6 +418,31 @@ def _repos_drop(args: dict, cfg) -> str:
     repo = _require(args, "repo")
 
     return _ok(_repos(cfg).drop_request(repo, _bool(args, "yes")))
+
+
+def _repos_init(args: dict, cfg) -> str:
+    """Detects whether `path` (default: this process's working directory) is an unindexed
+    git repository and returns the choice to offer — never decides it. Calls the SAME core
+    method `qctx repos init` calls (`RepoIndex.candidates_for`), so the two hosts cannot
+    answer the same working copy differently.
+
+    WRITES NOTHING, unlike every other handler above. It binds no checkout, registers no
+    repository and enqueues no work — which is exactly why it is safe for the model to call
+    on its own where `repos_add_all` stays withheld from it (see NOT_FOR_THE_MODEL in
+    tests/test_host_equivalence.py): answering "is this indexed, and as what" commits to
+    nothing; starting to index does, and that is the human's call, made with `repos_add_all`.
+    """
+    from core import bindings
+
+    path = _text(args, "path") or os.getcwd()
+    root = bindings.git_root(path)
+    if not root:
+        raise ToolArgError(f"{path!r} is not inside a git working copy — pass a 'path' "
+                           "argument that is, or call this from one")
+    found = _repos(cfg).candidates_for(root, bindings.remotes_of(root))
+    found["root"] = root
+
+    return _ok(found)
 
 
 # ---- schemas ---------------------------------------------------------------
@@ -871,6 +901,32 @@ SCHEMAS = [
             "required": ["repo", "yes"],
         },
     },
+    {
+        "name": "repos_init",
+        "description": ("Check whether a working copy is an unindexed git repository, and "
+                        "if so what to call it. Use it when you notice the CURRENT WORKING "
+                        "DIRECTORY (or a given `path`) is a git repository that repos_list "
+                        "does not show as indexed, so you can OFFER to index it — the answer "
+                        "is a suggestion for the person to accept or refuse, never a reason "
+                        "to call repos_add_all yourself. IT WRITES NOTHING: no repository is "
+                        "bound, registered or queued by calling it, so it is safe to call "
+                        "freely, including just to check. 'bound' is set when this working "
+                        "copy is already indexed under a name; 'join' lists repositories "
+                        "that share a remote with it — the SAME repository, checked out "
+                        "elsewhere, to offer joining rather than duplicating; 'taken' says "
+                        "the suggested name already belongs to something unrelated; "
+                        "'suggest' is the name to propose. Outside a git working copy it "
+                        "refuses by naming that, rather than guessing a repository."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "The working copy to check. Defaults to the "
+                                        "current working directory."},
+            },
+            "required": [],
+        },
+    },
 ]
 
 ROUTES = {
@@ -895,6 +951,7 @@ ROUTES = {
     "repos_search": _repos_search,
     "repos_add": _repos_add,
     "repos_drop": _repos_drop,
+    "repos_init": _repos_init,
 }
 
 

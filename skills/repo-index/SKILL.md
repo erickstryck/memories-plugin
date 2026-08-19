@@ -47,9 +47,11 @@ A file that was DELETED comes back as `missing` and its chunks are kept — dele
 here is explicit and permanent (`repos drop`), so `missing` is a signal to decide, not an
 automatic removal.
 
-To stop doing it by hand, `qctx repos install-hook my-project` writes a git `post-commit` that
-refreshes in the background after each commit. It never commits, stages or pushes anything, it
-cannot fail a commit, and it refuses to overwrite a `post-commit` another tool already owns.
+To index a whole project, `qctx repos init` detects the repository and offers a name, and
+`qctx repos add-all <name>` queues it. The work happens in a background daemon — the terminal
+stays free, `qctx repos status` shows progress, and `qctx repos cancel <name>` stops it while
+keeping what was already indexed. The daemon then watches that repository and reindexes changed
+files by itself, so `[stale]` becomes rare rather than routine.
 
 **When nothing matches, the output says so in a sentence.** An empty screen would read as
 "there is nothing about this", which is the one conclusion this must never let you draw

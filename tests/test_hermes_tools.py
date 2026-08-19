@@ -35,7 +35,7 @@ EXPECTED = {
     "memory_update", "memory_delete", "memory_list", "memory_search_collections",
     "docs_index", "docs_keep", "docs_search", "docs_list", "docs_refresh", "docs_drop",
     "repos_list", "repos_search", "repos_add", "repos_drop", "repos_register",
-    "repos_refresh",
+    "repos_refresh", "repos_init",
 }
 FORBIDDEN = {"setup", "config_set", "config_detect", "config_show", "collections"}
 
@@ -845,6 +845,76 @@ class TestDocsTools(unittest.TestCase):
         self.call("docs_index", path=self.path, ttl="1h")
         res = self.call("docs_drop", expired=True)
         self.assertEqual(res["status"], "swept")
+
+
+class TestReposInitTool(unittest.TestCase):
+    """`repos_init` is the third caller of `RepoIndex.candidates_for`, after the CLI's
+    `repos init` and this suite's own equality check against the core — and the one that
+    matters most, because it is the only one of the three the model may reach on its own.
+    Task 5 withheld `repos_add_all` (queues work) from the model; this is the read side of
+    that same decision — it answers "is this indexed" without ever starting to index."""
+
+    def _repo_index(self):
+        q, emb = FakeVectorStore(), FakeEmbedder()
+
+        return core.RepoIndex(q, emb, "repos", "reg", emb.dim), q
+
+    def _git_repo(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, timeout=60)
+
+        return root
+
+    def test_it_returns_what_the_core_gives_plus_the_root_it_resolved(self):
+        """Same shape `qctx repos init --json` returns: this is the SAME core call, not a
+        re-implementation a model could get a different answer from."""
+        index, _q = self._repo_index()
+        root = self._git_repo()
+        from core import bindings
+
+        with unittest.mock.patch.object(core, "build_repos", lambda cfg, **kw: index):
+            out = json.loads(tools.dispatch("repos_init", {"path": root}, cfg=a_config()))
+        expected = index.candidates_for(root, bindings.remotes_of(root))
+        expected["root"] = root
+        self.assertEqual(out, expected)
+
+    def test_outside_a_git_repo_it_refuses_by_name_instead_of_guessing(self):
+        elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        out = json.loads(tools.dispatch("repos_init", {"path": elsewhere}, cfg=a_config()))
+        self.assertIn("error", out)
+        self.assertIn("git", out["error"].lower(),
+                      "a refusal that does not name what is missing reads exactly like "
+                      "any other failure, and the model cannot tell 'not a repo' from "
+                      "'archive unreachable'")
+
+    def test_it_writes_nothing(self):
+        """The load-bearing property named in the tool's own description: a model may call
+        this freely BECAUSE it decides nothing. Checked two ways — the fake registry the
+        core would have written a new entry into, and the state directory `bindings.bind`
+        would have written a file under — neither moves."""
+        index, q = self._repo_index()
+        root = self._git_repo()
+        state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+        before_points = {name: len(c["points"]) for name, c in q.collections.items()}
+
+        with unittest.mock.patch.dict(os.environ, {"QCTX_STATE_DIR": state_dir}), \
+             unittest.mock.patch.object(core, "build_repos", lambda cfg, **kw: index):
+            out = json.loads(tools.dispatch("repos_init", {"path": root}, cfg=a_config()))
+
+        self.assertNotIn("error", out)
+        after_points = {name: len(c["points"]) for name, c in q.collections.items()}
+        self.assertEqual(after_points, before_points,
+                         "a point appeared in the fake registry — something wrote through "
+                         "a call that is supposed to only read it")
+        self.assertEqual(q.calls, [],
+                         "ensure_collection/set_payload/upsert were all called through a "
+                         "call that is supposed to only read")
+        self.assertEqual(os.listdir(state_dir), [],
+                         "a file appeared under the state directory — repos_init must "
+                         "never write the binding a human has not consented to yet")
 
 
 class TestTheWiringFromOutside(unittest.TestCase):

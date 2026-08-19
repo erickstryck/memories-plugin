@@ -577,8 +577,30 @@ the CLI name is on the left, the hermes tool name on the right.
 | `repos search` | `repos_search` | search one repository, or `--all` to ask which ones mention it |
 | `repos list` | `repos_list` | every repository, with counts and when it was last indexed |
 | `repos refresh` | `repos_refresh` | reindex the files that changed on disk since indexing |
-| `repos install-hook` | — *(CLI only)* | a git `post-commit` that refreshes after each commit |
+| `repos init` | `repos_init` | detect this working copy and offer to index it |
+| `repos add-all` | — *(CLI only)* | index the whole repository, in the background |
+| `repos status` | — *(CLI only)* | what is indexing, and whether the daemon is up |
+| `repos cancel` | — *(CLI only)* | stop indexing; what is already indexed stays |
+| `repos daemon` | — *(CLI only)* | start, stop, or run the background indexer |
 | `repos drop` | `repos_drop` | delete a repository archive, permanently |
+
+### Indexing a whole project
+
+```bash
+cd ~/dev/my-project
+qctx repos init                  # detects the repo and offers a name
+qctx repos add-all my-project    # queues it; the daemon does the work
+qctx repos status                # progress, and whether the daemon is up
+```
+
+The daemon indexes in the background, so your terminal is free. It also **watches** the
+repositories it indexed: a file you change is reindexed within a few seconds, including one you
+have not committed. Cancelling keeps whatever was already indexed, and running `add-all` again
+skips the files that did not change.
+
+**It ends when you do.** Each session writes a lease with its host's pid; when the last claude or
+hermes exits — cleanly or killed — the daemon notices within a cycle and stops. Nothing is left
+running behind you.
 
 ### Configuration and diagnostics — CLI only
 

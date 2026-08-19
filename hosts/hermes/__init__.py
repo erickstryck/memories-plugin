@@ -233,6 +233,27 @@ class MemoriesProvider(_Base):
         hermes_home = kwargs.get("hermes_home")
         if hermes_home:
             self._state_dir = Path(hermes_home) / "memories-state"
+        # The provider runs INSIDE hermes, so this process IS the host: no tree to walk.
+        try:
+            from core import daemon, lease
+
+            lease.write(self._session_id, "hermes")
+            # The lease alone only records that hermes is alive; without also starting the
+            # daemon here, watching would only ever last for a session where someone happened
+            # to type a `repos` command — which the user's "se o projeto sofrer atualizações"
+            # promise does not survive. `daemon.start()` is idempotent ("already" when one is
+            # alive), so this is a call, not a race, and `start()` itself is responsible for
+            # never leaving a claim behind that this long-lived process would then be stuck
+            # holding forever if the spawn could not be confirmed — see its docstring.
+            #
+            # QCTX_DAEMON_AUTOSTART_DISABLED="1" skips it — same escape hatch, same naming
+            # convention, as the one `hooks/lease.py` honours for the other host, so a test
+            # that calls `initialize()` in-process never spawns a real detached daemon.
+            if os.environ.get("QCTX_DAEMON_AUTOSTART_DISABLED") != "1":
+                daemon.start()
+        except Exception:                           # noqa: BLE001
+            pass                                    # a missing lease or daemon costs watching
+                                                    # that starts later, never a broken session
 
     def shutdown(self) -> None:
         self._store = None
@@ -242,7 +263,12 @@ class MemoriesProvider(_Base):
         self._reranker = None
 
     def get_tool_schemas(self) -> list:
-        """The 15 operations the model may invoke. See tools.py for the five left out.
+        """The operations the model may invoke — see tools.py's module docstring for exactly
+        which CLI commands are withheld and why, and tests/test_host_equivalence.py's
+        NOT_FOR_THE_MODEL for the enforced set. No count is written here on purpose: a number
+        copied at one point in time is a number that rots the next time the set changes, which
+        already happened once (four daemon-related commands joined the withheld set after this
+        line was first written, and the line kept saying "the five left out").
 
         A deep copy, not the module constant: hermes normalizes and wraps what it gets
         here, and an edit to a shared nested dict would outlive the call and reach the next
