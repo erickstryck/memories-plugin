@@ -407,6 +407,20 @@ class RepoIndex:
 
         return report
 
+    def changed_paths(self, repo: str) -> list[str]:
+        """The indexed paths of `repo` whose file changed on disk. The cheap half of `refresh`.
+
+        Split out because the watcher asks this question every cycle and must not pay for the
+        expensive half — `refresh` re-embeds, this only compares metadata.
+        """
+        out = []
+        for path, md in sorted(self._indexed_sources(repo).items()):
+            if source_changed(path, md.get("src_mtime"), md.get("src_size"),
+                              md.get("src_digest")):
+                out.append(path)
+
+        return out
+
     def _indexed_sources(self, repo: str) -> dict:
         """`path -> source metadata`, one entry per FILE, for the chunks of one repository.
 

@@ -693,7 +693,7 @@ def cmd_repos_daemon(args, cfg):
         return
     # `run` is what the detached process executes. It is a command rather than a flag so the
     # daemon is startable by hand when something needs to be watched directly.
-    daemon.run(indexer.work(cfg), watch=None)
+    daemon.run(indexer.work(cfg), watch=indexer.watcher(cfg))
 
 
 # ---- parser ----------------------------------------------------------------
