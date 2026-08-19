@@ -1,25 +1,72 @@
 #!/usr/bin/env bash
-# CLI launcher, so `qctx` works from any directory.
+# CLI launcher, so `qctx` works from any directory AND from any install shape.
 #
 # It exists because the skills and the documentation need to cite ONE stable command.
 # Without it, every invocation would have to carry the plugin's install path, which
 # changes with the version — and an instruction with a fragile path is an instruction
 # that stops working without anyone noticing.
 #
-# Install with:
-#     ln -s "$PWD/bin/qctx" ~/.local/bin/qctx
+# `qctx install` COPIES this file to ~/.local/bin/qctx, so it must not assume it sits
+# inside the tree it runs: it resolves the live install on every call. That is what
+# survives `claude plugin update`, which installs into a directory named after the new
+# commit and leaves the old one behind.
 set -euo pipefail
 
-# Resolve symlinks to find the repository's real root, even when invoked through a
-# symlink in another directory.
-target="${BASH_SOURCE[0]}"
-while [ -L "$target" ]; do
-  dest="$(readlink "$target")"
-  case "$dest" in
-    /*) target="$dest" ;;
-    *)  target="$(cd -P "$(dirname "$target")" && pwd)/$dest" ;;
-  esac
-done
-root="$(cd -P "$(dirname "$target")/.." && pwd)"
+# The tree this script lives in, with symlinks resolved — the development install is a
+# symlink, and following it is the whole reason this loop exists.
+own_tree() {
+  local target="${BASH_SOURCE[0]}" dest
+  while [ -L "$target" ]; do
+    dest="$(readlink "$target")"
+    case "$dest" in
+      /*) target="$dest" ;;
+      *)  target="$(cd -P "$(dirname "$target")" && pwd)/$dest" ;;
+    esac
+  done
+  cd -P "$(dirname "$target")/.." && pwd
+}
+
+# The claude-code install path is not guessable: the cache directory is named after the
+# commit. The harness records the live one, so read it instead of globbing.
+claude_tree() {
+  local registry="$HOME/.claude/plugins/installed_plugins.json"
+  [ -f "$registry" ] || return 0
+  python3 - "$registry" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+    if entry.get("installPath"):
+        print(entry["installPath"])
+        break
+PY
+}
+
+resolve_root() {
+  local candidate
+  for candidate in \
+      "${QCTX_HOME:-}" \
+      "$(own_tree)" \
+      "${HERMES_HOME:-$HOME/.hermes}/plugins/memories" \
+      "$(claude_tree)"; do
+    if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf 'qctx: could not find the plugin tree. Set QCTX_HOME to the checkout.\n' >&2
+  return 1
+}
+
+root="$(resolve_root)"
+
+# Prints what it resolved and exits — the one thing a person debugging a stale copy needs,
+# and what the wizard's own check reports.
+if [ "${1:-}" = "--root" ]; then
+  printf '%s\n' "$root"
+  exit 0
+fi
 
 exec python3 "$root/cli/qctx.py" "$@"
