@@ -185,10 +185,19 @@ que eu tinha escrito:
   garantia. Servidor com outro modelo faz o check de embedding falhar dizendo que o modelo
   não responde — com a correção a um Enter de distância, na segunda passada.
 
-**A prova.** Um teste compara a lista de campos que o wizard percorre com
-`config.DEFAULTS` menos `config.SECRET_FIELDS`, e falha se sobrar qualquer um dos dois
-lados. Campo novo em `Config` quebra o teste até ser colocado numa das passadas — é a mesma
-lição que `_check_collections` já aprendeu na marra ("ALL FIVE, and the count is the
+**As duas chaves são perguntadas como todo o resto.** O que muda nelas é o **destino**, não
+se o wizard pergunta: os outros treze campos vão para o `config.json`, as duas chaves vão
+para os arquivos de credencial descritos abaixo. `SECRET_FIELDS` é uma regra sobre onde se
+escreve, nunca sobre o que se pergunta.
+
+**A prova.** Um teste compara a lista de campos que o wizard percorre com **todo** o
+`config.DEFAULTS` — as quinze, chaves incluídas — e falha se sobrar de qualquer lado. Um
+segundo teste, curto, verifica o destino: depois de um apply completo, nenhuma das duas
+chaves aparece no `config.json`, em nenhuma grafia. Assim a completude e o sigilo são duas
+asserções separadas, e nenhuma das duas pode ser satisfeita esquecendo a outra.
+
+Campo novo em `Config` quebra o primeiro teste até ser colocado numa das passadas — é a
+mesma lição que `_check_collections` já aprendeu na marra ("ALL FIVE, and the count is the
 point": ele enumerava três de cinco e reportava `ready` numa configuração em que o acervo de
 repositórios estava por cima do de memória).
 
@@ -235,6 +244,18 @@ Nunca ecoa o valor: confirma por nome da variável e comprimento. No `--check`, 
 chave está presente e em qual grafia — todas as que o core aceita, três para a do Qdrant,
 porque checar menos grafias do que o core aceita seria pior do que não checar.
 
+**Numa máquina só-claude não existe arquivo de credencial do plugin**, e isto tem de ser
+dito em vez de resolvido por baixo: se `~/.secrets` (ou o que o usuário nomear) não existir
+e ele não quiser criar, o wizard imprime as duas linhas de `export` e deixa o check
+**pendente**, não `ok`. Chave que só vive na sessão de shell corrente é chave que some no
+próximo terminal, e um wizard que dissesse "pronto" ali estaria mentindo do mesmo jeito que
+o README que originou este trabalho.
+
+Já configurado é reconhecido, não re-perguntado: chave presente aparece como
+`[already set in ~/.hermes/.env]` e Enter mantém. Trocar exige digitar por cima, de
+propósito — o wizard roda de novo a cada verificação, e um fluxo que pede as chaves toda vez
+treina a pessoa a colar segredo no terminal por reflexo.
+
 ## O README
 
 A seção de instalação passa a ter o wizard na frente e o caminho manual embaixo — mantido,
@@ -271,8 +292,8 @@ Offline, com `HOME` temporário, sem rede e sem dependência — como todo o res
   árvores falsas; `QCTX_HOME` vencendo as outras três.
 - **launcher velho**: cópia diferente da árvore é detectada; idêntica não gera check.
 - **plano**: as quatro combinações de host presente (nenhum, só claude, só hermes, os dois).
-- **completude**: os campos que o wizard percorre são exatamente `DEFAULTS` menos
-  `SECRET_FIELDS`; sobrar de qualquer lado falha.
+- **completude**: os campos que o wizard percorre são exatamente `DEFAULTS`, as duas chaves
+  incluídas; sobrar de qualquer lado falha.
 - **`context_window`**: `diagnose()` avisa quando não está declarado e cala quando está.
 - **segredo**: depois de um apply completo, `config.json` não contém nenhuma das duas
   chaves, em nenhuma grafia.
