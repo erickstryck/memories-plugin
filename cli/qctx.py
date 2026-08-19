@@ -636,11 +636,45 @@ def cmd_repos_init(args, cfg):
 
 
 def cmd_repos_add_all(args, cfg):
-    from core import bindings, daemon, jobs, scan
+    """Registers `args.repo` if needed, binds this checkout to it, and queues indexing.
+
+    REGISTERS BEFORE ENQUEUEING. `RepoIndex.add_files` refuses to write chunks under a name
+    the registry does not know — correctly, `list_repos` and `divergent_repos` both depend on
+    the registry being authoritative — so without this, the FIRST batch this job ever ran
+    would raise, and the job would land FAILED. This is the primary path the README, `repos
+    init`'s own printed advice and the skill all send the user down, so it must actually work.
+
+    CALLS `register`, NOT `register_request`, and WITH THE CHECKOUT. `register_request`'s own
+    docstring says as much: it is for a caller that has only a name, and "register still
+    accepts both [checkout and remotes]... for the caller that HAS them" — this command has
+    `root` from `bindings.git_root` above. Recording it is not optional plumbing: the
+    watcher's discovery of newly-tracked files (`core/indexer.py`'s `_new_tracked_paths`)
+    walks a repo's registered `checkouts` to know what to run `git ls-files` against, and
+    `register_request` never populates that list (every caller passes an empty checkout) — so
+    calling it here would leave the registry entry without a root the watcher could ever scan.
+    `register` is idempotent for a repeat call on the SAME checkout (accumulates without
+    duplicating) and correctly extends the list for a SECOND checkout of an already-registered
+    repo, so it is called every time rather than only when the name is brand new.
+
+    IF REGISTRATION FAILS — a taken, non-slug name, most likely — IT RAISES, same as every
+    other `CoreError` this CLI lets `main()` print and exit on. Nothing is enqueued: work that
+    cannot be written into is work that would fail its first batch, and this command must not
+    promise indexing it cannot deliver.
+
+    BINDS THE CHECKOUT TO THE REPO NAME, closing the offer `repos init` makes: `candidates_for`
+    reads `bindings.get(root)`, and until this call bound anything, that read was permanently
+    fed by an empty write half — the offer to index never went away even after a successful
+    index. This is the ONE place a checkout is accepted as "this is that repository", because
+    it is the one command that turns "detected" into "working on it".
+    """
+    from core import bindings, daemon, jobs, lease, scan
 
     root = bindings.git_root(args.path or os.getcwd())
     if not root:
         raise SystemExit("not inside a git working copy — pass --path")
+    index = core.build_repos(cfg)
+    index.register(args.repo, args.repo, bindings.remotes_of(root), root)
+    bindings.bind(root, args.repo)
     found = scan.eligible(root)
     dropped = ", ".join(f"{n} {k}" for k, n in sorted(found["skipped"].items()) if n)
     print(f"{found['tracked']} tracked → {len(found['eligible'])} eligible"
@@ -650,14 +684,41 @@ def cmd_repos_add_all(args, cfg):
 
         return
     jobs.enqueue(args.repo, "index", found["eligible"])
-    started = daemon.start()
-    print(f"queued under {args.repo!r}; daemon {started['action']} (pid {started['pid']})")
+    if lease.live():
+        started = daemon.start()
+        print(f"queued under {args.repo!r}; daemon {started['action']} (pid {started['pid']})")
+    else:
+        # A daemon spawned here would exit on its very own first cycle — `daemon.run` checks
+        # `lease.live()` before touching anything else — so starting one now would only print
+        # a pid that is already gone by the time `status` is read next; that is the exact
+        # "queued... daemon started... daemon: not running, with nothing connecting the two"
+        # failure the whole-branch review reproduced. The job IS queued for real, though: the
+        # NEXT claude or hermes session to start writes a lease, and the lease write point in
+        # both hosts now also calls `daemon.start()` (see `hooks/lease.py` and
+        # `hosts/hermes/__init__.py`), so the queue drains automatically once a session opens.
+        # Refusing to queue at all was the other option; this one was chosen because the work
+        # is real and will run — just not this second — and saying so plainly is not a lie the
+        # way printing "daemon started" would be.
+        print(f"queued under {args.repo!r} — no claude or hermes session is open right now, "
+              f"and the daemon only runs while one is. It will start automatically the next "
+              f"time a session opens; to start it immediately instead, open one, or run "
+              f"`qctx repos daemon start` yourself.")
     print("watch it with:  qctx repos status")
 
 
 def cmd_repos_status(args, cfg):
     from core import daemon, jobs, lease
 
+    # REAPS BEFORE READING, because `status` is the ONLY reader that runs with no guarantee a
+    # daemon is alive to do it for itself — `reap` otherwise runs solely from inside
+    # `daemon.run`'s own loop, on ITS OWN cycle. Without this, a daemon that died mid-job
+    # leaves `jobs/<repo>.json` reading `running` forever: not stale data that self-corrects,
+    # a LIE that gets worse the longer nobody looks, because the pid it names never comes back
+    # to finish writing `done`. Same predicate `daemon.run` itself hands to `reap` — raw pid
+    # liveness, not a comparison against the CURRENT daemon record, so a job whose daemon is
+    # genuinely still running is never reaped out from under it just because some OTHER
+    # process currently holds the daemon claim.
+    jobs.reap(lambda pid: lease.process_start(pid) is not None)
     running = daemon.record()
     rows = jobs.all_jobs()
     if args.json:

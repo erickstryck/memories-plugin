@@ -26,11 +26,24 @@ def main() -> None:
     except ValueError:
         payload = {}
     try:
-        from core import lease
+        from core import daemon, lease
 
         found = lease.find_host_pid(names=("claude",))
         pid = found[0] if found else os.getppid()
         lease.write(str(payload.get("session_id") or "default"), "claude", pid=pid)
+        # The lease alone only records that a host is alive; without this call nothing ever
+        # STARTS the daemon outside of someone typing a `repos` command by hand, so watching
+        # would only ever last for the session where that happened. `daemon.start()` is
+        # idempotent — "already" when one is alive — so this is a call, not a race: it either
+        # confirms the existing daemon or starts the one this lease now justifies.
+        #
+        # QCTX_DAEMON_AUTOSTART_DISABLED="1" skips it, same naming convention as
+        # QCTX_CHECKPOINT_DISABLED and QCTX_RECALL_DISABLED elsewhere in this project. This is
+        # what keeps a SessionStart integration test from spawning a real, detached background
+        # process against whatever Qdrant the environment happens to have configured — the
+        # suite sets it for exactly that reason (see tests/test_repos_init.py).
+        if os.environ.get("QCTX_DAEMON_AUTOSTART_DISABLED") != "1":
+            daemon.start()
     except Exception:                               # noqa: BLE001 — see the module docstring
         pass
 

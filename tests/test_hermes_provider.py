@@ -1173,6 +1173,55 @@ class TestConfigSchema(unittest.TestCase):
         self.assertEqual(written["memory_collection"], "new_collection")
 
 
+class TestInitializeStartsTheDaemon(unittest.TestCase):
+    """`initialize()` now also calls `core.daemon.start()` (whole-branch review finding 4):
+    without it, watching a repository only survives the session where a `repos` command was
+    typed by hand, which is not what "se o projeto sofrer atualizações" promises.
+
+    `core.daemon.start` is PATCHED rather than allowed to run — the real one launches a
+    detached `qctx repos daemon run` by default, and "no test may start a real daemon" is
+    absolute. This proves the WIRING (the call happens, and the escape hatch gates it), the
+    same way tests/test_repos_init.py proves it for the other host's SessionStart hook.
+    """
+
+    def setUp(self):
+        previous_state = os.environ.get("QCTX_STATE_DIR")
+        previous_autostart = os.environ.get("QCTX_DAEMON_AUTOSTART_DISABLED")
+        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        os.environ.pop("QCTX_DAEMON_AUTOSTART_DISABLED", None)
+        self.addCleanup(self._restore, "QCTX_STATE_DIR", previous_state)
+        self.addCleanup(self._restore, "QCTX_DAEMON_AUTOSTART_DISABLED", previous_autostart)
+
+    @staticmethod
+    def _restore(key, previous) -> None:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+    def test_it_calls_daemon_start_by_default(self):
+        provider = MemoriesProvider()
+        with unittest.mock.patch("core.daemon.start") as started:
+            provider.initialize("s-1")
+        started.assert_called_once()
+
+    def test_QCTX_DAEMON_AUTOSTART_DISABLED_skips_the_call(self):
+        os.environ["QCTX_DAEMON_AUTOSTART_DISABLED"] = "1"
+        provider = MemoriesProvider()
+        with unittest.mock.patch("core.daemon.start") as started:
+            provider.initialize("s-1")
+        started.assert_not_called()
+
+    def test_daemon_start_RAISING_does_not_break_initialize(self):
+        """The hazard the finding names explicitly: `initialize()` runs INSIDE a long-lived
+        hermes process, so a `daemon.start()` failure (see core/daemon.py's `DaemonError`)
+        must be swallowed here exactly like a lease write failure already is — never break
+        session start."""
+        provider = MemoriesProvider()
+        with unittest.mock.patch("core.daemon.start", side_effect=RuntimeError("boom")):
+            provider.initialize("s-1")                 # must not raise
+
+
 if __name__ == "__main__":
     # See the note in tests/test_blocks.py: run directly, this file used to report nothing
     # and exit 0.

@@ -235,12 +235,25 @@ class MemoriesProvider(_Base):
             self._state_dir = Path(hermes_home) / "memories-state"
         # The provider runs INSIDE hermes, so this process IS the host: no tree to walk.
         try:
-            from core import lease
+            from core import daemon, lease
 
             lease.write(self._session_id, "hermes")
+            # The lease alone only records that hermes is alive; without also starting the
+            # daemon here, watching would only ever last for a session where someone happened
+            # to type a `repos` command — which the user's "se o projeto sofrer atualizações"
+            # promise does not survive. `daemon.start()` is idempotent ("already" when one is
+            # alive), so this is a call, not a race, and `start()` itself is responsible for
+            # never leaving a claim behind that this long-lived process would then be stuck
+            # holding forever if the spawn could not be confirmed — see its docstring.
+            #
+            # QCTX_DAEMON_AUTOSTART_DISABLED="1" skips it — same escape hatch, same naming
+            # convention, as the one `hooks/lease.py` honours for the other host, so a test
+            # that calls `initialize()` in-process never spawns a real detached daemon.
+            if os.environ.get("QCTX_DAEMON_AUTOSTART_DISABLED") != "1":
+                daemon.start()
         except Exception:                           # noqa: BLE001
-            pass                                    # a missing lease costs a daemon that ends
-                                                    # sooner, never a broken session
+            pass                                    # a missing lease or daemon costs watching
+                                                    # that starts later, never a broken session
 
     def shutdown(self) -> None:
         self._store = None

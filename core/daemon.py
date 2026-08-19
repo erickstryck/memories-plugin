@@ -20,11 +20,18 @@ import time
 from pathlib import Path
 
 from . import jobs, lease
+from .errors import CoreError
 from .knobs import state_dir
 
 #: How long the loop sleeps between cycles. Short enough that a cancel or a file change is
 #: noticed while the user is still looking at the screen; long enough to be free.
 CYCLE_S = 5.0
+
+
+class DaemonError(CoreError):
+    """The daemon could not be started, or a start could not be confirmed. Raised only by
+    `start`, and only after the claim it took is released — a caller that catches this must
+    never see a stale claim left behind that a later `start()` would trip over."""
 
 
 def path() -> Path:
@@ -60,6 +67,23 @@ def start(spawn=None, argv: list[str] | None = None) -> dict:
     the design's answer to "two daemons": exclusive creation decides who won, not a check.
 
     `spawn` is injected for tests; by default it launches a detached `qctx repos daemon run`.
+
+    RAISES `DaemonError`, and RELEASES ITS OWN CLAIM, when either step after the claim fails:
+
+    - `spawn` itself raises (the executable is missing, `fork` fails, ...) — nothing is
+      running, so the claim is simply released and the reason is reported.
+    - `spawn` SUCCEEDS but `_write_record` cannot persist the real pid — the trickier case,
+      because a live process now exists that the claim does not correctly describe. Leaving
+      the placeholder in place would misrepresent the CALLER as the daemon; releasing the
+      claim without stopping the process would let it keep running untracked, and the next
+      `start()` would then be free to spawn a second one — the one outcome the design calls
+      impossible (`O_EXCL` only prevents two CONCURRENT claims, not a claim that never
+      correctly recorded what it started). So the spawned process is killed and the claim is
+      released: a start that could not be recorded is a failed start, not a silent orphan.
+
+    Called from inside a long-lived host process (hermes' `initialize()`), not only from a
+    short CLI invocation — so this cannot rely on "the caller will exit soon and the stale
+    claim will self-heal", which is what an ephemeral CLI process gets for free.
     """
     if not _claim():
         existing = record()
@@ -67,11 +91,34 @@ def start(spawn=None, argv: list[str] | None = None) -> dict:
         return {"action": "already", "pid": existing.get("pid", 0) if existing else 0}
     launch = spawn or _spawn
     command = argv or [sys.executable, _qctx_path(), "repos", "daemon", "run"]
-    pid = launch(command)
-    _write_record({"pid": pid, "starttime": lease.process_start(pid) or "",
-                   "started_at": time.time()})
+    try:
+        pid = launch(command)
+    except OSError as exc:
+        _release_claim()
+        raise DaemonError(f"could not start the daemon: {exc}") from exc
+    if not _write_record({"pid": pid, "starttime": lease.process_start(pid) or "",
+                          "started_at": time.time()}):
+        _kill_quietly(pid)
+        _release_claim()
+        raise DaemonError(f"the daemon started (pid {pid}) but its record could not be "
+                          f"written — state directory unavailable; the process was stopped "
+                          f"rather than left running untracked")
 
     return {"action": "started", "pid": pid}
+
+
+def _release_claim() -> None:
+    try:
+        path().unlink()
+    except OSError:
+        pass
+
+
+def _kill_quietly(pid: int) -> None:
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        pass
 
 
 def _claim() -> bool:
@@ -121,8 +168,19 @@ def _try_create() -> bool:
     return True
 
 
-def stop() -> bool:
-    """Asks the running daemon to end. False when there was none."""
+def stop(timeout_s: float = 2.0, poll_s: float = 0.05, sleep=time.sleep) -> bool:
+    """Asks the running daemon to end, and WAITS for it to actually be gone before releasing
+    the claim. False when there was none, or when the process did not die within `timeout_s`.
+
+    UNLINKING RIGHT AFTER THE SIGNAL — an earlier version did exactly that — freed the claim
+    while the process could still be mid-shutdown, so `stop()` immediately followed by
+    `start()` (as `add-all` does) could spawn a SECOND live daemon before the first one had
+    actually exited. Polling the same `(pid, starttime)` test the leases use closes that
+    window: the claim is released only once the process is confirmed gone, comparing
+    `starttime` too so a pid recycled during the wait is not mistaken for the daemon still
+    running. A timeout that runs out KEEPS the claim rather than guessing — a stale "running"
+    that turns out to be true is safer than a second daemon spawned onto a live first one.
+    """
     entry = record()
     if not entry:
         return False
@@ -130,6 +188,11 @@ def stop() -> bool:
         os.kill(int(entry["pid"]), 15)
     except (OSError, ValueError, KeyError):
         return False
+    deadline = time.monotonic() + timeout_s
+    while lease.alive(entry):
+        if time.monotonic() >= deadline:
+            return False
+        sleep(poll_s)
     try:
         path().unlink()
     except OSError:
@@ -201,14 +264,19 @@ def _run_one(job: dict, work) -> None:
     jobs.update(repo, state=jobs.DONE, current="")
 
 
-def _write_record(entry: dict) -> None:
+def _write_record(entry: dict) -> bool:
+    """Writes the daemon record. Returns True on success, False on failure — checked by
+    `start()`, which cannot afford to treat "wrote" and "did not" the same way `jobs._write`
+    can, because the process behind a failed write is still running."""
     try:
         path().parent.mkdir(parents=True, exist_ok=True)
         tmp = path().with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(entry, indent=1, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path())
+
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _spawn(argv: list[str]) -> int:
