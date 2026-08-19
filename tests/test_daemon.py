@@ -109,6 +109,29 @@ class TestItRunsWhatIsQueued(unittest.TestCase):
         self.assertEqual(jobs.load("alpha")["state"], jobs.CANCELLED)
 
 
+class TestItWatches(unittest.TestCase):
+    """`watch()` runs on every cycle where no job is pending — same loop, same survival rule
+    the worker already gets."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_watcher_that_RAISES_does_not_end_the_daemon(self):
+        """`run`'s contract is that one broken repository must not stop the others, and the
+        worker already honours it. The watcher reaches `jobs.enqueue`, which raises when the
+        state directory cannot be written — so without the same guard, one unwritable repo
+        would take down indexing for every repository being watched."""
+        a_live_lease()
+
+        def exploding_watch():
+            raise jobs.JobError("the state dir vanished")
+
+        out = daemon.run(lambda job: None, cycles=3, sleep=lambda s: None,
+                         watch=exploding_watch)
+        self.assertEqual(out, "cycles exhausted",
+                         "an exception from watch() ended the daemon")
+
+
 class TestOnlyONEDaemon(unittest.TestCase):
     def setUp(self):
         a_state_dir()

@@ -152,7 +152,9 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
       4. otherwise watch, which is where changed files become new jobs.
 
     A worker that raises marks its job failed and the loop CONTINUES — one broken repository
-    must not end the daemon for the others.
+    must not end the daemon for the others. `watch` gets the SAME survival guarantee: it has no
+    single job to mark failed, but letting it propagate would end indexing for every repository
+    being watched over one that could not enqueue, not just the one that failed.
     """
     seen = 0
     while cycles is None or seen < cycles:
@@ -163,7 +165,15 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
         if job is not None:
             _run_one(job, work)
         elif watch is not None:
-            watch()
+            try:
+                watch()
+            except Exception:                            # noqa: BLE001 — see the docstring
+                # A watcher that cannot enqueue must not end the daemon for every OTHER
+                # repository. There is no job here to mark failed, so the loop simply carries
+                # on: the change is still on disk, the next cycle sees it again, and a file
+                # whose reindex never happens keeps showing `[stale]` in search — which is
+                # where the user actually notices, not in a daemon log nobody is watching.
+                pass
         seen += 1
         if cycles is None or seen < cycles:
             sleep(CYCLE_S)
