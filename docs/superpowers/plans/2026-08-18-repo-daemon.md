@@ -24,7 +24,7 @@ Branch `repo-daemon`, sobre `383e151`. Baseline: **1035 testes, OK (skipped=19)*
 **Antes de qualquer rodada de teste:**
 
 ```bash
-export TMPDIR=/home/erick/.cache/qctx-test-tmp && mkdir -p "$TMPDIR"
+export TMPDIR=$HOME/.cache/qctx-test-tmp && mkdir -p "$TMPDIR"
 ```
 
 A suíte vaza temporários e o `/tmp` é um tmpfs de 16 GB que já encheu e matou todo shell desta
@@ -222,7 +222,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Rode e veja falhar**
 
-Run: `export TMPDIR=/home/erick/.cache/qctx-test-tmp; mkdir -p "$TMPDIR"; python3 -m unittest tests.test_scan 2>&1 | tail -4`
+Run: `export TMPDIR=$HOME/.cache/qctx-test-tmp; mkdir -p "$TMPDIR"; python3 -m unittest tests.test_scan 2>&1 | tail -4`
 Expected: FAIL — `ModuleNotFoundError: No module named 'core.scan'`
 
 - [ ] **Step 3: Implemente `core/scan.py`**
