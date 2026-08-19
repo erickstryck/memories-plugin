@@ -72,6 +72,25 @@ class TestTheQueue(unittest.TestCase):
     def test_a_repo_with_no_job_loads_as_None(self):
         self.assertIsNone(jobs.load("never-queued"))
 
+    def test_enqueue_raises_JobError_when_state_directory_cannot_be_written(self):
+        """Enqueue must raise rather than returning a phantom job. A failed write means the
+        work will never happen, which is worse than a missing job: status could report it
+        queued when it was not."""
+        # Create a file where the state directory should be
+        state_dir_path = jobs.dir()
+        state_dir_path.parent.mkdir(parents=True, exist_ok=True)
+        state_dir_path.touch()
+        
+        # Now enqueue should fail because it cannot create the directory
+        with self.assertRaises(jobs.JobError):
+            jobs.enqueue("alpha", "index", ["/a.py"])
+        
+        # Clean up by removing the blocking file
+        state_dir_path.unlink()
+        # Verify that the job was NOT created
+        self.assertIsNone(jobs.load("alpha"),
+                          "enqueue created a phantom job despite failing to write")
+
 
 class TestProgressAndCancellation(unittest.TestCase):
     def setUp(self):
@@ -95,6 +114,34 @@ class TestProgressAndCancellation(unittest.TestCase):
     def test_cancelling_a_repo_with_no_job_answers_False_instead_of_raising(self):
         self.assertFalse(jobs.request_cancel("never-queued"))
 
+    def test_progress_update_does_NOT_clear_a_cancel_request(self):
+        """A daemon updates progress every batch while a user can request cancel at any moment.
+        The cancel is a separate file so the daemon's read-modify-write of the job dict does not
+        overwrite it. This test reproduces the race: daemon loads stale job, user cancels, daemon
+        writes progress, and the cancel must still be visible."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, done=0)
+        jobs.request_cancel("alpha")
+        # Daemon's progress update does not see the cancel file, writes its view of the job
+        jobs.update("alpha", done=1)
+        # Cancel must still be visible
+        self.assertTrue(jobs.cancel_requested("alpha"),
+                        "progress update overwrote the cancel request")
+
+    def test_enqueue_clears_a_stale_cancel(self):
+        """A fresh job must not inherit a cancellation from the previous one."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.request_cancel("alpha")
+        self.assertTrue(jobs.cancel_requested("alpha"))
+        # Re-enqueue should clear the old cancel
+        jobs.enqueue("alpha", "index", ["/a.py", "/b.py"])
+        self.assertFalse(jobs.cancel_requested("alpha"),
+                         "enqueue did not clear the stale cancel from previous job")
+
+    def test_cancel_requested_is_False_for_missing_job_and_file(self):
+        """No job and no cancel file means nothing to cancel."""
+        self.assertFalse(jobs.cancel_requested("never-existed"))
+
     def test_update_on_a_missing_job_answers_None_instead_of_creating_one(self):
         """An `update` that creates a job from nothing would let a late cancellation
         resurrect a job that already finished."""
@@ -117,7 +164,7 @@ class TestAJobThatOUTLIVEDItsDaemon(unittest.TestCase):
         job = jobs.load("alpha")
         self.assertEqual(job["state"], jobs.FAILED)
         self.assertIn("interrupted", job["error"])
-        self.assertEqual(job["done"], 1, "progress was not lost when marking as interrupted")
+        self.assertEqual(job["done"], 1, "progress was lost when marking the job interrupted")
 
     def test_reap_leaves_a_job_of_a_LIVING_daemon_alone(self):
         jobs.enqueue("alpha", "index", ["/a.py"])

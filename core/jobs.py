@@ -14,6 +14,7 @@ import os
 import time
 from pathlib import Path
 
+from .errors import CoreError
 from .knobs import state_dir
 
 PENDING = "pending"
@@ -21,6 +22,10 @@ RUNNING = "running"
 DONE = "done"
 CANCELLED = "cancelled"
 FAILED = "failed"
+
+
+class JobError(CoreError):
+    """A job could not be queued. Raised only by `enqueue`, and deliberately."""
 
 
 def dir() -> Path:                                  # noqa: A001 — the name says what it holds
@@ -32,12 +37,21 @@ def enqueue(repo: str, kind: str, paths: list[str], total: int | None = None) ->
 
     Replacing rather than appending: asking again means asking about the state of the disk NOW,
     and an older list of paths is a description of a repository that has since changed.
+
+    Raises JobError if the job cannot be written to disk. Unlike `update` and `request_cancel`,
+    which tolerate write failures, a failed enqueue means work will never happen. An absent job
+    is worse than a stale one: `status` could report it queued when it was not.
     """
     job = {"repo": repo, "kind": kind, "paths": list(paths),
            "total": len(paths) if total is None else int(total),
            "done": 0, "current": "", "state": PENDING, "error": "",
-           "cancel": False, "daemon_pid": 0, "queued_at": time.time()}
-    _write(repo, job)
+           "daemon_pid": 0, "queued_at": time.time()}
+    
+    if not _write(repo, job):
+        raise JobError(f"could not queue job for {repo}: state directory is unavailable")
+    
+    # Clear any stale cancel from a previous job
+    _remove_cancel_file(repo)
 
     return job
 
@@ -69,6 +83,9 @@ def update(repo: str, **fields) -> dict | None:
 
     Creating one here would let a late update resurrect a job that had already finished, which
     is exactly the kind of state that outlives the thing it describes.
+
+    Tolerates write failures: losing one progress write is a stale number that the next write
+    corrects. The cost of crashing is worse than the cost of stale progress.
     """
     job = load(repo)
     if job is None:
@@ -84,14 +101,21 @@ def request_cancel(repo: str) -> bool:
 
     A flag on disk rather than a signal: the daemon reads it BETWEEN files, so it stops at a
     point where what is already indexed is consistent.
+
+    Creates a separate cancel file rather than a field in the job dict. The job dict is
+    read-modify-write while progress updates run, and a cancel field would be silently
+    overwritten when the daemon writes progress. No locking, no race: separate files mean the
+    two writers never touch the same document.
     """
-    return update(repo, cancel=True) is not None
+    if load(repo) is None:
+        return False
+    _create_cancel_file(repo)
+    return True
 
 
 def cancel_requested(repo: str) -> bool:
     job = load(repo)
-
-    return bool(job and job.get("cancel"))
+    return bool(job and _cancel_file_exists(repo))
 
 
 def next_pending() -> dict | None:
@@ -125,17 +149,52 @@ def _path(repo: str) -> Path:
     return dir() / f"{_safe(repo)}.json"
 
 
-def _write(repo: str, job: dict) -> None:
+def _cancel_path(repo: str) -> Path:
+    return dir() / f"{_safe(repo)}.cancel"
+
+
+def _write(repo: str, job: dict) -> bool:
+    """Writes the job to disk. Returns True on success, False on failure.
+
+    Tolerates OSError silently: state that cannot be written is state the reader will not find —
+    the same answer as no job at all, which every caller already handles. Only `enqueue` treats
+    write failure as an error condition, because a queued job that was not written is worse than
+    a missing job.
+    """
     try:
         dir().mkdir(parents=True, exist_ok=True)
         path = _path(repo)
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(job, indent=1, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
+        return True
     except OSError:
-        # State that cannot be written is state the reader will not find — the same answer as
-        # no job at all, which every caller already handles.
+        return False
+
+
+def _create_cancel_file(repo: str) -> None:
+    """Creates a cancel file for the given repo. Tolerates failure silently."""
+    try:
+        dir().mkdir(parents=True, exist_ok=True)
+        _cancel_path(repo).touch()
+    except OSError:
         pass
+
+
+def _remove_cancel_file(repo: str) -> None:
+    """Removes a cancel file for the given repo. Tolerates missing file or other errors."""
+    try:
+        _cancel_path(repo).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _cancel_file_exists(repo: str) -> bool:
+    """Returns True if a cancel file exists for the given repo."""
+    try:
+        return _cancel_path(repo).exists()
+    except OSError:
+        return False
 
 
 def _safe(name: str) -> str:
