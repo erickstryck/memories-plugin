@@ -315,11 +315,24 @@ class TestStopWaitsForTheProcessToActuallyDie(unittest.TestCase):
             proc.wait(timeout=5)
 
     def test_stop_GIVES_UP_and_keeps_the_claim_if_the_process_will_not_die(self):
+        """WAITS FOR THE HANDLER, for the same reason its sibling above does — and this test
+        proves the reason is not hypothetical. Without the handshake the SIGTERM lands before
+        `signal.signal(...)` runs, the child dies under the default disposition, and nothing
+        reaps it; the surviving `/proc/<pid>/stat` of the ZOMBIE then read as "still alive" and
+        this test passed while exercising a process that had already exited — the opposite of
+        what its name claims. Treating a zombie as gone removed that cover, which is how the
+        sibling path was found."""
+        ready = Path(tempfile.mkdtemp()) / "ready"
         proc = subprocess.Popen([sys.executable, "-c",
                                  "import signal, time\n"
                                  "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                 f"open({str(ready)!r}, 'w').write('ready')\n"
                                  "time.sleep(30)\n"])
         try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(ready.exists(), "the child never installed its SIGTERM handler")
             daemon._write_record({"pid": proc.pid,
                                   "starttime": lease.process_start(proc.pid)})
             ok = daemon.stop(timeout_s=0.2, poll_s=0.02)
@@ -332,17 +345,33 @@ class TestStopWaitsForTheProcessToActuallyDie(unittest.TestCase):
 
     def test_stop_then_start_does_not_produce_two_daemons(self):
         """The scenario the fix exists for, end to end: a slow-dying daemon must not still be
-        claimable by `start()` the instant `stop()` returns True."""
+        ALIVE when `start()` is free to spawn its replacement.
+
+        ASSERTS THE FIRST PROCESS IS DEAD, not merely that the second one spawned. An earlier
+        version checked only `action == "started"` and `len(spawned) == 1`, which an immediate
+        unlink satisfies just as well as a confirmed one — the claim is free either way, so
+        exactly one spawn happens either way and the test could not fail for the defect it was
+        named after. What separates the two designs is WHEN the claim is released relative to
+        the first process exiting, so that is what this asserts."""
+        ready = Path(tempfile.mkdtemp()) / "ready"
         proc = subprocess.Popen([sys.executable, "-c",
                                  "import signal, sys, time\n"
                                  "signal.signal(signal.SIGTERM, "
                                  "lambda *a: (time.sleep(0.2), sys.exit(0)))\n"
+                                 f"open({str(ready)!r}, 'w').write('ready')\n"
                                  "time.sleep(30)\n"])
         try:
-            daemon._write_record({"pid": proc.pid,
-                                  "starttime": lease.process_start(proc.pid)})
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(ready.exists(), "the child never installed its SIGTERM handler")
+            recorded = lease.process_start(proc.pid)
+            daemon._write_record({"pid": proc.pid, "starttime": recorded})
             self._reap_in_background(proc)
             self.assertTrue(daemon.stop(poll_s=0.01))
+            self.assertFalse(lease.alive({"pid": proc.pid, "starttime": recorded}),
+                             "the claim was released while the first daemon was still alive — "
+                             "a start() here would put a second one on top of it")
             spawned = []
             out = daemon.start(spawn=lambda argv: spawned.append(argv) or os.getpid())
             self.assertEqual(out["action"], "started")

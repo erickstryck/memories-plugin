@@ -699,10 +699,14 @@ def cmd_repos_add_all(args, cfg):
         # Refusing to queue at all was the other option; this one was chosen because the work
         # is real and will run — just not this second — and saying so plainly is not a lie the
         # way printing "daemon started" would be.
+        # DOES NOT OFFER `qctx repos daemon start` HERE. That command spawns `repos daemon
+        # run`, whose first act is to check for a live lease and return immediately when there
+        # is none — so from a bare terminal it prints "daemon started (pid N)" and `status`
+        # then reports "daemon: not running". Suggesting it would hand the user, as the remedy,
+        # the exact confusing failure this message exists to prevent.
         print(f"queued under {args.repo!r} — no claude or hermes session is open right now, "
               f"and the daemon only runs while one is. It will start automatically the next "
-              f"time a session opens; to start it immediately instead, open one, or run "
-              f"`qctx repos daemon start` yourself.")
+              f"time a session opens; open one to have it run now.")
     print("watch it with:  qctx repos status")
 
 

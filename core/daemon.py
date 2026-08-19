@@ -56,7 +56,7 @@ def record() -> dict | None:
     return entry
 
 
-def start(spawn=None, argv: list[str] | None = None) -> dict:
+def start(spawn=None, argv: list[str] | None = None, sleep=time.sleep) -> dict:
     """Starts the daemon if none is running. `{"action": "started" | "already", "pid": int}`.
 
     CLAIMS THE RECORD FILE BEFORE SPAWNING, not after. `record()` then `write()` is a
@@ -96,13 +96,16 @@ def start(spawn=None, argv: list[str] | None = None) -> dict:
     except OSError as exc:
         _release_claim()
         raise DaemonError(f"could not start the daemon: {exc}") from exc
-    if not _write_record({"pid": pid, "starttime": lease.process_start(pid) or "",
-                          "started_at": time.time()}):
-        _kill_quietly(pid)
-        _release_claim()
-        raise DaemonError(f"the daemon started (pid {pid}) but its record could not be "
-                          f"written — state directory unavailable; the process was stopped "
-                          f"rather than left running untracked")
+    starttime = lease.process_start(pid) or ""
+    if not _write_record({"pid": pid, "starttime": starttime, "started_at": time.time()}):
+        if _stop_and_confirm({"pid": pid, "starttime": starttime}, sleep=sleep):
+            _release_claim()
+            raise DaemonError(f"the daemon started (pid {pid}) but its record could not be "
+                              f"written — state directory unavailable; the process was stopped "
+                              f"rather than left running untracked")
+        raise DaemonError(f"the daemon started (pid {pid}) but its record could not be written "
+                          f"AND the process did not stop when asked; the claim is being kept so "
+                          f"nothing starts a second daemon on top of it — kill {pid} by hand")
 
     return {"action": "started", "pid": pid}
 
@@ -114,11 +117,30 @@ def _release_claim() -> None:
         pass
 
 
-def _kill_quietly(pid: int) -> None:
+def _stop_and_confirm(entry: dict, timeout_s: float = 2.0, poll_s: float = 0.05,
+                      sleep=time.sleep) -> bool:
+    """Signals the process named by `entry` and returns True only once it is CONFIRMED gone.
+
+    WHY CONFIRMATION AND NOT A BARE `os.kill`. Releasing the claim is what lets the next
+    `start()` spawn — so releasing it on an unconfirmed kill is exactly how a second daemon
+    gets spawned on top of a first one that is still alive, which the spec calls impossible.
+    A signal that raises (the process is already gone) and a signal that lands but is ignored
+    look identical to the caller; only re-reading `(pid, starttime)` tells them apart, which is
+    the same test the leases and `stop()` use. A timeout that runs out returns False and the
+    caller KEEPS the claim: a stale claim blocks new daemons, while a released one over a live
+    process multiplies them, and of those two failures only the first is recoverable by waiting.
+    """
     try:
-        os.kill(pid, 15)
-    except OSError:
-        pass
+        os.kill(int(entry["pid"]), 15)
+    except (OSError, ValueError, KeyError):
+        pass                                          # already gone, or never startable
+    deadline = time.monotonic() + timeout_s
+    while lease.alive(entry):
+        if time.monotonic() >= deadline:
+            return False
+        sleep(poll_s)
+
+    return True
 
 
 def _claim() -> bool:

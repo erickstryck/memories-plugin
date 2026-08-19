@@ -35,6 +35,14 @@ def process_start(pid: int) -> str | None:
     Parsed from the LAST `)` because the second field is the executable name in parentheses and
     may itself contain spaces or parentheses — splitting the whole line on whitespace is the
     classic way to read this file wrong.
+
+    A ZOMBIE COUNTS AS GONE. A process that has exited but whose parent has not reaped it keeps
+    a `/proc/<pid>/stat` with its original `starttime`, so reading the file alone cannot tell
+    "still running" from "exited a while ago" — and every caller here means the first. That gap
+    is reachable in ordinary use, not just in theory: the daemon is spawned as a child of the
+    process that signals it, so unless that parent also waits, a daemon killed successfully
+    reads as alive forever. State (field 3) is the only thing in the file that distinguishes
+    them, so `Z` is reported the same way a missing file is.
     """
     try:
         with open(f"/proc/{int(pid)}/stat", encoding="utf-8", errors="replace") as fh:
@@ -42,6 +50,8 @@ def process_start(pid: int) -> str | None:
     except (OSError, ValueError, IndexError):
         return None
     fields = after.split()
+    if fields and fields[0] == "Z":
+        return None
 
     return fields[19] if len(fields) > 19 else None
 
