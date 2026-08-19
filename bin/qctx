@@ -54,8 +54,10 @@ resolve_root() {
     return 0
   fi
 
-  # Try own tree (symlinks resolved) — only if QCTX_HOME didn't work
-  candidate="$(own_tree)"
+  # Try own tree (symlinks resolved) — only if QCTX_HOME didn't work.
+  # If own_tree() fails (e.g., dangling symlink from concurrent plugin update),
+  # degrade gracefully to next candidate instead of aborting the script.
+  candidate="$(own_tree)" || candidate=""
   if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
     printf '%s\n' "$candidate"
     return 0

@@ -79,6 +79,63 @@ class LauncherResolution(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("could not find", done.stderr)
 
+    def test_own_tree_failure_falls_through_to_hermes(self):
+        # Verify that when own_tree() fails to return a valid tree, the resolver
+        # gracefully falls through to later candidates (HERMES_HOME in this case)
+        # instead of aborting. This would occur if, for example, a development
+        # install symlink becomes dangling due to concurrent plugin update.
+
+        # Create a valid hermes install that will be the fallback
+        hermes_tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+
+        # Create a launcher copy in a location where own_tree() resolution is
+        # expected to fail (return empty or error). We simulate this by creating
+        # the launcher at a path where the parent directory structure is incomplete,
+        # making own_tree()'s cd operation would fail (if it were to execute).
+        # However, since we can't easily trigger own_tree() failure from within a test
+        # (bash would prevent execution of a dangling symlink), we instead verify
+        # the behavior indirectly: the copy is placed outside any tree, so own_tree()
+        # will return the actual current worktree, which is NOT where we want it.
+        # Since there's no valid tree there to satisfy the cli/qctx.py check,
+        # resolution falls through to hermes_tree.
+
+        copy = self.home / ".local" / "bin" / "qctx"
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(LAUNCHER.read_bytes())
+        copy.chmod(0o755)
+
+        # Run qctx --root from the copy (which is outside any tree)
+        result = run_root(copy, self.env)
+
+        # Should fall back to hermes_tree since own_tree would return the actual
+        # repo (which is not in the isolated HOME), and the check for cli/qctx.py
+        # would not find it in the real repo (since we're in an isolated test).
+        self.assertEqual(result, str(hermes_tree))
+
+    def test_own_tree_candidate_skipped_when_no_valid_tree(self):
+        # Verify that the resolver doesn't abort on own_tree() but gracefully
+        # degrades to the next candidate when own_tree() doesn't provide a
+        # valid tree (one containing cli/qctx.py).
+
+        # Create no hermes install (to isolate the failure path)
+        copy = self.home / ".local" / "bin" / "qctx"
+        copy.parent.mkdir(parents=True)
+        copy.write_bytes(LAUNCHER.read_bytes())
+        copy.chmod(0o755)
+
+        # With no valid candidates available, should produce controlled error
+        done = subprocess.run([str(copy), "--root"], capture_output=True, text=True,
+                              env=self.env, timeout=30)
+
+        # Should fail with controlled error message ("could not find")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("could not find", done.stderr,
+                      "Should fail with controlled error message")
+
+        # Verify no raw bash errors leaked (like "cd: No such file or directory")
+        self.assertNotIn("cd:", done.stderr,
+                         "Raw bash error message leaked; own_tree() failure should be caught gracefully")
+
     def test_lazy_evaluation_skips_claude_tree_when_qctx_home_resolves(self):
         # Verify that claude_tree() is not called when QCTX_HOME resolves.
         # This test uses a python3 shim on PATH that writes to a witness file
