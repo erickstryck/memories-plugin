@@ -121,7 +121,12 @@ def live() -> list[dict]:
     for path in paths:
         try:
             entry = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError:
+            # A transient read error (permission, I/O, EMFILE) is not a dead lease.
+            # Skip it for this cycle but keep the file — the next cycle may succeed.
+            continue
+        except ValueError:
+            # Corrupt JSON is unusable; removing it is right.
             entry = None
         if entry is not None and alive(entry):
             found.append(entry)

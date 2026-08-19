@@ -1,11 +1,11 @@
-"""Quem ainda está usando o daemon.
+"""Who is still using the daemon.
 
-Um lease é um bilhete de "estou vivo": o pid do processo do HOST e o instante em que ele
-começou. O daemon confere os bilhetes a cada ciclo e encerra quando nenhum resta.
+A lease is a note saying "I am alive": the HOST process's pid and the moment it started. The
+daemon checks the notes each cycle and exits when none is left.
 
-POR QUE `(pid, starttime)` E NÃO SÓ O PID: o sistema recicla números de processo. Um pid
-sozinho faz um processo qualquer segurar o daemon para sempre, e a falha seria invisível —
-o daemon apenas nunca encerraria.
+WHY `(pid, starttime)` AND NOT JUST THE PID: the system reuses process numbers. With the pid
+alone any process that inherited that number would hold the daemon open forever, and the
+failure would be invisible — the daemon merely never exits.
 """
 import os
 import subprocess
@@ -31,11 +31,11 @@ class TestReadingAProcess(unittest.TestCase):
         self.assertTrue(lease.process_start(os.getpid()))
 
     def test_a_pid_that_does_not_exist_reads_as_None(self):
-        """Sem levantar: o daemon chama isto a cada ciclo, para pids que ele ESPERA ver morrer."""
+        """Without raising: the daemon calls this each cycle for pids it expects to see die."""
         self.assertIsNone(lease.process_start(4_000_000))
 
     def test_the_start_time_is_STABLE_across_reads(self):
-        """Se variasse, todo lease pareceria reciclado e o daemon encerraria com o host vivo."""
+        """If it varied, every lease would look recycled and the daemon would exit with the host alive."""
         self.assertEqual(lease.process_start(os.getpid()), lease.process_start(os.getpid()))
 
 
@@ -54,13 +54,13 @@ class TestWritingAndCheckingALease(unittest.TestCase):
         self.assertFalse(lease.alive(entry))
 
     def test_a_RECYCLED_pid_is_not_alive(self):
-        """O caso que o pid sozinho não pega: o número existe, mas é outro processo."""
+        """The case the pid alone cannot catch: the number exists but it is a different process."""
         entry = lease.write("s1", "claude", pid=os.getpid())
         entry["starttime"] = "1"          # como se o processo original tivesse começado antes
         self.assertFalse(lease.alive(entry))
 
     def test_a_lease_missing_its_fields_is_not_alive(self):
-        """Arquivo truncado ou de uma versão anterior: não segura o daemon."""
+        """Truncated file or from an older version: does not hold the daemon."""
         for broken in ({}, {"pid": os.getpid()}, {"starttime": "1"}, {"pid": "x"}):
             with self.subTest(broken=broken):
                 self.assertFalse(lease.alive(broken))
@@ -80,26 +80,42 @@ class TestSweeping(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in lease.dir().glob("*.json")), ["alive.json"])
 
     def test_no_leases_at_all_is_an_empty_list_and_not_an_error(self):
-        """O estado normal antes da primeira sessão, e o estado que faz o daemon encerrar."""
+        """The normal state before the first session, and the state that makes the daemon exit."""
         self.assertEqual(lease.live(), [])
 
     def test_a_corrupt_lease_file_is_removed_rather_than_crashing_the_sweep(self):
+        """A corrupt lease file is removed rather than crashing the sweep."""
         lease.dir().mkdir(parents=True, exist_ok=True)
         (lease.dir() / "junk.json").write_text("{not json")
         self.assertEqual(lease.live(), [])
         self.assertFalse((lease.dir() / "junk.json").exists())
 
+    def test_a_lease_that_cannot_be_READ_is_kept_rather_than_deleted(self):
+        """A transient read error does not mean the process is dead. Corrupt JSON is unusable
+        and removing it is right; a permission blip or I/O error says nothing about the process
+        the lease names, and deleting it would end the daemon under a live host — the failure
+        this module exists to prevent."""
+        entry = lease.write("s1", "claude", pid=os.getpid())
+        path = lease.dir() / "s1.json"
+        os.chmod(path, 0)
+        try:
+            lease.live()
+            self.assertTrue(path.exists(), "a lease that could not be read was deleted")
+        finally:
+            os.chmod(path, 0o600)
+
 
 class TestFindingTheHOST(unittest.TestCase):
     def test_it_walks_up_and_finds_a_named_ancestor(self):
-        """No claude-code o hook é subprocesso: python3 -> bash -> claude. Medido nesta
-        máquina em 2026-08-18."""
+        """On claude-code the hook is a subprocess: python3 -> bash -> claude. Measured on this
+        machine in 2026-08-18."""
         found = lease.find_host_pid(names=(os.path.basename(sys.executable),))
         self.assertIsNotNone(found, "não achou o próprio interpretador na árvore")
         pid, start = found
         self.assertEqual(lease.process_start(pid), start)
 
     def test_an_ancestor_that_is_not_there_yields_None(self):
+        """An ancestor that is not there yields None."""
         self.assertIsNone(lease.find_host_pid(names=("nao-existe-este-processo",)))
 
 

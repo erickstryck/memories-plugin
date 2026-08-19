@@ -1,8 +1,8 @@
-"""O que entra no acervo quando alguém pede "indexe este projeto".
+"""What goes into the archive when someone asks "index this project".
 
-A fonte é `git ls-files` e não uma varredura do disco. Isso faz o `.gitignore` ser respeitado
-POR DEFINIÇÃO em vez de por uma reimplementação nossa, e `node_modules`, build e cache ficam de
-fora sem regra especial — eles não estão versionados.
+The source is `git ls-files`, not a disk scan. This makes `.gitignore` respected BY DEFINITION
+instead of by our own reimplementation, and `node_modules`, build and cache stay out without
+special rules — they are not versioned.
 """
 import os
 import subprocess
@@ -39,8 +39,8 @@ class TestTheSourceIsGIT(unittest.TestCase):
         self.assertEqual(names, ["kept.py"])
 
     def test_a_gitignored_file_is_absent_without_us_parsing_gitignore(self):
-        """O ponto de usar `git ls-files`: nunca reimplementamos a semântica de `.gitignore`,
-        que tem negação, precedência e regras por diretório."""
+        """The point of using `git ls-files`: we never reimplement the semantics of `.gitignore`,
+        which has negation, precedence, and per-directory rules."""
         root = a_repo(**{".gitignore": "build/\n", "app.py": "x = 1\n"})
         os.makedirs(os.path.join(root, "build"), exist_ok=True)
         with open(os.path.join(root, "build", "out.js"), "w") as fh:
@@ -51,8 +51,8 @@ class TestTheSourceIsGIT(unittest.TestCase):
         self.assertNotIn("out.js", names)
 
     def test_the_paths_are_ABSOLUTE(self):
-        """`add_files` recebe caminhos e o daemon roda com outro cwd — um caminho relativo
-        resolveria contra o diretório errado, em silêncio."""
+        """`add_files` receives paths and the daemon runs with a different cwd — a relative
+        path would resolve against the wrong directory, silently."""
         root = a_repo(**{"a.py": "x = 1\n"})
         for path in scan.eligible(root)["eligible"]:
             self.assertTrue(os.path.isabs(path), path)
@@ -64,7 +64,7 @@ class TestTheSourceIsGIT(unittest.TestCase):
 
 
 class TestTheFourDiscards(unittest.TestCase):
-    """Cada um isolado, porque um teste com dois motivos de descarte não prova nenhum."""
+    """Each one isolated, because a test with two discard reasons proves neither."""
 
     def test_a_binary_file_is_skipped(self):
         root = a_repo(**{"logo.png": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"})
@@ -79,16 +79,16 @@ class TestTheFourDiscards(unittest.TestCase):
         self.assertEqual(out["skipped"]["lockfile"], 1)
 
     def test_a_minified_file_is_skipped(self):
-        """Uma linha de 40 KB não responde pergunta nenhuma e domina o acervo do repo."""
+        """A 40 KB line answers no questions and dominates the repo's archive."""
         root = a_repo(**{"bundle.js": "var a=1;" * 6000 + "\n"})
         out = scan.eligible(root)
         self.assertEqual(out["eligible"], [])
         self.assertEqual(out["skipped"]["minified"], 1)
 
     def test_a_minified_file_whose_FIRST_line_is_short_is_still_skipped(self):
-        """The commonest minified shape there is: a license comment, then the entire bundle on
-        the next line. Judging only the lines that ended before the read did threw the long one
-        away and let the bundle through."""
+        """The most common minified shape: a license comment, then the entire bundle on the
+        next line. Judging only lines that ended before the read completed threw the long line
+        away and let the bundle through — a guard that hid the case it was meant to catch."""
         root = a_repo(**{"vendor.js": "/*! lib v1.0 */\n" + "!function(e){}(x);" * 900 + "\n"})
         out = scan.eligible(root)
         self.assertEqual(out["eligible"], [])
@@ -101,7 +101,7 @@ class TestTheFourDiscards(unittest.TestCase):
         self.assertEqual(out["skipped"]["too_big"], 1)
 
     def test_an_ordinary_source_file_survives_ALL_FOUR(self):
-        """A guarda das guardas: se um filtro ficar largo demais, isto cai."""
+        """The guard of guards: if a filter gets too broad, this fails."""
         root = a_repo(**{"core__app.py": "def main():\n    return 1\n"})
         out = scan.eligible(root)
         self.assertEqual(len(out["eligible"]), 1)
@@ -110,7 +110,7 @@ class TestTheFourDiscards(unittest.TestCase):
 
 class TestTheFunnelIsREPORTED(unittest.TestCase):
     def test_it_counts_what_was_seen_and_what_was_dropped(self):
-        """Uma contagem que só aparece no fim é uma contagem que ninguém usa para decidir."""
+        """A count that appears only at the end is a count nobody uses to decide."""
         root = a_repo(**{"a.py": "x = 1\n", "package-lock.json": "{}\n",
                          "logo.png": b"\x00\x01\x02binary"})
         out = scan.eligible(root)
@@ -120,7 +120,7 @@ class TestTheFunnelIsREPORTED(unittest.TestCase):
         self.assertEqual(out["skipped"]["binary"], 1)
 
     def test_every_discard_reason_is_present_even_when_zero(self):
-        """Uma chave ausente obriga todo consumidor a usar `.get`, e um deles vai esquecer."""
+        """A missing key forces every consumer to use `.get`, and one will forget."""
         out = scan.eligible(a_repo(**{"a.py": "x = 1\n"}))
         self.assertEqual(set(out["skipped"]), {"binary", "minified", "lockfile", "too_big",
                                                "unreadable"})
