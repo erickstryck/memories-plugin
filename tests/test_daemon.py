@@ -382,5 +382,53 @@ class TestStopWaitsForTheProcessToActuallyDie(unittest.TestCase):
             proc.wait(timeout=5)
 
 
+class TestCoreDoesNotDependOnTheCliLayer(unittest.TestCase):
+    """Whole-project review, the one real dependency inversion. `core.daemon.start` spawned
+    `cli/qctx.py repos daemon run`, so the host-neutral layer named a file in the CLI layer:
+    shipping `core` alone, or adding a third host, meant editing core to point elsewhere. The
+    loop being started lives in core, so core is now its own entry point."""
+
+    def test_the_spawned_command_does_not_name_the_cli(self):
+        seen = []
+        daemon.start(spawn=lambda argv: seen.append(argv) or os.getpid())
+        self.assertTrue(seen, "nothing was spawned, so this asserts nothing")
+        joined = " ".join(seen[0])
+        self.assertNotIn("qctx", joined,
+                         f"core spawns the CLI again: {joined}")
+        self.assertIn("core.daemon", joined,
+                      f"core does not spawn its own entry point: {joined}")
+
+    def test_the_entry_point_actually_runs_and_exits_without_a_lease(self):
+        """Not just that the module is named -- that `python -m core.daemon` REALLY starts and
+        reaches the lease check. A command that only looks right in an assertion is how a
+        detached process that never runs goes unnoticed: nothing reports its failure."""
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ, QCTX_STATE_DIR=tempfile.mkdtemp(), PYTHONPATH=str(root))
+        out = subprocess.run([sys.executable, "-m", "core.daemon"],
+                             capture_output=True, text=True, timeout=60,
+                             cwd=tempfile.mkdtemp(), env=env)
+        self.assertEqual(out.returncode, 0, f"the entry point failed: {out.stderr}")
+        self.assertIn("no live lease", out.stdout,
+                      f"it did not reach the lease check: {out.stdout!r} {out.stderr!r}")
+
+    def test_the_child_can_import_core_regardless_of_the_working_directory(self):
+        """`-m` needs `core` importable, and this is spawned from a hook, from the hermes
+        provider and from the CLI -- each with a different cwd. The spawn puts the package root
+        on PYTHONPATH rather than trusting whatever directory it inherited."""
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def recording(argv, **kwargs):
+            captured.update(kwargs)
+
+            return real_popen([sys.executable, "-c", ""], **kwargs)
+
+        with patch.object(daemon.subprocess, "Popen", recording):
+            daemon._spawn([sys.executable, "-m", "core.daemon"])
+        root = str(Path(__file__).resolve().parent.parent)
+        self.assertIn(root, (captured.get("env") or {}).get("PYTHONPATH", ""),
+                      "the package root is not on the child's PYTHONPATH")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

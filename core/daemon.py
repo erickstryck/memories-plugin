@@ -30,8 +30,16 @@ CYCLE_S = 5.0
 
 class DaemonError(CoreError):
     """The daemon could not be started, or a start could not be confirmed. Raised only by
-    `start`, and only after the claim it took is released — a caller that catches this must
-    never see a stale claim left behind that a later `start()` would trip over."""
+    `start`.
+
+    THE CLAIM IS USUALLY RELEASED FIRST, BUT NOT ALWAYS, and the exception says which. Every
+    failure path releases the claim it took, EXCEPT the one where a process was spawned and
+    then could not be confirmed dead: there, releasing would let the next `start()` spawn a
+    second daemon on top of a live first one, which the design calls impossible. That case
+    keeps the claim deliberately and its message names the pid to kill by hand. An earlier
+    version of this docstring promised the claim was always released; it stopped being true
+    the moment that path was added, which is why it now describes both.
+    """
 
 
 def path() -> Path:
@@ -90,7 +98,13 @@ def start(spawn=None, argv: list[str] | None = None, sleep=time.sleep) -> dict:
 
         return {"action": "already", "pid": existing.get("pid", 0) if existing else 0}
     launch = spawn or _spawn
-    command = argv or [sys.executable, _qctx_path(), "repos", "daemon", "run"]
+    # SPAWNS THIS MODULE, NOT THE CLI. `core` used to launch `cli/qctx.py repos daemon run`,
+    # which made the host-neutral layer depend on the CLI layer: shipping `core` alone, or
+    # adding a third host, meant editing core to point somewhere else. The loop being started
+    # lives HERE, so this module is its own entry point (see the `__main__` block at the
+    # bottom) and the dependency simply disappears. `cli` keeps its `repos daemon run` command,
+    # which now runs the same loop in the foreground for anyone who wants to watch it.
+    command = argv or [sys.executable, "-m", "core.daemon"]
     try:
         pid = launch(command)
     except OSError as exc:
@@ -313,13 +327,31 @@ def _write_record(entry: dict) -> bool:
 
 
 def _spawn(argv: list[str]) -> int:
-    """Launches `argv` fully detached, so it survives the terminal that started it."""
+    """Launches `argv` fully detached, so it survives the terminal that started it.
+
+    PUTS THE PACKAGE ROOT ON THE CHILD'S `PYTHONPATH` rather than relying on its working
+    directory. The child is `python -m core.daemon`, and `-m` needs `core` to be importable —
+    but this is spawned from a hook, from the hermes provider and from the CLI, each with a
+    different cwd, and a detached process should not depend on the one it happened to inherit.
+    """
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = f"{_root()}{os.pathsep}{existing}" if existing else _root()
     out = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           stdin=subprocess.DEVNULL, start_new_session=True)
+                           stdin=subprocess.DEVNULL, start_new_session=True, env=env)
 
     return out.pid
 
 
-def _qctx_path() -> str:
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                        "cli", "qctx.py")
+def _root() -> str:
+    """The directory holding the `core` package, for a child that must be able to import it."""
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+if __name__ == "__main__":                              # `python -m core.daemon`
+    # THE DAEMON'S OWN ENTRY POINT. Kept here, beside the loop it starts, so `start()` never
+    # has to name a file in another layer. Imported inside the guard because `core.indexer`
+    # pulls the whole indexing stack and nothing that merely imports `core.daemon` needs it.
+    from . import indexer
+
+    print(run(indexer.work(), watch=indexer.watcher()))
