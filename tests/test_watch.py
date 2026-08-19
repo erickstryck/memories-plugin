@@ -46,6 +46,9 @@ class FakeIndex:
         self._indexed = set(indexed)
         self.refreshed = []
         self.indexed_calls = []
+        # `added` records EVERY embed, with repeats, so a test can tell "indexed once" from
+        # "indexed again every few cycles" -- which `_indexed` alone (a set) cannot show.
+        self.added = []
 
     def list_repos(self):
         return [{"repo": "alpha", "checkouts": self._checkouts}]
@@ -57,6 +60,12 @@ class FakeIndex:
         self.indexed_calls.append(repo)
 
         return set(self._indexed)
+
+    def add_files(self, repo, paths, **kwargs):
+        self.added.extend(paths)
+        self._indexed.update(paths)
+
+        return {"files": len(paths), "chunks": len(paths)}
 
     def refresh(self, repo):
         self.refreshed.append(repo)
@@ -216,8 +225,16 @@ class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
             watch()
         self.assertEqual(len(calls), 1,
                          "the tracked-file scan ran again although `.git/index` never moved")
-        self.assertEqual(len(ix.indexed_calls), 1,
-                         "a second archive scroll was paid for an unchanged git index")
+
+    # WHAT THIS CLASS DELIBERATELY NO LONGER ASSERTS: that the archive is scrolled only once.
+    # An earlier version memoised the DIFFERENCE (eligible minus indexed) and did skip the
+    # second scroll -- but the memo then outlived the job that indexed those very files, and
+    # the watcher re-queued them forever (see TestTheWatcherDoesNotReindexForever, measured at
+    # one re-embed every 3 cycles). The memo now holds only the DISK truth, which genuinely
+    # depends on nothing but `.git/index`, and the set difference is recomputed against a live
+    # `indexed_paths()` every cycle. That is a scroll per cycle, and it is a known open cost --
+    # `changed_paths` already pays one anyway. Correctness first; the two of them should later
+    # share ONE fetch per cycle rather than each paying for their own.
 
     def test_tracking_a_NEW_file_moves_the_index_and_forces_a_rescan(self):
         """The half that matters for correctness: the memo must never answer "nothing new" for
@@ -254,6 +271,59 @@ class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
             watch()
         self.assertEqual(len(calls), 2,
                          "an unstampable checkout was memoised as if it were known unchanged")
+
+class TestTheWatcherDoesNotReindexForever(unittest.TestCase):
+    """Whole-project review, Critical 1. The memo that stops the tracked-file scan from being
+    repaid every cycle is keyed on the git index -- which indexing does NOT touch, because a
+    job changes the ARCHIVE. So a completed job left the memo still listing the files it had
+    just embedded, the watcher queued them again, and the loop never closed: MEASURED at one
+    re-embed every 3 cycles, forever, on a repository with a single file.
+
+    WHY THE EARLIER TESTS MISSED IT, and why this class drives the loop itself. `daemon.run`
+    runs a pending job INSTEAD of watching (`if job is not None: _run_one(...) elif watch is
+    not None: watch()`), so a job is never in flight when `watch()` runs. The invalidation was
+    written in the "job in flight" branch and was therefore unreachable in production -- but
+    perfectly reachable in a test whose fake index never executes a job, which is exactly what
+    the other tests here do. A watcher test that never runs a job is testing a daemon that
+    does not exist.
+    """
+
+    def setUp(self):
+        a_state_dir()
+
+    def _cycle(self, n, ix):
+        """The daemon's own precedence: a pending job wins, watching only fills the gaps."""
+        from core import daemon
+        work = indexer.work(index=ix)
+        watch = indexer.watcher(index=ix)
+        for _ in range(n):
+            job = jobs.next_pending()
+            if job is not None:
+                daemon._run_one(job, work)
+            else:
+                watch()
+
+    def test_a_file_indexed_once_is_not_embedded_again_cycle_after_cycle(self):
+        root = a_git_repo()
+        track(root, "a.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        self._cycle(20, ix)
+        self.assertEqual(len(ix.added), 1,
+                         f"the same file was embedded {len(ix.added)} times in 20 cycles -- "
+                         f"the watcher is paying for embeddings forever")
+
+    def test_a_file_tracked_AFTER_the_first_job_is_still_picked_up(self):
+        """The other half: invalidating on job state must not blind the watcher to real work."""
+        root = a_git_repo()
+        track(root, "a.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        self._cycle(20, ix)
+        second = track(root, "b.py")
+        self._cycle(20, ix)
+        self.assertIn(os.path.abspath(second), ix.added,
+                      "a file tracked after the first job was never indexed")
+        self.assertEqual(len(ix.added), 2, f"embedded more than once each: {ix.added}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

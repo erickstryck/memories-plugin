@@ -15,6 +15,8 @@ would be refused later by `_read_source` anyway — discarding it here just avoi
 import os
 import subprocess
 
+from .errors import CoreError
+
 #: A file larger than this becomes hundreds of chunks and dominates the repository's archive.
 MAX_FILE_BYTES = 1_048_576
 
@@ -33,14 +35,33 @@ _SNIFF_BYTES = 8192
 
 
 def tracked_files(root: str) -> list[str]:
-    """The repository's tracked paths, relative to `root`. Empty when `root` is not a repo."""
+    """The repository's tracked paths, relative to `root`. Empty ONLY when `root` really is not
+    a repository — every other failure RAISES.
+
+    AN EARLIER VERSION RETURNED `[]` FOR EVERY FAILURE: git missing from PATH, the 120 s
+    timeout, a permission error, a corrupt index. All of them then read as "this repository has
+    no files", and `add-all` printed `0 tracked → nothing to index` and exited 0 — a failure
+    presented as a true negative, which is the one thing this project refuses. The user is told
+    there is nothing to index and has no way to tell that from git never having answered.
+
+    "Not a repository" is the one case where empty is the honest answer, and git says so
+    explicitly on stderr, so that is the only case still translated into `[]`.
+    """
     try:
         out = subprocess.run(["git", "-C", root, "ls-files", "-z"],
                              capture_output=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except FileNotFoundError as exc:
+        raise CoreError("git is not installed or not on PATH, so tracked files cannot be "
+                        "listed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CoreError(f"`git ls-files` in {root!r} did not finish within 120s") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CoreError(f"`git ls-files` in {root!r} could not run: {exc}") from exc
     if out.returncode != 0:
-        return []
+        err = out.stderr.decode("utf-8", "replace").strip()
+        if "not a git repository" in err.lower():
+            return []
+        raise CoreError(f"`git ls-files` in {root!r} failed: {err or out.returncode}")
 
     return [name for name in out.stdout.decode("utf-8", "replace").split("\0") if name]
 

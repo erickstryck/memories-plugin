@@ -70,14 +70,6 @@ def watcher(cfg=None, index=None):
             if job and job.get("state") in (jobs.PENDING, jobs.RUNNING):
                 # Already queued or running: a second job would only stack behind the first and
                 # describe a disk that has moved on by the time it ran.
-                #
-                # DROPS THE MEMO ON THE WAY PAST. `_new_tracked_paths` is memoised against the
-                # git index, which a job does NOT touch — it changes the ARCHIVE. So a job that
-                # indexes the very files the memo lists would leave that memo claiming they are
-                # still missing, and the watcher would queue them again, forever. Any job in
-                # flight, whoever queued it, invalidates the answer; this is the one place every
-                # job is seen.
-                new_memo.pop(repo, None)
                 continue
             new_paths = _new_tracked_paths(entry, target, new_memo)
             changed = set(target.changed_paths(repo)) | new_paths
@@ -137,22 +129,20 @@ def _new_tracked_paths(entry: dict, target, memo: dict | None = None) -> set:
     repo = entry["repo"]
     roots = list(entry.get("checkouts") or [])
     stamps = tuple(_index_stamp(r) for r in roots)
-    if memo is not None and None not in stamps:
-        cached = memo.get(repo)
-        if cached is not None and cached[0] == stamps:
-            return cached[1]
-    indexed = target.indexed_paths(repo)
-    found = set()
-    for root in roots:
-        try:
-            elig = scan.eligible(root)
-        except Exception:                             # noqa: BLE001 — one bad checkout root
-            continue                                  # must not blind the watcher to the rest
-        found.update(p for p in elig["eligible"] if p not in indexed)
-    if memo is not None:
-        memo[repo] = (stamps, found)
+    cached = memo.get(repo) if memo is not None else None
+    if cached is not None and cached[0] == stamps and None not in stamps:
+        eligible = cached[1]
+    else:
+        eligible = set()
+        for root in roots:
+            try:
+                eligible.update(scan.eligible(root)["eligible"])
+            except Exception:                         # noqa: BLE001 — one bad checkout root
+                continue                              # must not blind the watcher to the rest
+        if memo is not None:
+            memo[repo] = (stamps, eligible)
 
-    return found
+    return {p for p in eligible if p not in target.indexed_paths(repo)}
 
 
 def _build(cfg):

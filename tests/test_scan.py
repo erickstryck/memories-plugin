@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -124,6 +125,45 @@ class TestTheFunnelIsREPORTED(unittest.TestCase):
         out = scan.eligible(a_repo(**{"a.py": "x = 1\n"}))
         self.assertEqual(set(out["skipped"]), {"binary", "minified", "lockfile", "too_big",
                                                "unreadable"})
+
+
+class TestAGitFailureIsNotAnEmptyRepository(unittest.TestCase):
+    """Whole-project review, finding 6. `tracked_files` returned `[]` for EVERY failure -- git
+    missing, the 120 s timeout, a permission error -- and `add-all` then printed
+    `0 tracked -> nothing to index` and exited 0. That is a failure dressed as a true negative,
+    which this project refuses everywhere else. Only "not a git repository" may be empty."""
+
+    def test_a_directory_that_is_not_a_repository_is_honestly_empty(self):
+        self.assertEqual(scan.tracked_files(tempfile.mkdtemp()), [],
+                         "a plain directory should report no tracked files, not raise")
+
+    def test_git_missing_from_PATH_raises_instead_of_reporting_nothing(self):
+        with unittest.mock.patch.object(scan.subprocess, "run",
+                                        side_effect=FileNotFoundError("git")):
+            with self.assertRaises(scan.CoreError) as caught:
+                scan.tracked_files("/anywhere")
+        self.assertIn("git", str(caught.exception).lower(),
+                      "the message does not say what went wrong")
+
+    def test_a_timeout_raises_instead_of_reporting_nothing(self):
+        with unittest.mock.patch.object(
+                scan.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired(cmd="git", timeout=120)):
+            with self.assertRaises(scan.CoreError):
+                scan.tracked_files("/anywhere")
+
+    def test_an_unexplained_nonzero_exit_raises_rather_than_reading_as_empty(self):
+        """The dangerous middle case: git RAN and failed for a reason that is not
+        "not a repository" -- a corrupt index, a locked object store. Empty would be a lie."""
+        class Failed:
+            returncode = 128
+            stdout = b""
+            stderr = b"fatal: unable to read index file\n"
+        with unittest.mock.patch.object(scan.subprocess, "run", return_value=Failed()):
+            with self.assertRaises(scan.CoreError) as caught:
+                scan.tracked_files("/anywhere")
+        self.assertIn("index file", str(caught.exception),
+                      "git's own reason never reached the caller")
 
 
 if __name__ == "__main__":
