@@ -395,6 +395,27 @@ class TestAddAllRegistersAndBindsBeforeQueueing(CLICase):
         self.assertEqual(bindings.get(root), "newrepo",
                          "the checkout was never bound — repos init would keep offering it")
 
+    def test_a_daemon_that_fails_to_start_does_not_hide_the_queued_job(self):
+        """`enqueue` runs BEFORE `daemon.start()` and raises rather than lying, so by the time
+        a start can fail the work is already on disk. Letting `DaemonError` travel to the top
+        from there printed only "could not start the daemon", and the user would reasonably
+        conclude nothing had been queued and re-run the command -- while the job sat waiting
+        for the next session. A failure that reads as "there is nothing" is the one outcome
+        this project refuses, so the queue must be reported even on this path."""
+        from core import daemon, jobs
+        root = a_git_repo()
+        track(root, "a.py")
+        with unittest.mock.patch.object(
+                core_daemon, "start",
+                side_effect=daemon.DaemonError("state directory unavailable")):
+            out = self.rendered(self.cli.cmd_repos_add_all, repo="newrepo", path=root)
+        self.assertIsNotNone(jobs.load("newrepo"),
+                             "the job was not queued at all, so this tests the wrong thing")
+        self.assertIn("queued under", out,
+                      "the user was told the daemon failed but not that the work survived")
+        self.assertIn("state directory unavailable", out,
+                      "the reason the daemon could not start never reached the user")
+
     def test_registration_failure_is_reported_and_nothing_is_queued(self):
         """A taken/invalid name must fail LOUD, not queue work that can never run."""
         root = a_git_repo()

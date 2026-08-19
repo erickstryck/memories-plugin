@@ -685,8 +685,19 @@ def cmd_repos_add_all(args, cfg):
         return
     jobs.enqueue(args.repo, "index", found["eligible"])
     if lease.live():
-        started = daemon.start()
-        print(f"queued under {args.repo!r}; daemon {started['action']} (pid {started['pid']})")
+        # REPORTS THE QUEUE EVEN WHEN THE START FAILS. The enqueue above already SUCCEEDED —
+        # it raises rather than lying, so reaching this line means the work is really on disk.
+        # Letting `DaemonError` travel to the top from here would print only "could not start
+        # the daemon" and leave the user believing nothing was queued, when in fact the job is
+        # waiting and the next session that opens will drain it. A failure that reads as
+        # "there is nothing" is the one outcome this project refuses.
+        try:
+            started = daemon.start()
+            print(f"queued under {args.repo!r}; "
+                  f"daemon {started['action']} (pid {started['pid']})")
+        except daemon.DaemonError as exc:
+            print(f"queued under {args.repo!r}, but the daemon could not be started: {exc}")
+            print("the job is safe and the next claude or hermes session will run it")
     else:
         # A daemon spawned here would exit on its very own first cycle — `daemon.run` checks
         # `lease.live()` before touching anything else — so starting one now would only print
