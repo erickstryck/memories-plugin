@@ -364,9 +364,16 @@ class RepoIndex:
         `docs` has had `refresh` since the library existed. Same permanence, same problem, and
         only one of the two had the fix.
 
-        NOTHING HERE RUNS BY ITSELF. This plugin has no daemon and no watcher, deliberately
-        (`core/docs.py` states the rule and the reason). What calls this is a git `post-commit`
-        hook the user installs on purpose, or the user.
+        THIS DOES NOT RUN BY ITSELF, still — it is a function someone calls, not a scheduled
+        job. What calls it now is the daemon's watcher, when a poll cycle sees a file changed
+        on disk, or a person running `qctx repos refresh` directly. An earlier version of this
+        docstring claimed the project forbade a background process entirely; no such rule ever
+        existed — that claim came from misreading a line in `core/docs.py` that was only ever
+        about how the TEMPORARY archive's TTL expires (a delete-by-filter needs no daemon of
+        its own), not a constraint on the plugin as a whole. The rule that IS real and still
+        binding is STDLIB ONLY: it is why the watcher polls the filesystem instead of using
+        `inotify` — measured at 16 ms to `stat` 2,000 files, so a cycle is free either way (see
+        `core/indexer.py`'s `watcher`).
 
         EACH PATH IS JUDGED ONCE. A file is stored as N chunks carrying the same source
         metadata; judging per chunk would re-embed it N times and report it N times.
