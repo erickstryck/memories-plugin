@@ -142,6 +142,27 @@ class TestProgressAndCancellation(unittest.TestCase):
         """No job and no cancel file means nothing to cancel."""
         self.assertFalse(jobs.cancel_requested("never-existed"))
 
+    def test_enqueue_RAISES_when_a_stale_cancellation_cannot_be_cleared(self):
+        """`enqueue` promises a queue that exists AND starts clean. A cancel file it could not
+        remove would kill the new job on its first cycle, and the user would see work they had
+        just started reported as cancelled with nothing saying why."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.request_cancel("alpha")
+        
+        # Make the cancel file undeletable by replacing it with a directory.
+        # The directory itself acts as a barrier to unlink.
+        # The jobs directory remains writable so the job file write succeeds.
+        cancel_path = jobs._cancel_path("alpha")
+        cancel_path.unlink()
+        cancel_path.mkdir()
+        
+        try:
+            with self.assertRaises(jobs.JobError):
+                jobs.enqueue("alpha", "index", ["/a.py"])
+        finally:
+            # Clean up: remove the directory barrier
+            cancel_path.rmdir()
+
     def test_update_on_a_missing_job_answers_None_instead_of_creating_one(self):
         """An `update` that creates a job from nothing would let a late cancellation
         resurrect a job that already finished."""

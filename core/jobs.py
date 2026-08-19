@@ -38,9 +38,11 @@ def enqueue(repo: str, kind: str, paths: list[str], total: int | None = None) ->
     Replacing rather than appending: asking again means asking about the state of the disk NOW,
     and an older list of paths is a description of a repository that has since changed.
 
-    Raises JobError if the job cannot be written to disk. Unlike `update` and `request_cancel`,
-    which tolerate write failures, a failed enqueue means work will never happen. An absent job
-    is worse than a stale one: `status` could report it queued when it was not.
+    Raises JobError if the job cannot be written to disk OR if a stale cancellation cannot be
+    removed. The contract is BOTH halves: the job exists AND it starts clean. Unlike `update`
+    and `request_cancel`, which tolerate write failures, a failed enqueue means work will never
+    happen. An absent job is worse than a stale one: `status` could report it queued when it
+    was not. And a job that starts cancelled is dead on arrival.
     """
     job = {"repo": repo, "kind": kind, "paths": list(paths),
            "total": len(paths) if total is None else int(total),
@@ -50,8 +52,11 @@ def enqueue(repo: str, kind: str, paths: list[str], total: int | None = None) ->
     if not _write(repo, job):
         raise JobError(f"could not queue job for {repo}: state directory is unavailable")
     
-    # Clear any stale cancel from a previous job
-    _remove_cancel_file(repo)
+    # Clear any stale cancel from a previous job. The job's contract is that it exists AND
+    # starts clean. A cancel file that survives would kill it on arrival. Raise rather than
+    # silently produce a dead job.
+    if not _remove_cancel_file(repo):
+        raise JobError(f"could not clear stale cancellation for {repo}: see {_cancel_path(repo)}")
 
     return job
 
@@ -181,12 +186,15 @@ def _create_cancel_file(repo: str) -> None:
         pass
 
 
-def _remove_cancel_file(repo: str) -> None:
-    """Removes a cancel file for the given repo. Tolerates missing file or other errors."""
+def _remove_cancel_file(repo: str) -> bool:
+    """Removes a cancel file for the given repo. Returns True if the file is gone (including
+    when it was never there — absence is success). Returns False only if the unlink failed.
+    Absence means the job starts clean."""
     try:
         _cancel_path(repo).unlink(missing_ok=True)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _cancel_file_exists(repo: str) -> bool:
