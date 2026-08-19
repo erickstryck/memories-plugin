@@ -46,16 +46,35 @@ PY
 
 resolve_root() {
   local candidate
-  for candidate in \
-      "${QCTX_HOME:-}" \
-      "$(own_tree)" \
-      "${HERMES_HOME:-$HOME/.hermes}/plugins/memories" \
-      "$(claude_tree)"; do
-    if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
+
+  # Try QCTX_HOME first — short-circuit if it resolves
+  candidate="${QCTX_HOME:-}"
+  if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Try own tree (symlinks resolved) — only if QCTX_HOME didn't work
+  candidate="$(own_tree)"
+  if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Try hermes install — only if own tree didn't work
+  candidate="${HERMES_HOME:-$HOME/.hermes}/plugins/memories"
+  if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Try claude registry — only if all else failed (avoids fork if not needed)
+  candidate="$(claude_tree)"
+  if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
   printf 'qctx: could not find the plugin tree. Set QCTX_HOME to the checkout.\n' >&2
   return 1
 }
