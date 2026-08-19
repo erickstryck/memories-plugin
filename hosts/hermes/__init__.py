@@ -263,7 +263,12 @@ class MemoriesProvider(_Base):
         self._reranker = None
 
     def get_tool_schemas(self) -> list:
-        """The 15 operations the model may invoke. See tools.py for the five left out.
+        """The operations the model may invoke — see tools.py's module docstring for exactly
+        which CLI commands are withheld and why, and tests/test_host_equivalence.py's
+        NOT_FOR_THE_MODEL for the enforced set. No count is written here on purpose: a number
+        copied at one point in time is a number that rots the next time the set changes, which
+        already happened once (four daemon-related commands joined the withheld set after this
+        line was first written, and the line kept saying "the five left out").
 
         A deep copy, not the module constant: hermes normalizes and wraps what it gets
         here, and an edit to a shared nested dict would outlive the call and reach the next

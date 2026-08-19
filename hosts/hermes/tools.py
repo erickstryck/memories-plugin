@@ -1,10 +1,15 @@
 """The operations the MODEL may invoke, as hermes tool schemas.
 
-Twenty of the CLI's twenty-five. The five left out are `setup` (interactive, wants a TTY)
-and `config show/set/detect` plus `collections` — configuration belongs to the operator, and
-a `config set` tool would let the model point the archive somewhere else mid-conversation.
-The CLI still carries all twenty-five in both hosts; this is only about what the model
-reaches on its own.
+Most of the CLI, minus what belongs to the OPERATOR rather than the model: `setup`
+(interactive, wants a TTY), `config show/set/detect` and `collections` — a `config set` tool
+would let the model point the archive somewhere else mid-conversation — plus the daemon's own
+levers (`repos_daemon`, `repos_add_all`, `repos_status`, `repos_cancel`; see NOT_FOR_THE_MODEL
+in tests/test_host_equivalence.py for the exact, enforced set). `repos_add_all` in particular
+starts real background work and is a decision only a person makes; `repos_init`, which only
+ANSWERS whether a directory is an indexable repo, stays in. The CLI still carries every one of
+these in both hosts; this is only about what the model reaches on its own. Deliberately no
+count is written here: it has gone stale before, and a number nobody updates is worse than no
+number — the enforced set in test_host_equivalence.py is the one source of truth.
 
 Every handler returns a JSON STRING, and no handler raises. hermes surfaces a raise as a
 crashed turn; a JSON error is something the model can read and react to. The string part is
