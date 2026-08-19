@@ -94,9 +94,12 @@ def _sniff(path: str) -> str | None:
         return "unreadable"
     if b"\0" in head:
         return "binary"
-    # A head with no newline at all is one very long line, which is the minified case; a head
-    # WITH newlines is judged by its longest complete line.
-    longest = max((len(part) for part in head.split(b"\n")[:-1]), default=len(head))
+    # EVERY segment counts, including the last one the read cut in half. Truncation can only
+    # make a line look SHORTER, so a fragment already past the threshold proves the real line
+    # is past it — there is no false positive to avoid here. Dropping that segment is what
+    # hid the commonest minified shape of all: a license comment on line one, the whole
+    # bundle on line two.
+    longest = max(len(part) for part in head.split(b"\n"))
     if longest > MINIFIED_LINE_CHARS:
         return "minified"
 

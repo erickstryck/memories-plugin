@@ -85,6 +85,15 @@ class TestTheFourDiscards(unittest.TestCase):
         self.assertEqual(out["eligible"], [])
         self.assertEqual(out["skipped"]["minified"], 1)
 
+    def test_a_minified_file_whose_FIRST_line_is_short_is_still_skipped(self):
+        """The commonest minified shape there is: a license comment, then the entire bundle on
+        the next line. Judging only the lines that ended before the read did threw the long one
+        away and let the bundle through."""
+        root = a_repo(**{"vendor.js": "/*! lib v1.0 */\n" + "!function(e){}(x);" * 900 + "\n"})
+        out = scan.eligible(root)
+        self.assertEqual(out["eligible"], [])
+        self.assertEqual(out["skipped"]["minified"], 1)
+
     def test_a_file_above_the_ceiling_is_skipped(self):
         root = a_repo(**{"huge.txt": "line\n" * 300})
         out = scan.eligible(root, max_bytes=100)
