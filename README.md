@@ -82,6 +82,32 @@ python3 -m unittest discover -s tests
 
 ## Installation
 
+### The one command
+
+On a machine where the plugin is already installed by its host, or on a fresh clone:
+
+```bash
+bash ~/.hermes/plugins/memories/scripts/install.sh          # installed by hermes
+bash ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh
+./scripts/install.sh                                        # cloned
+```
+
+It puts `qctx` on PATH, asks for what is missing, offers to install into whichever host is
+on this machine, and re-checks. Nothing it writes is silent: every group asks first.
+
+To verify a machine without changing it — which is also how you check a machine you set up
+months ago:
+
+```bash
+qctx install --check      # reports; writes nothing
+```
+
+`--check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the five
+collections, whether a shell-less process would find the configuration, and each host's
+own cutover report.
+
+### If you would rather do it by hand
+
 **From zero to working, in order.** Each step is expanded below; nothing here is optional except
 where it says so, and the two steps people skip are 3 and 5 — both fail silently.
 
@@ -97,7 +123,7 @@ where it says so, and the two steps people skip are 3 and 5 — both fail silent
 ```bash
 git clone git@github.com:erickstryck/memories-plugin.git
 cd memories-plugin
-python3 -m unittest discover -s tests    # 1140 collected, 1123 offline; no network, no deps
+python3 -m unittest discover -s tests    # offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
 
@@ -134,7 +160,7 @@ claude plugin update memories-plugin@memories-plugin      # name@marketplace, no
 
 The version it reports is the **commit SHA**, because the manifests declare no version on purpose
 — a hand-maintained number goes stale and this one already had (0.3.0 declared, 0.2.0 installed).
-`claude plugin details memories-plugin` lists what it found: three skills, three hooks.
+`claude plugin details memories-plugin` lists what it found: 3 skills, 4 hooks.
 
 That registers, with no path for you to maintain (the hooks resolve
 `${CLAUDE_PLUGIN_ROOT}` themselves):
@@ -252,8 +278,8 @@ The same core serves two hosts, with the same operations and the same configurat
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
 | big-file guard | `PreToolUse` hook on `Read` | `pre_tool_call` shell hook, matcher `read_file` |
-| operations | `qctx` CLI + two skills | 20 model-invokable tools + the same CLI |
-| what the model is told | the two skills | `system_prompt_block()`, from the same `core/prompts.py` |
+| operations | `qctx` CLI + 3 skills | 22 model-invokable tools + the same CLI |
+| what the model is told | the 3 skills | `system_prompt_block()`, from the same `core/prompts.py` |
 | configuration | `~/.config/memories-plugin/config.json` | the same file |
 | credentials | the environment | the environment, or `$HERMES_HOME/.env` |
 
@@ -685,9 +711,9 @@ cli/        the command-line interface over the core
 hooks/      the claude-code adapter: recall on every prompt, checkpoint every N
 hosts/
   hermes/       the hermes-agent adapter: the provider object and its 22 tools
-skills/     memory, doc-index
-scripts/    cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
-tests/      1123 offline tests + 17 integration
+skills/     memory, doc-index, repo-index
+scripts/    install.sh (the wizard), cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
+tests/      offline tests + integration tests
 ```
 
 ## Design
@@ -772,9 +798,9 @@ on purpose, and both are data rather than prose:
 ## Status
 
 Done and tested: the core, the CLI, the three archives, the guided diagnostics, all three
-hooks, all three skills and the plugin manifest for claude-code; the provider, its 22 tools,
+hooks, all 3 skills and the plugin manifest for claude-code; the provider, its 22 tools,
 the shared configuration wizard and the install script for hermes-agent; and the big-file
-read guard on both hosts. 1123 offline tests and 17 integration tests against a real Qdrant
+read guard on both hosts. Offline tests and integration tests against a real Qdrant
 and real models.
 
 Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the

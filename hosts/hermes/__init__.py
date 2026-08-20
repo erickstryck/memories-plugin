@@ -157,7 +157,7 @@ class MemoriesProvider(_Base):
     #: `int(_env(...))` — measured: `QCTX_RECALL_TOP_K=8x` raised ValueError while this class
     #: body was executing, hermes' loader swallowed it at `logger.debug`, and because the
     #: provider came back None `agent/agent_init.py` warned about nothing at all. The user
-    #: lost recall, the checkpoint and all 15 tools, silently. The same value on claude-code
+    #: lost recall, the checkpoint and all 22 tools, silently. The same value on claude-code
     #: imports fine and degrades to a visible unavailability block.
     TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int, minimum=1)
     TOP_K_STRICT = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int, minimum=1)
