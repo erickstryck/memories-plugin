@@ -275,6 +275,49 @@ HOST_INSTALL_COMMANDS = {
 }
 
 
+#: WHY each host's commands look the way they do. The design is explicit that these are
+#: SHOWN before the question and not buried in a code comment: both are the user's
+#: decision, not an implementation detail.
+HOST_INSTALL_REASONS = {
+    "claude-code": (
+        "the marketplace is added first because `plugin install` resolves the name "
+        "through it; without it there is nothing to install from.",
+    ),
+    "hermes": (
+        "--force is needed because the scanner classifies this tree as `caution`: it "
+        "ships two scripts that edit host configuration, which is the cutovers' "
+        "declared job. The flag is your agreement to that, so it is shown here rather "
+        "than hidden in the middle of the command.",
+        "memory.provider REPLACES whatever provider is set — hermes activates exactly "
+        "one of them.",
+    ),
+}
+
+
+def hermes_memory_provider() -> str:
+    """What hermes has `memory.provider` set to right now, or "" if it cannot be read.
+
+    Read-only, and best effort: this exists so the wizard can say WHAT it is about to
+    replace before it asks, and a host that will not answer must not stop the run.
+    """
+    try:
+        done = subprocess.run(["hermes", "config", "get", "memory.provider"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _explain_host_install(host: str) -> None:
+    for reason in HOST_INSTALL_REASONS[host]:
+        print(f"      why: {reason}")
+    if host == "hermes":
+        current = hermes_memory_provider()
+        if current and current != "memories":
+            print(f"      memory.provider is {current!r} today, and will be replaced")
+
+
 def _host_dry_run(host: str, script: str, skip_var: str, root: Path) -> dict:
     """Runs a cutover in its report-only mode. Writes nothing; that is the script's
     contract with no `--apply`.
@@ -388,33 +431,51 @@ def should_stop_before_hosts(report: dict) -> bool:
     return not report.get("ready", False)
 
 
+def host_plugin_path(host: str):
+    """Where this host has the plugin installed, or None. The one probe, used twice."""
+    if host == "claude-code":
+        return claude_install_path(Path(os.path.expanduser("~")))
+
+    return hermes_install_path(dict(os.environ))
+
+
 def _host_install_group(args, root: Path) -> dict:
     """Per host that is on this machine: install the plugin if it is missing.
 
     The cutovers do not do this — they register hooks and verify state. Returns
     host -> whether the plugin is present afterwards, so the caller offers each
     host's cutover only when there is a plugin to cut over.
+
+    "Afterwards" is RE-PROBED, never assumed. Recording success because the commands
+    were run led to an `--apply` cutover over a host whose `plugins install` had exited
+    non-zero — a cutover of nothing, reported as a cutover.
     """
     present_now = {}
     for host, _script, _skip in HOST_SECTIONS:
         binary = HOST_BINARIES[host]
         if not shutil.which(binary):
             continue
-        present = (claude_install_path(Path(os.path.expanduser("~")))
-                   if host == "claude-code" else hermes_install_path(dict(os.environ)))
+        present = host_plugin_path(host)
         if present:
             print(f"  ok    {host}: installed at {present}")
             present_now[host] = True
             continue
         print(f"\n  {host} is on this machine and the plugin is not installed there:")
+        _explain_host_install(host)
         for command in HOST_INSTALL_COMMANDS[host]:
             print(f"      {command}")
-        if args.yes or _ask("  run these? [y/N]: ").strip().lower() == "y":
-            for command in HOST_INSTALL_COMMANDS[host]:
-                subprocess.run(command, shell=True, check=False)
-            present_now[host] = True
-        else:
+        if not (args.yes or _ask("  run these? [y/N]: ").strip().lower() == "y"):
             present_now[host] = False
+            continue
+        for command in HOST_INSTALL_COMMANDS[host]:
+            subprocess.run(command, shell=True, check=False)
+        installed = host_plugin_path(host)
+        present_now[host] = bool(installed)
+        if installed:
+            print(f"  ok    {host}: installed at {installed}")
+        else:
+            print(f"  FAIL  {host}: still not installed — the cutover is skipped, "
+                  f"because there would be nothing to cut over to")
 
     return present_now
 
@@ -466,6 +527,24 @@ def _ask(prompt: str) -> str:
         return ""
 
 
+def _ask_number(prompt: str, current) -> int | None:
+    """A whole number, or nothing. It RE-ASKS instead of raising.
+
+    `int(entry)` on the last question threw an uncaught `ValueError` after up to
+    fourteen answers had been typed and before `core.save` had written any of them: one
+    typo cost the whole pass.
+    """
+    while True:
+        entry = _ask(prompt).strip()
+        if not entry:
+            return None
+        try:
+            return int(entry)
+        except ValueError:
+            print(f"  ..    {entry!r} is not a whole number — type one, "
+                  f"or press Enter to keep {current}")
+
+
 def _read_secret(prompt: str) -> str:
     """Echo off when there is a terminal, plain read when there is not.
 
@@ -515,9 +594,15 @@ def _ask_config(cfg, interactive: bool = True) -> None:
 
     print("\n--- everything else (Enter keeps) ---")
     for field in core.install.OPTIONAL_FIELDS:
-        entry = _ask(f"{field} [{getattr(cfg, field)}]: ").strip()
+        current = getattr(cfg, field)
+        if isinstance(current, int):
+            number = _ask_number(f"{field} [{current}]: ", current)
+            if number is not None:
+                patch[field] = number
+            continue
+        entry = _ask(f"{field} [{current}]: ").strip()
         if entry:
-            patch[field] = int(entry) if field == "context_window" else entry
+            patch[field] = entry
 
     if patch:
         core.save(patch)

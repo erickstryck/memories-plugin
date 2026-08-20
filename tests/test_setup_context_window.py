@@ -33,6 +33,15 @@ class ContextWindowCheck(unittest.TestCase):
         self.assertTrue(check.ok)
         self.assertIn("200000", check.detail)
 
+    def test_a_negative_declaration_is_not_a_declaration(self):
+        """The guard in `core/windows.py` gates on `declared > 0`, so a negative value
+        is resolved per model exactly like 0. The check gated on truthiness instead, so
+        it reported "declared" over a number the guard ignores — the two disagreeing
+        about the same field is the whole failure mode this check exists to catch."""
+        check = setup._check_context_window(cfg_with(context_window=-1))
+        self.assertFalse(check.ok)
+        self.assertTrue(check.warning)
+
     def test_diagnose_includes_it(self):
         """Reachability is irrelevant here: the check must be present even with Qdrant
         down, which is what an offline suite gives us."""

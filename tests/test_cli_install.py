@@ -201,6 +201,20 @@ class WritingPass(unittest.TestCase):
         self.assertFalse((here / ".env").exists(),
                          "a credential file was written into the working directory")
 
+    def test_a_non_numeric_context_window_is_re_asked_not_a_crash(self):
+        """`int(entry)` raised an uncaught ValueError on the LAST question, after
+        fourteen answers had been typed and before `core.save` had written any of
+        them. The whole pass was lost to one typo."""
+        answers = "\n".join([
+            "https://q.example", "https://e.example/v1", "qkey", "skey", "mem",
+        ] + [""] * 8 + ["200k", "200000"]) + "\n"
+        done = self.run_with_input(answers)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        written = json.loads(self.config.read_text())
+        self.assertEqual(written["context_window"], 200000)
+        self.assertEqual(written["qdrant_url"], "https://q.example")
+
     def test_the_key_value_is_never_echoed(self):
         answers = "\n".join([
             "https://q.example", "https://e.example/v1", "qkey", "s3cr3t-value", "mem",
@@ -454,9 +468,10 @@ class HostGroups(unittest.TestCase):
         self.bin.mkdir()
         # The ONLY PATH these tests run with. Two shells are linked in because the
         # cutovers are run as `bash <script>` and the host install commands go through
-        # `sh -c`; nothing else is, so a real `claude` or `hermes` on this machine
-        # cannot be reached from here by accident.
-        for tool in ("bash", "sh"):
+        # `sh -c`, and `mkdir` is what the stubs use to stand in for a plugin that got
+        # installed. Nothing else is linked, so a real `claude` or `hermes` on this
+        # machine cannot be reached from here by accident.
+        for tool in ("bash", "sh", "mkdir"):
             (self.bin / tool).symlink_to(shutil.which(tool))
         self.witness = self.dir / "witness"
         self.addCleanup(self.tmp.cleanup)
@@ -480,11 +495,23 @@ class HostGroups(unittest.TestCase):
 
         return root
 
-    def stub_host(self, name: str, exit_code: int = 0) -> None:
-        """A host binary on PATH that records every call instead of making one."""
+    def stub_host(self, name: str, exit_code: int = 0, installs: Path = None,
+                  provider: str = "") -> None:
+        """A host binary on PATH that records every call instead of making one.
+
+        `installs` is the directory the stub creates, standing in for a plugin install
+        that worked — the wizard re-probes for it rather than believing the exit code.
+        `provider` is what it answers to `config get memory.provider`, which the wizard
+        reads to say what it is about to replace.
+        """
         path = self.bin / name
+        creates = f'mkdir -p {installs}\n' if installs else ""
+        answer = (f'if [ "$*" = "config get memory.provider" ]; then\n'
+                  f'  printf "%s\\n" {provider!r}\n  exit 0\nfi\n') if provider else ""
         path.write_text(f'#!/usr/bin/env bash\n'
                         f'printf "%s %s\\n" {name} "$*" >> {self.witness}\n'
+                        f'{answer}'
+                        f'{creates}'
                         f'exit {exit_code}\n')
         path.chmod(0o755)
 
@@ -547,7 +574,7 @@ class HostGroups(unittest.TestCase):
         self.assertEqual(self.calls(), "", "it reinstalled a plugin that was there")
 
     def test_a_missing_plugin_is_installed_with_the_commands_it_showed(self):
-        self.stub_host("hermes")
+        self.stub_host("hermes", installs=self.home / ".hermes" / "plugins" / "memories")
         with mock.patch.dict(os.environ, self.env(), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             present = self.qctx._host_install_group(Args(), self.root)
@@ -558,6 +585,34 @@ class HostGroups(unittest.TestCase):
         self.assertIn("config set memory.provider memories", self.calls())
         self.assertTrue(present["hermes"])
 
+    def test_a_failed_host_install_is_not_recorded_as_present(self):
+        """`present_now[host] = True` was set regardless of what the commands did, so a
+        `hermes plugins install` that exited non-zero still led to an `--apply`
+        cutover on a host with no plugin in it. The state is RE-PROBED instead."""
+        self.stub_host("hermes", exit_code=1)
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            present = self.qctx._host_install_group(Args(), self.root)
+        self.assertFalse(present["hermes"])
+        self.assertIn("still not installed", out.getvalue())
+
+    def test_it_explains_the_force_and_the_provider_switch_before_asking(self):
+        """The design requires both to be shown, because both are the user's decision:
+        `--force` is agreement with what the scanner flagged, and pointing
+        `memory.provider` here throws away whatever provider was set. They lived only
+        as a code comment, and the wizard printed the bare commands."""
+        self.stub_host("hermes", provider="some-other-provider",
+                       installs=self.home / ".hermes" / "plugins" / "memories")
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.qctx._host_install_group(Args(), self.root)
+        shown = out.getvalue()
+        self.assertIn("caution", shown)
+        self.assertIn("REPLACES", shown)
+        self.assertIn("some-other-provider", shown)
+        self.assertLess(shown.index("caution"), shown.index("hermes plugins install"),
+                        "the reason has to come before the command, not after it")
+
     def test_declining_leaves_the_host_alone(self):
         self.stub_host("hermes")
         with mock.patch.dict(os.environ, self.env(), clear=True), \
@@ -565,7 +620,8 @@ class HostGroups(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             present = self.qctx._host_install_group(Args(yes=False), self.root)
         self.assertFalse(present["hermes"])
-        self.assertEqual(self.calls(), "")
+        self.assertNotIn("plugins install", self.calls())
+        self.assertNotIn("config set", self.calls())
 
     # ---- the group that applies the cutover ----
 

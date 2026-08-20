@@ -114,7 +114,10 @@ def _check_context_window(cfg: Config) -> Check:
     variant is right not to declare it; whoever runs a 200k model, or any model the table
     does not know, has a guard that is installed and inert.
     """
-    if cfg.context_window:
+    # `> 0`, and not truthiness: `core/windows.py` gates on `declared > 0`, so a
+    # negative number is resolved per model exactly like a zero. The two disagreeing
+    # about the same field is the failure this check exists to catch.
+    if cfg.context_window > 0:
         return Check("Context window", True, f"{cfg.context_window} declared")
 
     return Check("Context window", False,

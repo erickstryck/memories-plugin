@@ -203,6 +203,48 @@ class CredentialFile(unittest.TestCase):
         install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
         self.assertIn("OTHER=keep", self.path.read_text())
 
+    def test_it_replaces_the_export_form_too(self):
+        """`export NAME=` is the form this repository supports everywhere else — it is
+        what `tests/test_hermes_cutover.py` writes. Matching only `NAME=` appended a
+        second line for the same variable, and which one the loader reads last is a coin
+        toss the operator cannot see."""
+        self.path.write_text("export SERVER_API_KEY=old\n")
+        install.write_env_file(self.path, {"SERVER_API_KEY": "new"})
+        body = self.path.read_text()
+        self.assertEqual(body.count("SERVER_API_KEY="), 1)
+        self.assertIn("export SERVER_API_KEY=new", body)
+
+    def test_it_keeps_the_export_prefix_it_found(self):
+        """Rewriting `export NAME=` as `NAME=` would leave the variable set but not
+        exported, so a sourced file would stop reaching child processes."""
+        self.path.write_text("  export SERVER_API_KEY=old\n")
+        install.write_env_file(self.path, {"SERVER_API_KEY": "new"})
+        self.assertTrue(self.path.read_text().startswith("export SERVER_API_KEY=new"))
+
+    def test_the_mode_comes_from_the_creation_not_from_a_later_chmod(self):
+        """A `write_text` followed by `chmod` leaves the credential world-readable for
+        as long as the two calls are apart. The window is small and the file is a
+        plaintext key, so it is closed at the source: the mode is an argument to
+        `os.open`, and there is no chmod afterwards to observe."""
+        import os
+        from unittest import mock
+        old_umask = os.umask(0)
+        self.addCleanup(os.umask, old_umask)
+        with mock.patch.object(Path, "chmod") as path_chmod, \
+                mock.patch("os.chmod") as os_chmod:
+            install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        path_chmod.assert_not_called()
+        os_chmod.assert_not_called()
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_it_does_not_re_mode_a_file_the_user_already_had(self):
+        """`~/.secrets` is the user's file, with the user's permissions. Writing a key
+        into it is not a licence to change them behind their back."""
+        self.path.write_text("OTHER=keep\n")
+        self.path.chmod(0o640)
+        install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o640)
+
 
 if __name__ == "__main__":
     unittest.main()

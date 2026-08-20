@@ -9,6 +9,8 @@ obeys it. Which host is installed, and running its cutover, is the CLI's busines
 is where the two host names already appear in this repository.
 """
 import filecmp
+import os
+import re
 import shutil
 from pathlib import Path
 
@@ -44,19 +46,31 @@ def write_env_file(path: Path, values: dict) -> None:
 
     Appending is what a person does by hand, and it leaves two lines for one variable —
     whichever the loader reads last wins, which is a coin toss the operator cannot see.
+    BOTH FORMS COUNT: this repository writes and reads `export NAME=` as well as bare
+    `NAME=`, so matching only the bare one appended a duplicate for a variable that was
+    already there. The prefix that was found is kept — rewriting `export NAME=` as
+    `NAME=` would leave the variable set but no longer exported to child processes.
+
+    The mode is an argument to `os.open`, not a `chmod` afterwards: the file holds a
+    plaintext key, and `write_text` then `chmod` leaves it world-readable for as long as
+    the two calls are apart. A file that already exists keeps the permissions its owner
+    gave it — writing a key into somebody's file is not a licence to re-mode it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = path.read_text().splitlines() if path.exists() else []
     for name, value in values.items():
-        replacement = f"{name}={value}"
+        pattern = re.compile(rf"^\s*(export\s+)?{re.escape(name)}=")
         for i, line in enumerate(lines):
-            if line.startswith(f"{name}="):
-                lines[i] = replacement
+            found = pattern.match(line)
+            if found:
+                lines[i] = f"{found.group(1) or ''}{name}={value}"
                 break
         else:
-            lines.append(replacement)
-    path.write_text("\n".join(lines) + "\n")
-    path.chmod(0o600)
+            lines.append(f"{name}={value}")
+    body = "\n".join(lines) + "\n"
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                   "w") as handle:
+        handle.write(body)
 
 
 def read_env_names(path: Path) -> dict:
