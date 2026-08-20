@@ -55,8 +55,15 @@ resolve_root() {
   fi
 
   # Try own tree (symlinks resolved) — only if QCTX_HOME didn't work.
-  # If own_tree() fails (e.g., dangling symlink from concurrent plugin update),
-  # degrade gracefully to next candidate instead of aborting the script.
+  # If own_tree() fails (e.g. a tree that vanished under a concurrent plugin update),
+  # degrade to the next candidate with an empty one, instead of aborting.
+  #
+  # INERT TODAY, and kept anyway. `resolve_root` is only ever called as
+  # `$(resolve_root)`, and errexit does not fire on a failing assignment inside a
+  # command-substitution subshell — measured on bash 5.3.9: the identical assignment
+  # aborts when the function is called directly and does not when it is substituted.
+  # So this guard costs nothing and bites the day someone calls `resolve_root` outside
+  # a substitution, where the failure would be a silent `exit 1` with no message.
   candidate="$(own_tree)" || candidate=""
   if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
     printf '%s\n' "$candidate"

@@ -760,6 +760,31 @@ class HostGroups(unittest.TestCase):
         self.assertIn("claude-code --apply", self.calls())
         self.assertNotIn("hermes --apply", self.calls())
 
+    def test_the_apply_is_given_more_time_than_the_suite_costs(self):
+        """The suite measured 852 s on 2026-08-20 and the timeout was 900. The number
+        it is compared against grows with every test added, so the margin has to be a
+        multiple, not 48 seconds."""
+        self.assertGreaterEqual(self.qctx.CUTOVER_APPLY_TIMEOUT, 3600)
+
+    def test_a_timed_out_apply_is_reported_and_not_raised(self):
+        """A TimeoutExpired fires while the script is rewriting settings.json. It used
+        to propagate out of `cmd_install` uncaught, so the user saw a traceback where
+        they needed to be told to go and look at the backup."""
+        real_run = subprocess.run
+
+        def run(command, **kwargs):
+            if "--apply" in command:
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 0))
+
+            return real_run(command, **kwargs)
+
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx.subprocess, "run", run), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.qctx._host_cutover_group(Args(), self.root, {"hermes": True})
+        self.assertIn("was killed after", out.getvalue())
+        self.assertIn("backup", out.getvalue())
+
     def test_the_apply_is_the_same_script_with_the_suite_not_skipped(self):
         with mock.patch.dict(os.environ, self.env(), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:

@@ -25,9 +25,16 @@ def run_with_own_tree_deleted(work: Path, env: dict, args=("--root",)):
 
     All fd entries under /proc are symlinks, so `own_tree()`'s `[ -L "$target" ]` loop
     follows `/proc/self/fd/N`, `readlink` yields the now-deleted path, and the final
-    `cd` inside `own_tree()` fails — the exact failure the `|| candidate=""` guard in
-    `resolve_root()` exists to catch. This is the mechanism the earlier round's probe
-    (`.superpowers/sdd/2026-08-19-install-wizard/probe_owntree.py`) proved works.
+    `cd` inside `own_tree()` fails. Measured: `readlink` gives
+    `…/doomed/bin/qctx (deleted)`, and `cd -P …/doomed/bin/..` then returns non-zero.
+
+    WHAT THIS DOES NOT EXERCISE, said plainly because the docstring used to claim it
+    did: the `|| candidate=""` in `resolve_root()`. Removing that guard leaves every
+    test in this file green, because `resolve_root` is only ever called as
+    `$(resolve_root)` and errexit does not fire on a failing assignment inside a
+    command-substitution subshell. What IS pinned below is the behaviour a user sees —
+    an empty candidate is not mistaken for a resolved tree, resolution carries on to
+    the next one, and `own_tree`'s raw `cd:` error never reaches stderr.
     """
     doomed = work / "doomed" / "bin"
     doomed.mkdir(parents=True)
@@ -110,8 +117,10 @@ class LauncherResolution(unittest.TestCase):
 
     def test_own_tree_failure_falls_through_to_hermes(self):
         # own_tree() genuinely fails here (see run_with_own_tree_deleted): the script's
-        # directory is gone by the time it runs. Resolution must degrade to the next
-        # candidate instead of aborting under `set -euo pipefail`.
+        # directory is gone by the time it runs. What is pinned is the OUTCOME — the
+        # unusable candidate is skipped and the hermes install answers — and not the
+        # `|| candidate=""` guard, which this cannot reach; the helper's docstring says
+        # why.
         tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
         done = run_with_own_tree_deleted(Path(self.tmp.name), self.env)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -119,7 +128,9 @@ class LauncherResolution(unittest.TestCase):
 
     def test_own_tree_failure_with_no_candidates_fails_loudly_not_raw(self):
         # Same broken own_tree(), but nothing else to fall back to. The user must see
-        # the controlled "could not find" message, never own_tree()'s raw `cd:` error.
+        # the controlled "could not find" message, never own_tree()'s raw `cd:` error —
+        # which is what the `2>/dev/null` beside that `cd` is for, and this is the test
+        # that keeps it there.
         done = run_with_own_tree_deleted(Path(self.tmp.name), self.env)
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("could not find", done.stderr)

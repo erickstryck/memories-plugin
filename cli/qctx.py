@@ -258,6 +258,17 @@ HOST_SECTIONS = (
 #: The command that tells us a host is on this machine at all.
 HOST_BINARIES = {"claude-code": "claude", "hermes": "hermes"}
 
+#: How long an `--apply` cutover may take, in seconds.
+#:
+#: The scripts run the whole suite before they write anything — that is their own rule,
+#: and they enforce it by refusing `--apply` while the skip variable is set. The suite
+#: measured 852 s on 2026-08-20, against a value of 900: 48 seconds of margin for a
+#: number that grows with every test added. And a `TimeoutExpired` here does not land
+#: somewhere harmless — it fires while the script is rewriting settings.json, which is
+#: the one moment there is nothing to gain by giving up. Well above the cost, therefore,
+#: and the timeout that remains is handled rather than raised.
+CUTOVER_APPLY_TIMEOUT = 3600
+
 #: What each host needs typed, when the plugin is not installed there yet. Shown before it
 #: is run: `--force` is the user agreeing to what hermes' scanner flagged (this tree ships
 #: two scripts that edit host configuration, which is the cutovers' declared job), and
@@ -496,9 +507,17 @@ def _host_cutover_group(args, root: Path, present_now: dict) -> None:
         plan = _host_dry_run(host, script, skip_var, root)
         print(plan["text"].rstrip())
         if args.yes or _ask(f"\n  apply the {host} cutover? [y/N]: ").strip().lower() == "y":
-            done = subprocess.run(["bash", str(root / script), "--apply"],
-                                  capture_output=True, text=True,
-                                  env=dict(os.environ), timeout=900)
+            try:
+                done = subprocess.run(["bash", str(root / script), "--apply"],
+                                      capture_output=True, text=True,
+                                      env=dict(os.environ),
+                                      timeout=CUTOVER_APPLY_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                print(f"  FAIL  the {host} cutover was killed after "
+                      f"{CUTOVER_APPLY_TIMEOUT}s. It may have been interrupted "
+                      f"mid-write — the script takes a dated backup of everything it "
+                      f"edits, so check that before running it again.")
+                continue
             print(done.stdout + done.stderr, end="")
 
 
