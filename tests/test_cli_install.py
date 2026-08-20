@@ -16,6 +16,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
@@ -855,24 +856,61 @@ class HostGroups(unittest.TestCase):
         multiple, not 48 seconds."""
         self.assertGreaterEqual(self.qctx.CUTOVER_APPLY_TIMEOUT, 3600)
 
-    def test_a_timed_out_apply_is_reported_and_not_raised(self):
-        """A TimeoutExpired fires while the script is rewriting settings.json. It used
-        to propagate out of `cmd_install` uncaught, so the user saw a traceback where
-        they needed to be told to go and look at the backup."""
+    def wedged_subprocess(self, when):
+        """A `subprocess` for the CLI module alone, whose `run` times out when `when`
+        says so and is the real one otherwise.
+
+        The attribute is replaced ON THE PRIVATE MODULE `load_cli()` handed us, not on
+        the shared `subprocess` module: `mock.patch.object(self.qctx.subprocess, "run")`
+        mutates the one object every other test, and `unittest` itself, is holding.
+        """
         real_run = subprocess.run
 
         def run(command, **kwargs):
-            if "--apply" in command:
+            if when(command):
                 raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 0))
 
             return real_run(command, **kwargs)
 
+        return SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
+                               SubprocessError=subprocess.SubprocessError)
+
+    def test_a_timed_out_apply_is_reported_and_not_raised(self):
+        """A TimeoutExpired fires while the script is rewriting settings.json. It used
+        to propagate out of `cmd_install` uncaught, so the user saw a traceback where
+        they needed to be told to go and look at the backup."""
+        wedged = self.wedged_subprocess(lambda command: "--apply" in command)
         with mock.patch.dict(os.environ, self.env(), clear=True), \
-                mock.patch.object(self.qctx.subprocess, "run", run), \
+                mock.patch.object(self.qctx, "subprocess", wedged), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.qctx._host_cutover_group(Args(), self.root, {"hermes": True})
         self.assertIn("was killed after", out.getvalue())
         self.assertIn("backup", out.getvalue())
+
+    def test_a_wedged_dry_run_is_a_report_and_not_a_traceback(self):
+        """`--check` is documented as "reports; writes nothing", and a wedged `claude`,
+        `hermes`, `bash` or `jq` turned it into a traceback: the apply learned to catch
+        its own timeout and the dry run, which runs first and on every single `--check`,
+        did not."""
+        self.stub_host("hermes")
+        wedged = self.wedged_subprocess(lambda command: True)
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "subprocess", wedged):
+            sections = {s["host"]: s for s in self.qctx._host_sections(self.root)}
+        self.assertNotEqual(sections["hermes"]["exit_code"], 0,
+                            "a plan that never answered was reported as a clean plan")
+        self.assertIn("timed out", sections["hermes"]["text"])
+
+    def test_a_wedged_dry_run_does_not_take_the_whole_check_down(self):
+        """The report has to survive it end to end — the section is data the JSON mode
+        hands to a program, so it has to be a section and not an exception."""
+        self.stub_host("hermes")
+        wedged = self.wedged_subprocess(lambda command: True)
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "subprocess", wedged):
+            sections = self.qctx._host_sections(self.root)
+        for section in sections:
+            self.assertEqual({"host", "exit_code", "text"}, set(section))
 
     def test_the_apply_is_the_same_script_with_the_suite_not_skipped(self):
         with mock.patch.dict(os.environ, self.env(), clear=True), \

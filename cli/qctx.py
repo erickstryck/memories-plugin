@@ -329,6 +329,11 @@ def _explain_host_install(host: str) -> None:
             print(f"      memory.provider is {current!r} today, and will be replaced")
 
 
+#: How long a report-only cutover may take, in seconds. It draws a list; it writes
+#: nothing.
+CUTOVER_PLAN_TIMEOUT = 300
+
+
 def _host_dry_run(host: str, script: str, skip_var: str, root: Path) -> dict:
     """Runs a cutover in its report-only mode. Writes nothing; that is the script's
     contract with no `--apply`.
@@ -336,10 +341,21 @@ def _host_dry_run(host: str, script: str, skip_var: str, root: Path) -> dict:
     The suite is skipped HERE and only here: both scripts run the full suite among their
     checks, which costs ~41s per host to draw a list. It runs once before any apply, and
     both scripts refuse to apply with the variable set.
+
+    A TIMEOUT IS A SECTION, never an exception. This runs on every `--check`, the mode
+    documented as "reports; writes nothing" — and a wedged `claude`, `hermes`, `bash` or
+    `jq` turned that report into a traceback. The apply learned to catch its own timeout;
+    the dry run, which runs first and far more often, had not.
     """
     env = dict(os.environ, **{skip_var: "1"})
-    done = subprocess.run(["bash", str(root / script)], capture_output=True, text=True,
-                          env=env, timeout=300)
+    try:
+        done = subprocess.run(["bash", str(root / script)], capture_output=True,
+                              text=True, env=env, timeout=CUTOVER_PLAN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {"host": host, "exit_code": 124,
+                "text": f"  FAIL  the {host} plan timed out after "
+                        f"{CUTOVER_PLAN_TIMEOUT}s and was killed. Nothing was written — "
+                        f"a cutover with no --apply only reports.\n"}
 
     return {"host": host, "exit_code": done.returncode, "text": done.stdout + done.stderr}
 
