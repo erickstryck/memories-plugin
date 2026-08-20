@@ -13,6 +13,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from core import install  # noqa: E402
+from core.errors import CoreError  # noqa: E402
 
 
 class Plumbing(unittest.TestCase):
@@ -31,6 +32,14 @@ class Plumbing(unittest.TestCase):
         self.assertFalse(check.ok)
         self.assertFalse(check.warning)
         self.assertIn(str(self.home / ".local" / "bin"), check.fix_hint)
+
+    def test_the_fix_hint_is_not_the_command_that_is_missing(self):
+        """"`qctx` is not on PATH" fixed by "run `qctx install`" is circular in exactly
+        the state it describes. The bootstrap is the thing that runs with no launcher,
+        and it can be named without naming a host — which this module may not do."""
+        hint = install.launcher_check(REPO, self.env()).fix_hint
+        self.assertNotIn(f"{install.LAUNCHER_NAME} install", hint)
+        self.assertIn("install.sh", hint)
 
     def test_launcher_identical_copy_is_ok(self):
         copy = self.home / ".local" / "bin" / "qctx"
@@ -163,6 +172,31 @@ class Credentials(unittest.TestCase):
         for alias in config.ENV_ALIASES["qdrant_api_key"]:
             self.assertIn(alias, check.detail + (check.fix_hint or ""))
 
+    def test_an_environment_only_key_says_no_file_holds_it(self):
+        """It stays `ok`, and it says WHERE ok came from.
+
+        Downgrading an environment-only key would nag every machine that exports its
+        keys from `.bashrc`, a systemd unit or a secrets manager — durable storage this
+        check cannot see, so calling it a warning would be a false negative on a
+        correctly configured machine. But `ok` alone reads as "this is stored", and for
+        a key that lives only in this process's environment that is the one thing not
+        yet established.
+        """
+        other = self.dir / ".env"
+        other.write_text("SOMETHING_ELSE=x\n")
+        check = self.named(install.credentials_check({"QCTX_API_KEY": "abcdef"},
+                                                     [other]))["api_key"]
+        self.assertTrue(check.ok)
+        self.assertIn("no credential file", check.detail)
+
+    def test_a_key_that_a_file_holds_does_not_get_that_sentence(self):
+        env_file = self.dir / ".env"
+        env_file.write_text("SERVER_API_KEY=abcdefgh\n")
+        check = self.named(install.credentials_check({"QCTX_API_KEY": "abcdef"},
+                                                     [env_file]))["api_key"]
+        self.assertTrue(check.ok)
+        self.assertNotIn("no credential file", check.detail)
+
     def test_no_value_is_ever_printed(self):
         env_file = self.dir / ".env"
         env_file.write_text("SERVER_API_KEY=file-s3cr3t\n")
@@ -190,6 +224,45 @@ class Credentials(unittest.TestCase):
         self.assertIn("api_key", named)
         self.assertFalse(named["no-shell config"].ok,
                          "a config file was read from somewhere outside this test")
+
+
+class UnreadableCredentialFiles(unittest.TestCase):
+    """A credential file that is not UTF-8 is somebody else's file, and `--check` runs
+    over every file it was handed."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".secrets"
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_non_utf8_file_reports_nothing_rather_than_raising(self):
+        """`read_env_names` caught `OSError` and not `UnicodeDecodeError`, so a single
+        stray byte in `~/.secrets` turned the whole report into a traceback. A file that
+        cannot be decoded tells us nothing about which names it sets, and "nothing" is
+        the true answer to the question this function asks."""
+        self.path.write_bytes(b"SERVER_API_KEY=abc\n\xff\xfe not utf-8\n")
+        self.assertEqual(install.read_env_names(self.path), {})
+
+    def test_the_whole_credential_check_survives_one(self):
+        self.path.write_bytes(b"\xff\xfe\x00\x00\n")
+        checks = install.credentials_check({}, [self.path])
+        self.assertEqual(len(checks), 2)
+
+    def test_writing_into_one_REFUSES_instead_of_replacing_its_contents(self):
+        """The one place where catching and carrying on would be the worse bug.
+
+        `write_env_file` rewrites the file from the lines it read. If a failed read gave
+        it an empty list, the atomic replace would put a two-line file over one that may
+        hold every credential the user has — a silent deletion, dressed as a successful
+        write. So it refuses, as a `CoreError` the CLI already renders as one line, and
+        names the file.
+        """
+        self.path.write_bytes(b"OTHER=\xff\xfe\n")
+        before = self.path.read_bytes()
+        with self.assertRaises(CoreError) as caught:
+            install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        self.assertIn(str(self.path), str(caught.exception))
+        self.assertEqual(self.path.read_bytes(), before)
 
 
 class CredentialFile(unittest.TestCase):

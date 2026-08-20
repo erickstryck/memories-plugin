@@ -899,9 +899,16 @@ class HostGroups(unittest.TestCase):
         self.assertNotIn("hermes --apply", self.calls())
 
     def test_the_apply_is_given_more_time_than_the_suite_costs(self):
-        """The suite measured 852 s on 2026-08-20 and the timeout was 900. The number
-        it is compared against grows with every test added, so the margin has to be a
-        multiple, not 48 seconds."""
+        """The suite measured 852 s ON 2026-08-20 and the timeout was 900. The number it
+        is compared against grows with every test added, so the margin has to be a
+        multiple, not 48 seconds.
+
+        A LITERAL FLOOR, deliberately, and it is the weaker half of the guarantee: the
+        only test that could notice the suite actually outgrowing the timeout is one
+        that runs the suite, which is exactly the cost the constant exists to avoid
+        paying on every `--check`. So this pins the floor and the constant's docstring
+        carries the date of the measurement it was chosen against.
+        """
         self.assertGreaterEqual(self.qctx.CUTOVER_APPLY_TIMEOUT, 3600)
 
     def wedged_subprocess(self, when):

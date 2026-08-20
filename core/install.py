@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 from .config import ENV_ALIASES, SECRET_FIELDS, load
+from .errors import CoreError
 from .setup import COMMAND_PREFIX, Check
 
 #: The command every skill and every page of documentation cites.
@@ -70,7 +71,16 @@ def write_env_file(path: Path, values: dict) -> None:
     half-written files each holding a plaintext key would be worse than the truncation.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = path.read_text().splitlines() if path.exists() else []
+    try:
+        lines = path.read_text().splitlines() if path.exists() else []
+    except UnicodeDecodeError as exc:
+        # REFUSES, and this is the one place where catching and carrying on would be the
+        # worse bug. The rewrite below is built from the lines read here: an empty list
+        # would put a two-line file over one that may hold every credential the user
+        # has — a silent deletion dressed as a successful write.
+        raise CoreError(f"{path} is not UTF-8 and cannot be rewritten safely: every "
+                        f"line it holds would be lost. Add the variable by hand, or "
+                        f"name a different file.") from exc
     for name, value in values.items():
         pattern = re.compile(rf"^\s*(export\s+)?{re.escape(name)}=")
         for i, line in enumerate(lines):
@@ -102,7 +112,11 @@ def read_env_names(path: Path) -> dict:
     """
     try:
         body = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # A file that cannot be decoded tells us nothing about which names it sets, and
+        # "nothing" is the true answer to the question this function asks. Only `OSError`
+        # was caught, so one stray byte in `~/.secrets` turned the whole report into a
+        # traceback.
         return {}
     found = {}
     for line in body.splitlines():
@@ -138,14 +152,23 @@ def credentials_check(env: dict, files=()) -> list[Check]:
     checks = []
     for field in (f for f in REQUIRED_FIELDS if f in SECRET_FIELDS):
         aliases = ENV_ALIASES[field]
-        where = []
+        where, in_a_file = [], False
         for name in aliases:
             if env.get(name):
                 where.append(f"{name} ({len(env[name])} chars) in the environment")
             for path, names in in_files.items():
                 if name in names:
                     where.append(f"{name} ({names[name]} chars) in {path}")
+                    in_a_file = True
         if where:
+            # ENVIRONMENT-ONLY IS STILL `ok`, and it says so out loud. It stays ok
+            # because `.bashrc`, a systemd unit and a secrets manager are all durable
+            # storage this check cannot see, and a warning would nag every machine that
+            # uses one. But a bare `ok` reads as "this is stored", which is the one
+            # thing not established when the only place the key was found is a variable
+            # that dies with this process.
+            if not in_a_file:
+                where.append("no credential file on this machine holds it")
             checks.append(Check(field, True, "; ".join(where)))
             continue
         spellings = ", ".join(aliases)
@@ -167,8 +190,12 @@ def launcher_check(root: Path, env: dict) -> Check:
     source = root / "bin" / LAUNCHER_NAME
     found = shutil.which(LAUNCHER_NAME, path=env.get("PATH", ""))
     if not found:
+        # NOT "`qctx install` copies it": that hint was circular in exactly the state it
+        # describes — the command it names is the one the reader cannot run. The
+        # bootstrap is the thing that works with no launcher on PATH, and it can be
+        # named without naming a host, which this module is not allowed to do.
         return Check("launcher", False, f"{LAUNCHER_NAME} is not on PATH",
-                     f"{COMMAND_PREFIX} install copies it to "
+                     f"run `scripts/install.sh` from the plugin tree — it puts it in "
                      f"{target_dir(env) / LAUNCHER_NAME}")
     # Bytes, not a version marker: a number is one more thing to remember to bump, and
     # this one would go stale the same way the manifests' `version` did.

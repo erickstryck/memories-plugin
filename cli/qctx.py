@@ -265,11 +265,17 @@ HOST_BINARIES = {"claude-code": "claude", "hermes": "hermes"}
 #:
 #: The scripts run the whole suite before they write anything — that is their own rule,
 #: and they enforce it by refusing `--apply` while the skip variable is set. The suite
-#: measured 852 s on 2026-08-20, against a value of 900: 48 seconds of margin for a
+#: measured 852 s ON 2026-08-20, against a value of 900: 48 seconds of margin for a
 #: number that grows with every test added. And a `TimeoutExpired` here does not land
 #: somewhere harmless — it fires while the script is rewriting settings.json, which is
 #: the one moment there is nothing to gain by giving up. Well above the cost, therefore,
 #: and the timeout that remains is handled rather than raised.
+#:
+#: THE 852 IS A MEASUREMENT WITH A DATE, and nothing re-takes it. The only test that
+#: could notice the suite outgrowing this number is one that runs the suite, which is
+#: precisely the cost this constant exists so that no `--check` has to pay. So the date
+#: is the reader's whole basis for judging how stale the margin is: re-measure it, do
+#: not re-derive it.
 CUTOVER_APPLY_TIMEOUT = 3600
 
 #: What each host needs typed, when the plugin is not installed there yet. Shown before it
