@@ -488,6 +488,26 @@ class HostDetection(unittest.TestCase):
         self.assertEqual(self.qctx.claude_install_path(self.home),
                          "/somewhere/b8008f7dac88")
 
+    def test_a_registry_that_is_not_the_expected_shape_reads_as_none(self):
+        """`OSError` and `JSONDecodeError` were guarded; the shape was not.
+
+        A registry holding a JSON ARRAY parses fine and then raises `AttributeError` on
+        `data.get`, and one holding a list of strings raises on `entry.get`. Neither is
+        exotic — it is what a truncated, hand-edited or half-migrated file looks like,
+        and the bash sibling in `bin/qctx` already survives all of them because its
+        reader wraps everything in one `except Exception`. Here it took the wizard down
+        with a traceback in the middle of `--check`.
+        """
+        registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        registry.parent.mkdir(parents=True)
+        for malformed in ("[]", '["memories-plugin@memories-plugin"]', '"a string"',
+                          '{"plugins": []}',
+                          '{"plugins": {"memories-plugin@memories-plugin": ["x"]}}',
+                          "not json at all", ""):
+            with self.subTest(registry=malformed):
+                registry.write_text(malformed)
+                self.assertIsNone(self.qctx.claude_install_path(self.home))
+
     def test_the_hermes_command_carries_force_and_the_provider_switch(self):
         joined = " ".join(self.qctx.HOST_INSTALL_COMMANDS["hermes"])
         self.assertIn("--force", joined)

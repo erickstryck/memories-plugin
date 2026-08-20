@@ -383,13 +383,19 @@ def claude_install_path(home: Path) -> str | None:
     — five of them on the machine this was measured on.
     """
     registry = home / ".claude" / "plugins" / "installed_plugins.json"
+    # THE SHAPE IS GUARDED TOO, not only the read and the parse. A registry holding a
+    # JSON array parses fine and then raises `AttributeError` on `data.get`; one holding
+    # a list of strings raises on `entry.get`; a number under "plugins" raises
+    # `TypeError`. That is what a truncated, hand-edited or half-migrated file looks
+    # like, and it took `--check` down with a traceback. The bash sibling in `bin/qctx`
+    # was already broader — it wraps its whole reader in one `except Exception`.
     try:
         data = json.loads(registry.read_text())
-    except (OSError, json.JSONDecodeError):
+        for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+            if entry.get("installPath"):
+                return entry["installPath"]
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
         return None
-    for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
-        if entry.get("installPath"):
-            return entry["installPath"]
 
     return None
 

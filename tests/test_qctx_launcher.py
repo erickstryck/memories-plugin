@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -60,6 +61,22 @@ def fake_tree(root: Path) -> Path:
     return root
 
 
+def launcher_copy(home: Path) -> Path:
+    """A copy of `bin/qctx` at `~/.local/bin/qctx` — a launcher OUTSIDE any tree.
+
+    Four tests built this same three-line copy by hand, which is three lines each of
+    them had to keep in agreement with what `install_launcher` actually does. It is the
+    shape every resolution case below is about: `own_tree()` resolves to `~/.local`,
+    which holds no `cli/qctx.py`, so the fall-through candidates are what answer.
+    """
+    copy = home / ".local" / "bin" / "qctx"
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_bytes(LAUNCHER.read_bytes())
+    copy.chmod(0o755)
+
+    return copy
+
+
 def run_root(launcher: Path, env: dict) -> str:
     done = subprocess.run([str(launcher), "--root"], capture_output=True, text=True,
                           env=env, timeout=30)
@@ -87,10 +104,7 @@ class LauncherResolution(unittest.TestCase):
 
     def test_copy_outside_a_tree_finds_the_hermes_install(self):
         tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
-        copy = self.home / ".local" / "bin" / "qctx"
-        copy.parent.mkdir(parents=True)
-        copy.write_bytes(LAUNCHER.read_bytes())
-        copy.chmod(0o755)
+        copy = launcher_copy(self.home)
         self.assertEqual(run_root(copy, self.env), str(tree))
 
     def test_copy_falls_through_to_the_claude_install_path(self):
@@ -99,17 +113,11 @@ class LauncherResolution(unittest.TestCase):
         registry.parent.mkdir(parents=True)
         registry.write_text(json.dumps({"version": 2, "plugins": {
             "memories-plugin@memories-plugin": [{"installPath": str(tree)}]}}))
-        copy = self.home / ".local" / "bin" / "qctx"
-        copy.parent.mkdir(parents=True)
-        copy.write_bytes(LAUNCHER.read_bytes())
-        copy.chmod(0o755)
+        copy = launcher_copy(self.home)
         self.assertEqual(run_root(copy, self.env), str(tree))
 
     def test_nothing_to_resolve_fails_loudly(self):
-        copy = self.home / ".local" / "bin" / "qctx"
-        copy.parent.mkdir(parents=True)
-        copy.write_bytes(LAUNCHER.read_bytes())
-        copy.chmod(0o755)
+        copy = launcher_copy(self.home)
         done = subprocess.run([str(copy), "--root"], capture_output=True, text=True,
                               env=self.env, timeout=30)
         self.assertNotEqual(done.returncode, 0)
@@ -136,67 +144,75 @@ class LauncherResolution(unittest.TestCase):
         self.assertIn("could not find", done.stderr)
         self.assertNotIn("cd:", done.stderr)
 
+    def test_a_malformed_registry_does_not_break_the_bash_resolution(self):
+        """The same shapes `claude_install_path` learned to survive, on the bash side.
+
+        `claude_tree()` is already broad — its reader wraps everything in one
+        `except Exception` and the whole call ends in `2>/dev/null || true` — and this
+        is what keeps it that way. Both readers answer the same question about the same
+        file, and only one of them had a test for the file being wrong; that is exactly
+        how the Python one came to raise `AttributeError` on a JSON array.
+        """
+        registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        registry.parent.mkdir(parents=True)
+        copy = launcher_copy(self.home)
+        for malformed in ("[]", '["memories-plugin@memories-plugin"]', '"a string"',
+                          '{"plugins": []}',
+                          '{"plugins": {"memories-plugin@memories-plugin": ["x"]}}',
+                          "not json at all", ""):
+            with self.subTest(registry=malformed):
+                registry.write_text(malformed)
+                done = subprocess.run([str(copy), "--root"], capture_output=True,
+                                      text=True, env=self.env, timeout=30)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("could not find", done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
+
+    def test_a_malformed_registry_still_lets_the_hermes_install_answer(self):
+        """A broken registry must not swallow the candidate AFTER it — the fall-through
+        is the whole design, and a reader that aborted would take it down."""
+        tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text("[]")
+        self.assertEqual(run_root(launcher_copy(self.home), self.env), str(tree))
+
     def test_lazy_evaluation_skips_claude_tree_when_qctx_home_resolves(self):
-        # Verify that claude_tree() is not called when QCTX_HOME resolves.
-        # This test uses a python3 shim on PATH that writes to a witness file
-        # when called with "-" as the first argument (the signature of claude_tree's call).
-        # If the witness file exists after qctx --root, it means claude_tree() was called
-        # unnecessarily, and the test fails.
+        """`claude_tree()` forks a `python3` to read the registry, and it must not run
+        when an earlier candidate has already answered.
 
-        # Create a witness file path
-        witness_file = Path(self.tmp.name) / "python3_called_during_resolution"
-
-        # Create a shim python3 that detects resolution-time calls
+        The witness is a `python3` shim earlier on PATH than the real one. It touches a
+        file when it is called with `-` as the first argument, which is the signature of
+        `claude_tree`'s heredoc call and of nothing else the launcher does, then execs
+        the interpreter running this suite — named through `sys.executable`, because
+        hardcoding `/usr/bin/python3` pins the test to one machine's layout and would
+        send the shim to a different interpreter than the one under test on any other.
+        """
+        witness = Path(self.tmp.name) / "claude_tree_was_evaluated"
         shim_dir = Path(self.tmp.name) / "shim"
         shim_dir.mkdir()
-        shim_python = shim_dir / "python3"
-        shim_python.write_text(f"""#!/bin/bash
-# This shim detects if python3 is called during resolution (with "-" as first arg).
-# claude_tree() calls: python3 - "$registry" <<'PY'...
-# This shim writes to a witness file if that pattern is detected, allowing us to
-# verify that lazy evaluation is working.
-if [ "${{1:-}}" = "-" ]; then
-  touch {witness_file}
-fi
-exec /usr/bin/python3 "$@"
-""")
-        shim_python.chmod(0o755)
-
-        # Prepend shim to PATH so it shadows /usr/bin/python3
+        shim = shim_dir / "python3"
+        shim.write_text(f'#!/bin/bash\n'
+                        f'if [ "${{1:-}}" = "-" ]; then touch {witness}; fi\n'
+                        f'exec {sys.executable} "$@"\n')
+        shim.chmod(0o755)
         self.env["PATH"] = f"{shim_dir}:{self.env['PATH']}"
 
-        # Create the chosen tree (will be resolved via QCTX_HOME)
         chosen = fake_tree(Path(self.tmp.name) / "chosen")
-
-        # Create a claude registry that would resolve but should NOT be consulted
-        # when QCTX_HOME is set
+        # A registry that WOULD resolve, so that skipping it is a choice and not an
+        # absence: if the order were eager, this is the fork that would happen anyway.
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
         registry.write_text(json.dumps({"version": 2, "plugins": {
-            "memories-plugin@memories-plugin": [{"installPath": str(Path(self.tmp.name) / "unused_registry_tree")}]}}))
-
-        # Set QCTX_HOME to the chosen tree
+            "memories-plugin@memories-plugin": [
+                {"installPath": str(Path(self.tmp.name) / "unused_registry_tree")}]}}))
         self.env["QCTX_HOME"] = str(chosen)
 
-        # Create a copy of the launcher outside the tree (to test resolution)
-        copy = self.home / ".local" / "bin" / "qctx"
-        copy.parent.mkdir(parents=True)
-        copy.write_bytes(LAUNCHER.read_bytes())
-        copy.chmod(0o755)
-
-        # Run qctx --root with our shim on PATH
-        result = run_root(copy, self.env)
-
-        # Verify the chosen tree is returned
-        self.assertEqual(result, str(chosen))
-
-        # Verify python3 was NOT called during resolution (witness file not created)
-        self.assertFalse(
-            witness_file.exists(),
-            "Python3 was called with '-' during resolution, meaning claude_tree() was evaluated "
-            "even though QCTX_HOME resolved. This indicates eager evaluation — the resolver should "
-            "short-circuit and not call claude_tree() when earlier candidates succeed."
-        )
+        self.assertEqual(run_root(launcher_copy(self.home), self.env), str(chosen))
+        self.assertFalse(witness.exists(),
+                         "claude_tree() was evaluated even though QCTX_HOME had already "
+                         "resolved — the resolver has to short-circuit, not collect "
+                         "every candidate first")
 
 
 if __name__ == "__main__":
