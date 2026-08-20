@@ -431,12 +431,23 @@ def install_launcher(root: Path, env: dict) -> Path:
     target_dir = core.install.target_dir(env)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / core.install.LAUNCHER_NAME
-    # UNLINK FIRST, always. The documented development install makes this path a symlink
-    # into a checkout: copying onto it raises `SameFileError` when the link points at
-    # THIS tree, and silently rewrites somebody else's `bin/qctx` when it points at
-    # another one. Removing the name first turns both into a plain, correct copy.
+    source = root / "bin" / core.install.LAUNCHER_NAME
+    # LEAVES A LINK THAT ALREADY WORKS ALONE, the same rule `scripts/hermes_cutover.sh`
+    # keeps beside its own symlink write, and for the same reason: silently undoing a
+    # link somebody made on purpose is worse than doing nothing. This one is the
+    # DOCUMENTED development install (`ln -s "$PWD/bin/qctx" ~/.local/bin/qctx`), and
+    # `launcher_check` already accepts it as current. Replacing it with a copy made every
+    # later `git pull` leave the launcher stale and `--check` report "differs" — a state
+    # the link itself could never reach.
+    if target.is_symlink() and target.resolve() == source.resolve():
+        print(f"  ok    symlink left as it is: {target} -> {os.readlink(target)} "
+              f"(it already resolves to this tree)")
+
+        return target
+    # UNLINK FIRST otherwise. Copying onto a link into ANOTHER checkout silently rewrites
+    # that checkout's `bin/qctx`; removing the name first turns it into a plain copy.
     target.unlink(missing_ok=True)
-    shutil.copyfile(root / "bin" / core.install.LAUNCHER_NAME, target)
+    shutil.copyfile(source, target)
     target.chmod(0o755)
 
     return target

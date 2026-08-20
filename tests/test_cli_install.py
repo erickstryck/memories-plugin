@@ -513,14 +513,42 @@ class LauncherInstall(unittest.TestCase):
 
         return d
 
-    def test_it_replaces_a_symlink_into_the_source_tree(self):
-        """The DOCUMENTED development install is exactly this symlink, and copying onto
-        it raised `shutil.SameFileError` — uncaught, so the wizard died on the one
-        machine shape the README tells people to create."""
+    def test_it_leaves_a_symlink_that_already_points_at_this_tree(self):
+        """The DOCUMENTED development install is exactly this symlink, and
+        `launcher_check` accepts it as current — `test_a_symlink_to_the_tree_counts_as
+        _current` in `tests/test_install_core.py` pins that half.
+
+        Copying over it raised `shutil.SameFileError` once, so the wizard learned to
+        unlink first — unconditionally, which silently undid a link somebody made on
+        purpose. From that run on, every `git pull` left `~/.local/bin/qctx` stale and
+        `--check` reported "differs": a state the symlink itself could never reach.
+        """
         link = self.bin_dir() / "qctx"
         link.symlink_to(REPO / "bin" / "qctx")
-        target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
-        self.assertFalse(target.is_symlink(), "the symlink survived the install")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
+        self.assertTrue(target.is_symlink(), "a link that already works was replaced")
+        self.assertEqual(target.resolve(), (REPO / "bin" / "qctx").resolve())
+        self.assertIn("symlink", out.getvalue().lower())
+
+    def test_a_symlink_into_ANOTHER_checkout_is_still_replaced(self):
+        """"Already works" means pointing at THIS tree. A link into somebody else's
+        checkout is a stale launcher wearing the same name."""
+        other = Path(self.tmp.name) / "another-checkout" / "bin"
+        other.mkdir(parents=True)
+        stand_in = other / "qctx"
+        stand_in.write_bytes((REPO / "bin" / "qctx").read_bytes())
+        (self.bin_dir() / "qctx").symlink_to(stand_in)
+        with contextlib.redirect_stdout(io.StringIO()):
+            target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
+        self.assertFalse(target.is_symlink(), "a link into another tree was kept")
+        self.assertEqual(target.read_bytes(), (REPO / "bin" / "qctx").read_bytes())
+
+    def test_a_stale_plain_copy_is_still_refreshed(self):
+        copy = self.bin_dir() / "qctx"
+        copy.write_text("#!/usr/bin/env bash\necho old\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
         self.assertEqual(target.read_bytes(), (REPO / "bin" / "qctx").read_bytes())
 
     def test_it_never_writes_through_a_symlink_into_another_checkout(self):
