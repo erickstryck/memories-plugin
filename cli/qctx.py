@@ -35,12 +35,17 @@ collections of their own — see `core/repos.py` for why they are not the librar
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
+from dataclasses import asdict
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
 import core.docs  # noqa: E402
+import core.install  # noqa: E402
 import core.setup  # noqa: E402
 from core.config import ConfigError  # noqa: E402
 
@@ -237,6 +242,86 @@ def cmd_setup(args, cfg):
     print("\nrunning the diagnostics again:\n")
     for c in core.setup.diagnose(core.load())["checks"]:
         _render_check(c)
+
+
+# ---- install ----------------------------------------------------------------
+
+#: The host sections, and the variable each script reads to skip its own test suite.
+#: The scripts stay the owners of host state: they already back up what they edit and
+#: re-read it to confirm the write, and a second implementation of those checks here would
+#: be a second source of truth that diverges at the first fix.
+HOST_SECTIONS = (
+    ("claude-code", "scripts/cutover.sh", "CUTOVER_SKIP_SUITE"),
+    ("hermes", "scripts/hermes_cutover.sh", "HERMES_CUTOVER_SKIP_SUITE"),
+)
+
+#: The command that tells us a host is on this machine at all.
+HOST_BINARIES = {"claude-code": "claude", "hermes": "hermes"}
+
+
+def _host_dry_run(host: str, script: str, skip_var: str, root: Path) -> dict:
+    """Runs a cutover in its report-only mode. Writes nothing; that is the script's
+    contract with no `--apply`.
+
+    The suite is skipped HERE and only here: both scripts run the full suite among their
+    checks, which costs ~41s per host to draw a list. It runs once before any apply, and
+    both scripts refuse to apply with the variable set.
+    """
+    env = dict(os.environ, **{skip_var: "1"})
+    done = subprocess.run(["bash", str(root / script)], capture_output=True, text=True,
+                          env=env, timeout=300)
+
+    return {"host": host, "exit_code": done.returncode, "text": done.stdout + done.stderr}
+
+
+def _host_sections(root: Path) -> list[dict]:
+    sections = []
+    for host, script, skip_var in HOST_SECTIONS:
+        if not shutil.which(HOST_BINARIES[host]):
+            sections.append({"host": host, "exit_code": 0,
+                             "text": f"  ..    {HOST_BINARIES[host]} is not on PATH — "
+                                     f"skipping this host\n"})
+            continue
+        sections.append(_host_dry_run(host, script, skip_var, root))
+
+    return sections
+
+
+def cmd_install(args, cfg):
+    """The wizard: diagnose, then offer to fix, one group at a time.
+
+    With `--check` it only reports. With no TTY and no `--yes` it also only reports — the
+    same rule `cmd_setup` follows, and for the same reason: this command is called by
+    agents and by scripts, and an `input()` waiting for an answer that never comes hangs
+    the caller.
+    """
+    root = Path(__file__).resolve().parent.parent
+    report = core.setup.diagnose(cfg)
+    plumbing = [asdict(c) for c in core.install.plumbing(root, dict(os.environ))]
+    hosts = _host_sections(root)
+
+    if args.json:
+        output({**report, "checks": plumbing + report["checks"], "hosts": hosts}, True)
+
+        return
+
+    print("plumbing:\n")
+    for c in plumbing:
+        _render_check(c)
+    print("\nreachability and configuration:\n")
+    for c in report["checks"]:
+        _render_check(c)
+    for section in hosts:
+        print(f"\n{section['host']}:\n")
+        print(section["text"].rstrip())
+
+    if args.check:
+        return
+    if not sys.stdin.isatty() and not args.yes:
+        print("\n(no interactive terminal — nothing was changed)")
+
+        return
+    print("\n(the writing pass lands in the next task)")
 
 
 # ---- memory ----------------------------------------------------------------
@@ -814,6 +899,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check", action="store_true",
                    help="diagnose only, never ask and never change anything")
     p.set_defaults(fn=cmd_setup)
+
+    p = sub.add_parser("install", help="install and verify everything, step by step")
+    p.add_argument("--check", action="store_true", help="report only; never writes")
+    p.add_argument("--yes", action="store_true", help="answer yes to every group")
+    p.set_defaults(fn=cmd_install)
 
     col = sub.add_parser("collections", help="inspect Qdrant collections")
     colsub = col.add_subparsers(dest="action", required=True)

@@ -1020,7 +1020,10 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
 
     #: Deliberately not tools. Configuration belongs to the operator: a `config set` tool
     #: would let the model point the archive somewhere else mid-conversation, and `setup` is
-    #: interactive. The CLI keeps all of them.
+    #: interactive. `install` joins `setup` for the same reason — it is the wizard that
+    #: installs the launcher and cuts a host over, an operator's decision to make from a
+    #: terminal, not one a model should reach for mid-conversation. The CLI keeps all of
+    #: them.
     #: `repos_daemon`, `repos_add_all`, `repos_status` and `repos_cancel` join them for a
     #: different reason, and it is worth naming because it is not the same argument as
     #: `config_set`'s: these four ACT — they queue indexing work, or start and stop a
@@ -1032,7 +1035,7 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: finds, and writes nothing — see its "writes nothing" test in test_hermes_tools.py.
     #: It ANSWERS rather than acts, same as `repos_search`, so it IS a tool; only its
     #: neighbour `repos_add_all`, which queues the real work, is withheld.
-    NOT_FOR_THE_MODEL = {"setup", "collections_list", "config_show", "config_set",
+    NOT_FOR_THE_MODEL = {"setup", "install", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_daemon", "repos_add_all", "repos_status",
                          "repos_cancel"}
 

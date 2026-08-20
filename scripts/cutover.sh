@@ -50,7 +50,15 @@ else
   note "qctx setup --check reported something pending — run it and fix that before applying"
 fi
 
-if python3 -m unittest discover -s "$ROOT/tests" >/dev/null 2>&1; then
+# Skipping the suite is for the PLAN phase, where running it costs 41 seconds to draw a
+# list. It is never a way to make an apply cheaper — mirroring HERMES_CUTOVER_SKIP_SUITE.
+if [ -n "${CUTOVER_SKIP_SUITE:-}" ]; then
+  if [ "$APPLY" = "--apply" ]; then
+    fail "CUTOVER_SKIP_SUITE is set — refusing to --apply with the suite unverified"
+  else
+    note "suite skipped (CUTOVER_SKIP_SUITE)"
+  fi
+elif python3 -m unittest discover -s "$ROOT/tests" >/dev/null 2>&1; then
   ok "offline suite passes"
 else
   fail "the offline suite does not pass — do not flip the switch like this"

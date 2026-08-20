@@ -1,0 +1,89 @@
+"""`qctx install` — the wizard.
+
+`--check` is the mode everything else is measured against: it must report the same picture
+and write NOTHING. A wizard that repairs while you are looking cannot be used to find out
+what state a machine is in.
+"""
+import json
+import os
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+REPO = Path(__file__).resolve().parent.parent
+CLI = REPO / "cli" / "qctx.py"
+
+
+class CheckMode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.config = Path(self.tmp.name) / "config.json"
+        self.config.write_text("{}")
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_cli(self, *argv):
+        env = dict(os.environ)
+        env.update({"HOME": str(self.home), "QCTX_CONFIG": str(self.config),
+                    "QCTX_QDRANT_URL": "", "PATH": "/usr/bin:/bin"})
+        return subprocess.run([sys.executable, str(CLI), "install", *argv],
+                              capture_output=True, text=True, env=env, timeout=180,
+                              stdin=subprocess.DEVNULL)
+
+    def test_check_writes_nothing(self):
+        before = self.config.read_text()
+        self.run_cli("--check")
+        self.assertEqual(self.config.read_text(), before)
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_check_reports_the_plumbing_section(self):
+        done = self.run_cli("--check")
+        self.assertIn("launcher", done.stdout)
+        self.assertIn("no-shell config", done.stdout)
+
+    def test_json_is_parseable_and_carries_both_shapes(self):
+        done = self.run_cli("--check", "--json")
+        payload = json.loads(done.stdout)
+        self.assertIn("checks", payload)
+        self.assertIn("hosts", payload)
+        for section in payload["hosts"]:
+            self.assertEqual({"host", "exit_code", "text"}, set(section))
+
+    def test_absent_host_is_skipped_not_failed(self):
+        """A machine with only one of the two hosts is the normal case."""
+        done = self.run_cli("--check")
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(done.returncode, 0)
+
+    def test_no_tty_never_blocks(self):
+        """stdin closed, no --yes: it diagnoses and exits, like `qctx setup`."""
+        done = self.run_cli()
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("no interactive terminal", done.stdout)
+
+
+class SkipSuiteVariable(unittest.TestCase):
+    def test_cutover_refuses_to_apply_with_the_suite_skipped(self):
+        """Copied from the hermes script, including the refusal — the flag exists to make
+        the PLAN cheap, never to make an apply cheap.
+
+        HOME is pointed at a scratch directory, not the real one: `--apply` rewrites
+        ~/.claude/settings.json, .mcp.json and .claude.json, and MOVES ~/.claude/skills.
+        The refusal below fires before any of that (it is unconditional on `--apply` with
+        the suite skipped), so a real HOME was never touched even without this — but a
+        test that depends on that ordering never changing is not a test worth trusting the
+        developer's machine to.
+        """
+        with TemporaryDirectory() as home:
+            env = dict(os.environ, CUTOVER_SKIP_SUITE="1", HOME=home)
+            done = subprocess.run(["bash", str(REPO / "scripts" / "cutover.sh"), "--apply"],
+                                  capture_output=True, text=True, env=env, timeout=120)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("suite unverified", done.stdout + done.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
