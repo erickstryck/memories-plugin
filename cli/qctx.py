@@ -330,6 +330,30 @@ def hermes_install_path(env: dict) -> Path | None:
     return candidate if candidate.exists() else None
 
 
+def credential_files(env: dict) -> list[Path]:
+    """The files on THIS machine that exist to hold a credential.
+
+    Here and not in `core/install.py`: that a hermes reads `$HERMES_HOME/.env` is
+    knowledge about a host, and the core is not allowed any. The core takes the list and
+    reports which spelling it found where.
+
+    Only files that already exist are listed. The wizard creates a credential file when
+    the user names one; a check that invented paths would report a file nobody has.
+    """
+    home = Path(env.get("HOME") or os.path.expanduser("~"))
+    hermes_home = Path(env.get("HERMES_HOME") or home / ".hermes")
+
+    return [p for p in (hermes_home / ".env", home / ".secrets") if p.is_file()]
+
+
+def _plumbing(root: Path) -> list[dict]:
+    """The plumbing checks, with this machine's credential files handed in."""
+    env = dict(os.environ)
+
+    return [asdict(c) for c in
+            core.install.plumbing(root, env, credential_files=credential_files(env))]
+
+
 def install_launcher(root: Path, env: dict) -> Path:
     """Copies the launcher onto PATH. A copy, not a symlink: on a machine with only
     claude-code the only stable thing to link to does not exist — the tree is a directory
@@ -563,7 +587,7 @@ def cmd_install(args, cfg):
     """
     root = Path(__file__).resolve().parent.parent
     report = core.setup.diagnose(cfg)
-    plumbing = [asdict(c) for c in core.install.plumbing(root, dict(os.environ))]
+    plumbing = _plumbing(root)
     hosts = [] if args.config_only else _host_sections(root)
 
     if args.json:
@@ -620,7 +644,7 @@ def cmd_install(args, cfg):
 
     # 5. re-verify — including the no-shell check, which only a fresh read can prove.
     print("\nre-checking:\n")
-    for c in [asdict(x) for x in core.install.plumbing(root, dict(os.environ))]:
+    for c in _plumbing(root):
         _render_check(c)
     for c in core.setup.diagnose(core.load())["checks"]:
         _render_check(c)

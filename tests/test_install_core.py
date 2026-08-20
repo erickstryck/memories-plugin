@@ -97,6 +97,82 @@ class FieldCoverage(unittest.TestCase):
             self.assertIn(secret, install.REQUIRED_FIELDS)
 
 
+class Credentials(unittest.TestCase):
+    """`--check` has to say whether each key is present, and IN WHICH SPELLING.
+
+    Checking fewer spellings than `core.config` accepts would be worse than not checking
+    at all: it would report a correctly configured machine as missing its key. So the
+    list is read off `ENV_ALIASES` and never typed out here either.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def named(self, checks):
+        return {c.name: c for c in checks}
+
+    def test_both_keys_are_reported(self):
+        from core import config
+        checks = self.named(install.credentials_check({}))
+        self.assertEqual(set(checks), set(config.SECRET_FIELDS))
+
+    def test_it_names_the_spelling_found_in_the_environment(self):
+        check = self.named(install.credentials_check(
+            {"QDRANT_SERVICE_API_KEY": "abcdef"}))["qdrant_api_key"]
+        self.assertTrue(check.ok)
+        self.assertIn("QDRANT_SERVICE_API_KEY", check.detail)
+        self.assertIn("environment", check.detail)
+
+    def test_it_finds_a_key_that_lives_only_in_a_credential_file(self):
+        """The whole point: a key in a file the process does not export still counts,
+        and the report says which file it is in."""
+        env_file = self.dir / ".env"
+        env_file.write_text("# a comment\nexport SERVER_API_KEY=abcdefgh\n")
+        check = self.named(install.credentials_check({}, [env_file]))["api_key"]
+        self.assertTrue(check.ok)
+        self.assertIn("SERVER_API_KEY", check.detail)
+        self.assertIn(str(env_file), check.detail)
+
+    def test_every_spelling_the_core_accepts_is_checked(self):
+        """Three for the Qdrant key. A hand-copied list is what this guards against."""
+        from core import config
+        for field, aliases in config.ENV_ALIASES.items():
+            if field not in config.SECRET_FIELDS:
+                continue
+            for alias in aliases:
+                check = self.named(install.credentials_check({alias: "abc"}))[field]
+                self.assertTrue(check.ok, f"{alias} was not recognised")
+                self.assertIn(alias, check.detail)
+
+    def test_a_missing_key_is_pending_and_names_the_spellings(self):
+        """Not a blocker: a local Qdrant with no auth is a legitimate install, and a
+        FAIL here would report every one of them as broken."""
+        from core import config
+        check = self.named(install.credentials_check({}))["qdrant_api_key"]
+        self.assertFalse(check.ok)
+        self.assertTrue(check.warning)
+        for alias in config.ENV_ALIASES["qdrant_api_key"]:
+            self.assertIn(alias, check.detail + (check.fix_hint or ""))
+
+    def test_no_value_is_ever_printed(self):
+        env_file = self.dir / ".env"
+        env_file.write_text("SERVER_API_KEY=file-s3cr3t\n")
+        checks = install.credentials_check({"QCTX_QDRANT_API_KEY": "env-s3cr3t"},
+                                           [env_file])
+        printed = " ".join(f"{c.name} {c.detail} {c.fix_hint or ''}" for c in checks)
+        self.assertNotIn("env-s3cr3t", printed)
+        self.assertNotIn("file-s3cr3t", printed)
+        self.assertIn("10 chars", printed)   # the length is what stands in for it
+
+    def test_the_plumbing_carries_them(self):
+        names = [c.name for c in install.plumbing(REPO, {"HOME": str(self.dir),
+                                                         "PATH": ""})]
+        self.assertIn("qdrant_api_key", names)
+        self.assertIn("api_key", names)
+
+
 class CredentialFile(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()

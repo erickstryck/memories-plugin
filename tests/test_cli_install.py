@@ -78,6 +78,31 @@ class CheckMode(unittest.TestCase):
         self.assertNotIn("Traceback", done.stderr)
         self.assertEqual(done.returncode, 0)
 
+    def test_check_reports_each_key_and_every_spelling_it_accepts(self):
+        """The design's own words: reporting fewer spellings than the core accepts
+        would be worse than not reporting. Before this, the whole report was silent
+        about the credentials on a machine with no hermes."""
+        from core.config import ENV_ALIASES
+        done = self.run_cli("--check")
+        for field in ("qdrant_api_key", "api_key"):
+            self.assertIn(field, done.stdout)
+            for alias in ENV_ALIASES[field]:
+                self.assertIn(alias, done.stdout)
+
+    def test_a_key_that_lives_only_in_a_file_is_found_and_never_printed(self):
+        """Both halves at once, because they are one promise: the report says WHERE the
+        key is and in which spelling, and the value itself never appears anywhere."""
+        secrets = self.home / ".secrets"
+        secrets.write_text("export QDRANT_SERVICE_API_KEY=s3cr3t-value\n")
+        hermes_env = self.home / ".hermes" / ".env"
+        hermes_env.parent.mkdir()
+        hermes_env.write_text("SERVER_API_KEY=another-s3cr3t\n")
+        done = self.run_cli("--check")
+        self.assertIn(str(secrets), done.stdout)
+        self.assertIn(str(hermes_env), done.stdout)
+        self.assertNotIn("s3cr3t-value", done.stdout + done.stderr)
+        self.assertNotIn("another-s3cr3t", done.stdout + done.stderr)
+
     def test_no_tty_never_blocks(self):
         """stdin closed, no --yes: it diagnoses and exits, like `qctx setup`."""
         done = self.run_cli()

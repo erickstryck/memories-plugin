@@ -1,5 +1,5 @@
-"""Checks for the plumbing the wizard installs: the launcher, the PATH, and the file a
-process with no shell reads.
+"""Checks for the plumbing the wizard installs: the launcher, the PATH, the file a
+process with no shell reads, and whether each key is set and in which spelling.
 
 DATA, not text — the same contract as `core/setup.py`, and it returns that module's
 `Check` so one renderer serves both.
@@ -12,7 +12,7 @@ import filecmp
 import shutil
 from pathlib import Path
 
-from .config import load
+from .config import ENV_ALIASES, SECRET_FIELDS, load
 from .setup import COMMAND_PREFIX, Check
 
 #: The command every skill and every page of documentation cites.
@@ -57,6 +57,70 @@ def write_env_file(path: Path, values: dict) -> None:
             lines.append(replacement)
     path.write_text("\n".join(lines) + "\n")
     path.chmod(0o600)
+
+
+def read_env_names(path: Path) -> dict:
+    """The variables a credential file SETS, and how long each value is.
+
+    Names and lengths, never values — this feeds a report that gets pasted into issues.
+    The `export NAME=` form is accepted because this package accepts it everywhere else.
+    """
+    try:
+        body = path.read_text()
+    except OSError:
+        return {}
+    found = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        name, sep, value = line.partition("=")
+        value = value.strip().strip("'\"")
+        if sep and value:
+            found[name.strip()] = len(value)
+
+    return found
+
+
+def credentials_check(env: dict, files=()) -> list[Check]:
+    """Whether each key is set, and in WHICH spelling — every one this package accepts.
+
+    Checking fewer spellings than `core.config` reads would be worse than not checking:
+    it would report a correctly configured machine as missing its key. So the spellings
+    come from `ENV_ALIASES` and are never copied out by hand.
+
+    NOT a blocker when absent. A store with no authentication is a legitimate install,
+    and a FAIL here would report every one of them as broken. It is a WARNING — the
+    "pending" the design asks for — because a key that lives nowhere durable is a key
+    that is gone in the next process.
+
+    `files` is passed IN, never guessed: which files on this machine exist for
+    credentials is knowledge about the host, and this module does not have any.
+    """
+    in_files = {path: read_env_names(path) for path in files}
+    checks = []
+    for field in (f for f in REQUIRED_FIELDS if f in SECRET_FIELDS):
+        aliases = ENV_ALIASES[field]
+        where = []
+        for name in aliases:
+            if env.get(name):
+                where.append(f"{name} ({len(env[name])} chars) in the environment")
+            for path, names in in_files.items():
+                if name in names:
+                    where.append(f"{name} ({names[name]} chars) in {path}")
+        if where:
+            checks.append(Check(field, True, "; ".join(where)))
+            continue
+        spellings = ", ".join(aliases)
+        checks.append(Check(
+            field, False,
+            f"not set in any spelling that is read: {spellings}",
+            f"{COMMAND_PREFIX} install asks for it and writes it to a credential file; "
+            f"`export {aliases[0]}=…` sets it for this shell only", warning=True))
+
+    return checks
 
 
 def target_dir(env: dict) -> Path:
@@ -111,5 +175,7 @@ def no_shell_check(path: Path | None = None) -> Check:
     return Check("no-shell config", True, "the file alone is enough to run")
 
 
-def plumbing(root: Path, env: dict, config_path: Path | None = None) -> list[Check]:
-    return [launcher_check(root, env), path_check(env), no_shell_check(config_path)]
+def plumbing(root: Path, env: dict, config_path: Path | None = None,
+             credential_files=()) -> list[Check]:
+    return [launcher_check(root, env), path_check(env), no_shell_check(config_path),
+            *credentials_check(env, credential_files)]
