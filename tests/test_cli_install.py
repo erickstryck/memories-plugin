@@ -848,6 +848,47 @@ class HostGroups(unittest.TestCase):
         self.assertIn("config set memory.provider memories", self.calls())
         self.assertTrue(present["hermes"])
 
+    def test_the_install_commands_go_through_no_shell_and_carry_a_timeout(self):
+        """Two risks removed at once, and neither costs anything.
+
+        The commands are static module constants, so nothing needs a shell to build
+        them: `shell=True` hands the string to `/bin/sh`, which is a whole layer of
+        quoting and word-splitting between the constant and the process, for no gain.
+        And the call had NO timeout — a `claude plugin install` that waits on a network
+        it cannot reach hung the wizard with no way out but Ctrl-C.
+        """
+        seen = []
+
+        def run(command, **kwargs):
+            seen.append((command, kwargs))
+
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        recorder = SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
+                                   SubprocessError=subprocess.SubprocessError)
+        self.stub_host("hermes")
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "subprocess", recorder), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.qctx._host_install_group(Args(), self.root)
+        self.assertTrue(seen, "no host command was run at all")
+        for command, kwargs in seen:
+            with self.subTest(command=command):
+                self.assertIsInstance(command, list,
+                                      "a string command is a command run through a shell")
+                self.assertNotIn("shell", kwargs)
+                self.assertTrue(kwargs.get("timeout"), "no timeout on a host command")
+
+    def test_a_hung_host_install_is_reported_instead_of_hanging_the_wizard(self):
+        wedged = self.wedged_subprocess(lambda command: "plugins" in " ".join(command))
+        self.stub_host("hermes")
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "subprocess", wedged), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            present = self.qctx._host_install_group(Args(), self.root)
+        self.assertFalse(present["hermes"])
+        self.assertIn("timed out", out.getvalue())
+
     def test_a_failed_host_install_is_not_recorded_as_present(self):
         """`present_now[host] = True` was set regardless of what the commands did, so a
         `hermes plugins install` that exited non-zero still led to an `--apply`
@@ -967,6 +1008,33 @@ class HostGroups(unittest.TestCase):
         for section in sections:
             self.assertEqual({"host", "exit_code", "text"}, set(section))
 
+    def test_the_cutover_group_reports_which_hosts_it_actually_applied(self):
+        """The closing "what is left, and only you can do it" printed BOTH hosts' steps
+        at the end of every full run — on a machine with only one host, and on a run
+        where every cutover was declined. A one-time manual step for a host that was
+        never touched is an instruction to go and do nothing, printed beside real ones."""
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            applied = self.qctx._host_cutover_group(
+                Args(), self.root, {"claude-code": True, "hermes": False})
+        self.assertEqual(list(applied), ["claude-code"])
+
+    def test_a_declined_cutover_is_not_reported_as_applied(self):
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "_ask", return_value="n"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            applied = self.qctx._host_cutover_group(Args(yes=False), self.root,
+                                                    {"hermes": True})
+        self.assertEqual(list(applied), [])
+
+    def test_a_timed_out_cutover_is_not_reported_as_applied(self):
+        wedged = self.wedged_subprocess(lambda command: "--apply" in command)
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "subprocess", wedged), \
+                contextlib.redirect_stdout(io.StringIO()):
+            applied = self.qctx._host_cutover_group(Args(), self.root, {"hermes": True})
+        self.assertEqual(list(applied), [])
+
     def test_the_apply_is_the_same_script_with_the_suite_not_skipped(self):
         with mock.patch.dict(os.environ, self.env(), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1020,10 +1088,34 @@ class ClosingBehaviour(unittest.TestCase):
         self.assertFalse(self.qctx.should_stop_before_hosts({"ready": True,
                                                              "blockers": []}))
 
-    def test_the_manual_steps_are_named(self):
-        text = "\n".join(self.qctx.MANUAL_STEPS)
-        self.assertIn("hermes hooks list", text)
-        self.assertIn("restart", text.lower())
+    def test_the_manual_steps_are_named_per_host(self):
+        """One entry per host, keyed by host, so a run can print only the steps that
+        belong to what it actually touched."""
+        hosts = [host for host, _script, _skip in self.qctx.HOST_SECTIONS]
+        self.assertEqual(set(self.qctx.MANUAL_STEPS), set(hosts))
+        self.assertIn("hermes hooks list", self.qctx.MANUAL_STEPS["hermes"])
+        self.assertIn("restart", self.qctx.MANUAL_STEPS["claude-code"].lower())
+
+    def test_the_report_phase_skips_the_host_plans_on_a_run_that_will_act(self):
+        """On the acting path each host's dry run used to execute TWICE — once for the
+        report block at the top and once inside `_host_cutover_group` — so the user saw
+        the same plan printed twice, and the FIRST one was stale: it ran before the
+        launcher and the configuration were written, which is exactly what the second
+        run exists to reflect.
+        """
+        acting = Args(yes=True)
+        self.assertFalse(self.qctx.report_hosts(acting))
+        for reporting in (Args(yes=False), Args(yes=True)):
+            reporting.check = True
+            self.assertTrue(self.qctx.report_hosts(reporting))
+        for as_json in (Args(yes=False), Args(yes=True)):
+            as_json.json = True
+            self.assertTrue(self.qctx.report_hosts(as_json),
+                            "--json returns before acting, so it must carry the hosts")
+        no_terminal = Args(yes=False)
+        self.assertTrue(self.qctx.report_hosts(no_terminal),
+                        "a run that only reports has to show what it found")
+        self.assertFalse(self.qctx.report_hosts(Args(yes=True, config_only=True)))
 
 
 if __name__ == "__main__":

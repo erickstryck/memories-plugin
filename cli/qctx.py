@@ -35,6 +35,7 @@ collections of their own — see `core/repos.py` for why they are not the librar
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -261,6 +262,10 @@ HOST_SECTIONS = (
 #: The command that tells us a host is on this machine at all.
 HOST_BINARIES = {"claude-code": "claude", "hermes": "hermes"}
 
+#: How long one host install command may take, in seconds. It downloads a plugin; it
+#: does not run a test suite.
+HOST_INSTALL_TIMEOUT = 600
+
 #: How long an `--apply` cutover may take, in seconds.
 #:
 #: The scripts run the whole suite before they write anything — that is their own rule,
@@ -478,14 +483,38 @@ def install_launcher(root: Path, env: dict) -> Path:
     return target
 
 
-#: What no wizard can do for you, printed at the end of a run that wrote something.
-#: Both are one-time and both fail SILENTLY when skipped, which is why they are printed
-#: rather than merely documented.
-MANUAL_STEPS = (
-    "hermes: approve the read guard once at a TTY — a hermes with no terminal skips the "
-    "hook silently until then. `hermes hooks list` shows it allowed afterwards.",
-    "claude-code: open a new terminal, or restart — hooks are read at start-up.",
-)
+#: What no wizard can do for you, PER HOST. Both are one-time and both fail SILENTLY
+#: when skipped, which is why they are printed rather than merely documented.
+#:
+#: Keyed by host, and printed only for the hosts a run actually cut over. Printing both
+#: at the end of every full run told the owner of a claude-only machine to go and
+#: approve a hermes hook that does not exist there, and told a run where every cutover
+#: was declined to go and finish something it never started. An instruction to do
+#: nothing, printed beside real ones, is how the real ones stop being read.
+MANUAL_STEPS = {
+    "hermes": "approve the read guard once at a TTY — a hermes with no terminal skips "
+              "the hook silently until then. `hermes hooks list` shows it allowed "
+              "afterwards.",
+    "claude-code": "open a new terminal, or restart — hooks are read at start-up.",
+}
+
+
+def report_hosts(args) -> bool:
+    """Whether the REPORT at the top of the run should carry each host's cutover plan.
+
+    Not on a run that is going to act. `_host_cutover_group` re-runs every plan after
+    the launcher and the configuration have been written, so on the acting path each
+    dry run executed TWICE and the user read the same plan twice — with the first copy
+    stale, describing the machine as it was before the wizard touched it.
+
+    A run that only REPORTS is the opposite case and keeps them: `--check`, `--json`
+    (which returns before anything acts), and the no-terminal-and-no-`--yes` run that
+    diagnoses and exits. `--config-only` never had them; it does not reach a host.
+    """
+    if args.config_only:
+        return False
+
+    return bool(args.check or args.json or not (_interactive(args) or args.yes))
 
 
 def should_stop_before_hosts(report: dict) -> bool:
@@ -530,8 +559,19 @@ def _host_install_group(args, root: Path) -> dict:
         if not (args.yes or _ask("  run these? [y/N]: ").strip().lower() == "y"):
             present_now[host] = False
             continue
+        # NO SHELL, and a timeout. The commands are static module constants, so nothing
+        # needs `/bin/sh` to build them — `shlex.split` gives the same argument vector
+        # without a layer of quoting and word-splitting between the constant and the
+        # process. And the call had no timeout at all: a `plugin install` waiting on a
+        # network it cannot reach hung the wizard with no way out but Ctrl-C.
         for command in HOST_INSTALL_COMMANDS[host]:
-            subprocess.run(command, shell=True, check=False)
+            try:
+                subprocess.run(shlex.split(command), check=False,
+                               timeout=HOST_INSTALL_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                print(f"  FAIL  `{command}` timed out after {HOST_INSTALL_TIMEOUT}s "
+                      f"and was killed")
+                break
         installed = host_plugin_path(host)
         present_now[host] = bool(installed)
         if installed:
@@ -543,7 +583,7 @@ def _host_install_group(args, root: Path) -> dict:
     return present_now
 
 
-def _host_cutover_group(args, root: Path, present_now: dict) -> None:
+def _host_cutover_group(args, root: Path, present_now: dict) -> list[str]:
     """Per host with a plugin: the dry-run plan, a confirmation of its own, and the
     same script with --apply when it is given.
 
@@ -551,7 +591,12 @@ def _host_cutover_group(args, root: Path, present_now: dict) -> None:
     cutover shown before the plugin exists describes a host that no longer is one. The
     dry run skips the suite; the apply runs it once — the script's own rule, which it
     enforces by refusing `--apply` while the skip variable is set.
+
+    Returns the hosts whose apply actually RAN, so the closing manual steps name only
+    what this run touched. A declined cutover and a cutover that timed out are both
+    absent from that list: neither left a host needing the one-time step.
     """
+    applied = []
     for host, script, skip_var in HOST_SECTIONS:
         if host not in present_now or not present_now[host]:
             continue
@@ -571,6 +616,9 @@ def _host_cutover_group(args, root: Path, present_now: dict) -> None:
                       f"edits, so check that before running it again.")
                 continue
             print(done.stdout + done.stderr, end="")
+            applied.append(host)
+
+    return applied
 
 
 def _interactive(args) -> bool:
@@ -860,7 +908,7 @@ def cmd_install(args, cfg):
     root = Path(__file__).resolve().parent.parent
     report = core.setup.diagnose(cfg)
     plumbing = _plumbing(root)
-    hosts = [] if args.config_only else _host_sections(root)
+    hosts = _host_sections(root) if report_hosts(args) else []
 
     if args.json:
         output({**merged_report(report, plumbing), "hosts": hosts}, True)
@@ -914,7 +962,7 @@ def cmd_install(args, cfg):
 
     print("\nhosts:\n")
     present_now = _host_install_group(args, root)
-    _host_cutover_group(args, root, present_now)
+    applied = _host_cutover_group(args, root, present_now)
 
     # 5. re-verify — including the no-shell check, which only a fresh read can prove.
     print("\nre-checking:\n")
@@ -923,10 +971,13 @@ def cmd_install(args, cfg):
     for c in core.setup.diagnose(core.load())["checks"]:
         _render_check(c)
 
-    # 6. what is left, and only you can do it.
-    print("\nwhat is left, and only you can do it:")
-    for step in MANUAL_STEPS:
-        print(f"  - {step}")
+    # 6. what is left, and only you can do it — for the hosts this run cut over, and
+    # for no others. A one-time step for a host nothing touched is an instruction to go
+    # and do nothing, printed beside real ones.
+    if applied:
+        print("\nwhat is left, and only you can do it:")
+        for host in applied:
+            print(f"  - {host}: {MANUAL_STEPS[host]}")
 
 
 # ---- memory ----------------------------------------------------------------
