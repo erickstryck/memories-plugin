@@ -223,8 +223,11 @@ def cmd_setup(args, cfg):
     options = [s_["collection"] for s_ in rel["memory_suggestions"]]
     for i, s_ in enumerate(options, 1):
         print(f"  {i}. {s_}")
+    # `_ask`, never the bare `input()`: a terminal can be closed with Ctrl-D, and by the
+    # question below this one `memory_collection` has already been saved. That is the same
+    # half-done failure `_ask` was written for in the wizard.
     choice = core.setup.choose_by_index(
-        options, input(f"memory collection [{cfg.memory_collection or 'none'}]: "))
+        options, _ask(f"memory collection [{cfg.memory_collection or 'none'}]: "))
     if choice:
         core.save({"memory_collection": choice})
         print(f"  memory_collection = {choice}")
@@ -232,7 +235,7 @@ def cmd_setup(args, cfg):
                          ("library_collection", cfg.library_collection),
                          ("repos_collection", cfg.repos_collection),
                          ("repos_registry_collection", cfg.repos_registry_collection)):
-        resp = input(f"{key} [{current}]: ").strip()
+        resp = _ask(f"{key} [{current}]: ").strip()
         if resp:
             core.save({key: resp})
             print(f"  {key} = {resp}")
@@ -393,7 +396,17 @@ def claude_install_path(home: Path) -> str | None:
 
 def hermes_install_path(env: dict) -> Path | None:
     """One level deep and no deeper: hermes' loader scans `$HERMES_HOME/plugins/<name>/`
-    and never looks further down."""
+    and never looks further down.
+
+    THE DIRECTORY IS THE WHOLE PROBE, and the design's second half — `hermes config get
+    memory.provider` — is deliberately not run here. The cutover that runs next writes
+    `memory.provider: memories` and re-reads it to confirm (the apply block of
+    `scripts/hermes_cutover.sh`), so the half-installed case this would detect is
+    repaired by the very step that follows the detection. Asking would cost a subprocess
+    with a 30-second timeout to duplicate state the cutover already owns and already
+    verifies — and a second reader of that state is a second thing to keep in agreement
+    with it.
+    """
     home = Path(env.get("HERMES_HOME") or Path(env["HOME"]) / ".hermes")
     candidate = home / "plugins" / "memories"
 
@@ -639,11 +652,18 @@ def _ask_config(cfg, interactive: bool = True, suggestions=()) -> None:
     means here: the flag answers yes to the groups that ACT, and a configuration pass
     with no answers has nothing to act on. Writing the defaults over a working config
     because nobody was there to object would be worse than the crash this replaced.
+
+    "Every configuration value is kept" is about the fourteen that are TYPED.
+    `vector_size` is the fifteenth and is never typed — `_detect_vector_size` runs one
+    line after this returns and writes whatever the endpoint answers, terminal or not,
+    which is the whole reason the field is in `DETECTED_FIELDS`. The message says so,
+    because a sentence the next line falsifies is worse than no sentence.
     """
     from core import config as _config
 
     if not interactive:
-        print("\n  ..    no terminal to ask at — every configuration value is kept")
+        print("\n  ..    no terminal to ask at — every configuration value is kept; "
+              "`vector_size` is still read from the endpoint")
 
         return
 

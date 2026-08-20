@@ -97,7 +97,11 @@ bash "$(ls -dt ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts
 ```
 
 It puts `qctx` on PATH, asks for what is missing, offers to install into whichever host is
-on this machine, and re-checks. Nothing it writes is silent: every group asks first.
+on this machine, and re-checks. Nothing it writes is silent, and what it asks before doing
+differs by group: the launcher copy, the configuration and the credential writes are what
+you just typed being saved, and are reported as they happen; the two that change a host —
+installing the plugin into `claude`/`hermes`, and running that host's cutover — ask for a
+`y` of their own first.
 
 To verify a machine without changing it — which is also how you check a machine you set up
 months ago:
@@ -107,8 +111,9 @@ qctx install --check      # reports; writes nothing
 ```
 
 `--check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the
-5 collections, whether a shell-less process would find the configuration, and each
-host's own cutover report.
+5 collections, whether a shell-less process would find the configuration, whether each of
+the two keys is set and in which spelling and where (names and lengths only — never a
+value), and each host's own cutover report.
 
 ### If you would rather do it by hand
 

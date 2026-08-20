@@ -174,10 +174,22 @@ class Credentials(unittest.TestCase):
         self.assertIn("10 chars", printed)   # the length is what stands in for it
 
     def test_the_plumbing_carries_them(self):
-        names = [c.name for c in install.plumbing(REPO, {"HOME": str(self.dir),
-                                                         "PATH": ""})]
-        self.assertIn("qdrant_api_key", names)
-        self.assertIn("api_key", names)
+        """`config_path` is passed, and that is not a detail.
+
+        Without it `no_shell_check(None)` falls back to `DEFAULT_CONFIG_PATH` and reads
+        the developer's real `~/.config/memories-plugin/config.json` — an unnoticed
+        real-machine read, in the very module whose reason for existing is to state the
+        opposite rule. The verdict below is asserted too, so the argument cannot be
+        dropped again without something going red: over a temporary directory with no
+        config file in it, the no-shell check has to FAIL.
+        """
+        checks = install.plumbing(REPO, {"HOME": str(self.dir), "PATH": ""},
+                                  config_path=self.dir / "config.json")
+        named = {c.name: c for c in checks}
+        self.assertIn("qdrant_api_key", named)
+        self.assertIn("api_key", named)
+        self.assertFalse(named["no-shell config"].ok,
+                         "a config file was read from somewhere outside this test")
 
 
 class CredentialFile(unittest.TestCase):

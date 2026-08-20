@@ -135,6 +135,64 @@ class TestRenderDiagnose(unittest.TestCase):
             self.assertIn(name, out)
 
 
+class TestSetupSurvivesAClosedStdin(unittest.TestCase):
+    """`cmd_setup` asks at a terminal, and a terminal can be closed with Ctrl-D.
+
+    `cmd_install` learned this: `_ask` reads end-of-input as Enter, because a run that
+    dies on `EOFError` dies HALF DONE — and `cmd_setup` is the same shape, saving
+    `memory_collection` before it asks the four remaining questions. It kept calling the
+    bare `input()`, so Ctrl-D after the first answer left the collection written, the
+    rest unasked, and a traceback where the summary belongs.
+    """
+
+    def setUp(self):
+        self.cli = load_cli()
+        self.saved = {}
+        self.report = {"ready": True, "checks": [], "blockers": [], "warnings": [],
+                       "detected_dim": None,
+                       "memory_suggestions": [{"collection": "claude_memory",
+                                               "points": 812}]}
+
+    class Args:
+        json = False
+        check = False
+
+    def run_setup(self, answers):
+        """Drives `cmd_setup` at a terminal whose input runs out partway through."""
+        from unittest import mock
+
+        cfg = core.Config(qdrant_url="", qdrant_api_key="", api_base_url="", api_key="",
+                          embed_url="", rerank_url="", embed_model="m", rerank_model="r",
+                          memory_collection="", docs_collection="d",
+                          library_collection="l", repos_collection="repos",
+                          repos_registry_collection="reg", vector_size=1024)
+
+        def answer(_prompt=""):
+            nxt = answers.pop(0) if answers else EOFError
+            if nxt is EOFError:
+                raise EOFError
+
+            return nxt
+
+        with mock.patch("builtins.input", answer), \
+                mock.patch.object(self.cli.sys.stdin, "isatty", lambda: True), \
+                mock.patch.object(self.cli.core.setup, "diagnose",
+                                  lambda *_a, **_k: self.report), \
+                mock.patch.object(self.cli.core, "load", lambda *_a, **_k: cfg), \
+                mock.patch.object(self.cli.core, "save", self.saved.update):
+            return rendered(self.cli.cmd_setup, self.Args(), cfg)
+
+    def test_ctrl_d_after_the_first_answer_finishes_instead_of_raising(self):
+        out = self.run_setup(["1"])
+        self.assertEqual(self.saved.get("memory_collection"), "claude_memory")
+        self.assertIn("running the diagnostics again", out,
+                      "the run died between saving one value and asking for the rest")
+
+    def test_ctrl_d_at_the_very_first_question_changes_nothing(self):
+        self.run_setup([])
+        self.assertEqual(self.saved, {})
+
+
 class TestRenderDocs(unittest.TestCase):
     """The docs renders, over what `DocIndex` actually returns."""
 
