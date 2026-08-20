@@ -9,7 +9,10 @@ No fake inherits from anything: the contracts are `Protocol`s, so having the met
 enough. `FakeVectorStore` keeps the points as they are, normalizing nothing, precisely
 so a test can assert on the payload KEYS.
 """
+import http.server
+import json
 import math
+import threading
 import zlib
 
 
@@ -308,3 +311,69 @@ def make_emptied(ix, repo: str, path: str) -> None:
         pass
     finally:
         ix.q.delete_points = original
+
+
+# ---- a Qdrant on loopback, for the tests that shell out --------------------
+#
+# The fakes above are in-memory and serve everything that can call `core.ports` directly.
+# A test that runs `qctx` as a SUBPROCESS cannot: the CLI builds its own client from the
+# configuration, so the only way to hand it a store is over HTTP. Two of those tests
+# reached the developer's real Qdrant and failed while it was down — and `scripts/
+# cutover.sh` fails the whole cutover when the suite does not pass, so the wizard's host
+# step could not complete on a machine with no Qdrant running.
+
+
+class _AbsentCollections(http.server.BaseHTTPRequestHandler):
+    """A Qdrant where nothing has been created yet: 404 to every collection request.
+
+    A FRESH INSTALL is exactly this, and it is the state both consumers are about to be
+    asked about. The collections are created on first use — `qctx setup` says so — so
+    before any `repos register` they are absent, and the 404 is what a real server sends.
+    It is not the same thing as an unreachable server, and the difference is the whole
+    point: `core.qdrant._is_absent` decides absence by STATUS, and a connection refused
+    has no status at all.
+    """
+
+    def _absent(self):
+        name = self.path.split("/collections/")[-1].split("/")[0] or "unknown"
+        body = json.dumps({"status": {"error": f"Not found: Collection `{name}` "
+                                               f"doesn't exist!"}}).encode()
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self._absent()
+
+    def do_GET(self):
+        if self.path.rstrip("/") == "/collections":
+            body = json.dumps({"result": {"collections": []}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+            return
+        self._absent()
+
+    def log_message(self, *_args):
+        pass
+
+
+def qdrant_with_no_collections(case) -> str:
+    """Starts `_AbsentCollections` on loopback and returns its base URL.
+
+    `case` is the `TestCase`, so the server is shut down by its own cleanup rather than
+    by a `tearDown` each caller has to remember to write.
+    """
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AbsentCollections)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    case.addCleanup(server.server_close)
+    case.addCleanup(server.shutdown)
+
+    return f"http://127.0.0.1:{server.server_address[1]}"

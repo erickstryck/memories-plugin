@@ -140,13 +140,36 @@ class TestTheEmptyLISTINGSaysSoOutLoud(unittest.TestCase):
     which reads as a broken command rather than an empty archive."""
 
     def test_the_cli_prints_a_sentence_when_there_is_nothing_to_list(self):
+        """Driven against a STUB Qdrant that answers 404, not against whatever store the
+        developer happens to be running.
+
+        It used to inherit `os.environ` and point two collection names at a real server.
+        Absence is the state under test and only a server can produce it — a machine with
+        nothing listening gives a connection refused, which `_is_absent` correctly
+        refuses to read as emptiness, so the test failed for a reason that had nothing to
+        do with what it asserts. And a red suite is not cosmetic here:
+        `scripts/cutover.sh` fails the whole cutover when it does not pass, and the
+        wizard runs `cutover.sh --apply`.
+        """
         import subprocess
-        out = subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "cli", "qctx.py"), "repos", "list"],
-            capture_output=True, text=True, timeout=120,
-            env={**os.environ, "QCTX_REPOS_COLLECTION": "qctx_absent_probe_chunks",
-                 "QCTX_REPOS_REGISTRY_COLLECTION": "qctx_absent_probe_registry"})
+        import tempfile
+        from tests.fakes import qdrant_with_no_collections
+        from tests.isolation import hermetic_env
+        base = qdrant_with_no_collections(self)
+        with tempfile.TemporaryDirectory() as home:
+            config = os.path.join(home, "config.json")
+            with open(config, "w") as handle:
+                handle.write("{}")
+            out = subprocess.run(
+                [sys.executable, os.path.join(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__))), "cli", "qctx.py"), "repos", "list"],
+                capture_output=True, text=True, timeout=120,
+                # `api_base_url` is required to BUILD the index and is never dialled by
+                # a listing — nothing is embedded to list what does not exist.
+                env=hermetic_env(home, QCTX_CONFIG=config, QCTX_QDRANT_URL=base,
+                                 QCTX_API_BASE_URL=f"{base}/v1",
+                                 QCTX_REPOS_COLLECTION="qctx_absent_probe_chunks",
+                                 QCTX_REPOS_REGISTRY_COLLECTION="qctx_absent_probe_registry"))
         self.assertEqual(out.returncode, 0, out.stderr[-400:])
         self.assertIn("no repository is indexed yet", out.stdout,
                       f"an empty listing printed nothing: {out.stdout!r}")

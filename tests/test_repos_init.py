@@ -16,6 +16,9 @@ sys.path.insert(0, str(REPO))
 
 QCTX = REPO / "cli" / "qctx.py"
 
+from tests.fakes import qdrant_with_no_collections  # noqa: E402
+from tests.isolation import hermetic_env  # noqa: E402
+
 
 def a_repo() -> str:
     root = tempfile.mkdtemp()
@@ -24,8 +27,20 @@ def a_repo() -> str:
     return root
 
 
-def run_cli(*args, cwd=None):
-    env = {**os.environ, "QCTX_STATE_DIR": tempfile.mkdtemp()}
+def run_cli(*args, cwd=None, **overrides):
+    """An ASSEMBLED environment, never the developer's.
+
+    `{**os.environ, …}` reached whatever Qdrant this machine is configured for, so
+    `repos init` — which reads the registry to work out what to offer — failed whenever
+    that server was down. What the test asserts has nothing to do with the server, and a
+    red suite here is not cosmetic: `scripts/cutover.sh` refuses the whole cutover when
+    the suite does not pass, and the wizard runs `cutover.sh --apply`.
+    """
+    home = tempfile.mkdtemp()
+    config = Path(home) / "config.json"
+    config.write_text("{}")
+    env = hermetic_env(home, QCTX_CONFIG=config, QCTX_STATE_DIR=tempfile.mkdtemp(),
+                       **overrides)
 
     return subprocess.run([sys.executable, str(QCTX), *args], capture_output=True, text=True,
                           cwd=cwd, env=env, timeout=180)
@@ -38,8 +53,15 @@ class TestInitOffersAndDoesNotWrite(unittest.TestCase):
 
     def test_inside_a_fresh_repo_it_reports_what_it_WOULD_do(self):
         """Without a TTY it does not ask and does not write — the same rule `setup` already
-        follows, because a prompt waiting for an answer that never comes hangs the call."""
-        out = run_cli("repos", "init", "--json", cwd=a_repo())
+        follows, because a prompt waiting for an answer that never comes hangs the call.
+
+        The registry is a STUB Qdrant with nothing in it, which is what a fresh install
+        is: the collections are created on first use, so before any `repos register` they
+        are absent and a real server answers 404. That is the state this test is about.
+        """
+        base = qdrant_with_no_collections(self)
+        out = run_cli("repos", "init", "--json", cwd=a_repo(),
+                      QCTX_QDRANT_URL=base, QCTX_API_BASE_URL=f"{base}/v1")
         self.assertEqual(out.returncode, 0, out.stderr[-400:])
         payload = json.loads(out.stdout)
         self.assertIn("suggest", payload)
