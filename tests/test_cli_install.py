@@ -133,5 +133,84 @@ class WritingPass(unittest.TestCase):
         self.assertNotIn("s3cr3t-value", done.stdout + done.stderr)
 
 
+def load_cli():
+    """Imports cli/qctx.py as a module. It is a script, not a package member.
+
+    Copied verbatim from `tests/test_cli_render.py` — `import cli.qctx` does NOT work:
+    there is no `cli/__init__.py`, deliberately, because the CLI is an entry point and
+    not something the core imports.
+    """
+    import importlib.util
+    path = REPO / "cli" / "qctx.py"
+    spec = importlib.util.spec_from_file_location("qctx_cli", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    return mod
+
+
+class HostDetection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.addCleanup(self.tmp.cleanup)
+        self.qctx = load_cli()
+
+    def test_claude_absent_reads_as_none(self):
+        self.assertIsNone(self.qctx.claude_install_path(self.home))
+
+    def test_claude_present_returns_the_live_path(self):
+        registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(json.dumps({"plugins": {"memories-plugin@memories-plugin": [
+            {"installPath": "/somewhere/b8008f7dac88"}]}}))
+        self.assertEqual(self.qctx.claude_install_path(self.home),
+                         "/somewhere/b8008f7dac88")
+
+    def test_the_hermes_command_carries_force_and_the_provider_switch(self):
+        joined = " ".join(self.qctx.HOST_INSTALL_COMMANDS["hermes"])
+        self.assertIn("--force", joined)
+        self.assertIn("memory.provider memories", joined)
+
+
+class LauncherInstall(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.addCleanup(self.tmp.cleanup)
+        self.qctx = load_cli()
+
+    def test_copies_and_makes_it_executable(self):
+        target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
+        self.assertTrue(os.access(target, os.X_OK))
+        self.assertEqual(target.read_bytes(), (REPO / "bin" / "qctx").read_bytes())
+
+
+class ClosingBehaviour(unittest.TestCase):
+    """Two things the spec asks for that are easy to leave out, and both are about NOT
+    pretending: stop when the thing underneath is still broken, and say out loud what the
+    wizard cannot do for you."""
+
+    def setUp(self):
+        self.qctx = load_cli()
+
+    def test_blockers_stop_the_run_before_the_host_steps(self):
+        """No Qdrant, no point installing into a host. It names what did not answer and
+        stops — instead of asking fifteen questions that cannot work."""
+        blocked = {"ready": False, "blockers": [{"name": "Qdrant", "detail": "no answer",
+                                                 "ok": False, "fix_hint": None,
+                                                 "warning": False}]}
+        self.assertTrue(self.qctx.should_stop_before_hosts(blocked))
+        self.assertFalse(self.qctx.should_stop_before_hosts({"ready": True,
+                                                             "blockers": []}))
+
+    def test_the_manual_steps_are_named(self):
+        text = "\n".join(self.qctx.MANUAL_STEPS)
+        self.assertIn("hermes hooks list", text)
+        self.assertIn("restart", text.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -258,6 +258,22 @@ HOST_SECTIONS = (
 #: The command that tells us a host is on this machine at all.
 HOST_BINARIES = {"claude-code": "claude", "hermes": "hermes"}
 
+#: What each host needs typed, when the plugin is not installed there yet. Shown before it
+#: is run: `--force` is the user agreeing to what hermes' scanner flagged (this tree ships
+#: two scripts that edit host configuration, which is the cutovers' declared job), and
+#: pointing `memory.provider` here REPLACES whatever provider is named, because hermes
+#: activates exactly one.
+HOST_INSTALL_COMMANDS = {
+    "claude-code": (
+        "claude plugin marketplace add erickstryck/memories-plugin",
+        "claude plugin install memories-plugin@memories-plugin",
+    ),
+    "hermes": (
+        "hermes plugins install erickstryck/memories-plugin --enable --force",
+        "hermes config set memory.provider memories",
+    ),
+}
+
 
 def _host_dry_run(host: str, script: str, skip_var: str, root: Path) -> dict:
     """Runs a cutover in its report-only mode. Writes nothing; that is the script's
@@ -285,6 +301,115 @@ def _host_sections(root: Path) -> list[dict]:
         sections.append(_host_dry_run(host, script, skip_var, root))
 
     return sections
+
+
+def claude_install_path(home: Path) -> str | None:
+    """The live install path, read from the harness' own record.
+
+    Not guessable: the cache directory is named after the commit, and old ones stay behind
+    — five of them on the machine this was measured on.
+    """
+    registry = home / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(registry.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+        if entry.get("installPath"):
+            return entry["installPath"]
+
+    return None
+
+
+def hermes_install_path(env: dict) -> Path | None:
+    """One level deep and no deeper: hermes' loader scans `$HERMES_HOME/plugins/<name>/`
+    and never looks further down."""
+    home = Path(env.get("HERMES_HOME") or Path(env["HOME"]) / ".hermes")
+    candidate = home / "plugins" / "memories"
+
+    return candidate if candidate.exists() else None
+
+
+def install_launcher(root: Path, env: dict) -> Path:
+    """Copies the launcher onto PATH. A copy, not a symlink: on a machine with only
+    claude-code the only stable thing to link to does not exist — the tree is a directory
+    named after a commit, replaced by the next update."""
+    target_dir = core.install.target_dir(env)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / core.install.LAUNCHER_NAME
+    shutil.copyfile(root / "bin" / core.install.LAUNCHER_NAME, target)
+    target.chmod(0o755)
+
+    return target
+
+
+#: What no wizard can do for you, printed at the end of a run that wrote something.
+#: Both are one-time and both fail SILENTLY when skipped, which is why they are printed
+#: rather than merely documented.
+MANUAL_STEPS = (
+    "hermes: approve the read guard once at a TTY — a hermes with no terminal skips the "
+    "hook silently until then. `hermes hooks list` shows it allowed afterwards.",
+    "claude-code: open a new terminal, or restart — hooks are read at start-up.",
+)
+
+
+def should_stop_before_hosts(report: dict) -> bool:
+    """A blocker means the archive itself does not answer. Installing into a host on top
+    of that produces a host wired to nothing, and a green report about it."""
+    return not report.get("ready", False)
+
+
+def _host_install_group(args, root: Path) -> dict:
+    """Per host that is on this machine: install the plugin if it is missing.
+
+    The cutovers do not do this — they register hooks and verify state. Returns
+    host -> whether the plugin is present afterwards, so the caller offers each
+    host's cutover only when there is a plugin to cut over.
+    """
+    present_now = {}
+    for host, _script, _skip in HOST_SECTIONS:
+        binary = HOST_BINARIES[host]
+        if not shutil.which(binary):
+            continue
+        present = (claude_install_path(Path(os.path.expanduser("~")))
+                   if host == "claude-code" else hermes_install_path(dict(os.environ)))
+        if present:
+            print(f"  ok    {host}: installed at {present}")
+            present_now[host] = True
+            continue
+        print(f"\n  {host} is on this machine and the plugin is not installed there:")
+        for command in HOST_INSTALL_COMMANDS[host]:
+            print(f"      {command}")
+        if args.yes or input("  run these? [y/N]: ").strip().lower() == "y":
+            for command in HOST_INSTALL_COMMANDS[host]:
+                subprocess.run(command, shell=True, check=False)
+            present_now[host] = True
+        else:
+            present_now[host] = False
+
+    return present_now
+
+
+def _host_cutover_group(args, root: Path, present_now: dict) -> None:
+    """Per host with a plugin: the dry-run plan, a confirmation of its own, and the
+    same script with --apply when it is given.
+
+    The plan is re-run after the install group, not reused from the report phase: a
+    cutover shown before the plugin exists describes a host that no longer is one. The
+    dry run skips the suite; the apply runs it once — the script's own rule, which it
+    enforces by refusing `--apply` while the skip variable is set.
+    """
+    for host, script, skip_var in HOST_SECTIONS:
+        if host not in present_now or not present_now[host]:
+            continue
+        print(f"\n{host} — cutover plan:\n")
+        plan = _host_dry_run(host, script, skip_var, root)
+        print(plan["text"].rstrip())
+        if args.yes or input(f"\n  apply the {host} cutover? [y/N]: ").strip().lower() == "y":
+            done = subprocess.run(["bash", str(root / script), "--apply"],
+                                  capture_output=True, text=True,
+                                  env=dict(os.environ), timeout=900)
+            print(done.stdout + done.stderr, end="")
 
 
 def _interactive(args) -> bool:
@@ -406,12 +531,47 @@ def cmd_install(args, cfg):
 
         return
 
-    _ask_config(cfg)
-
     if args.config_only:
+        _ask_config(cfg)
+
         return
 
-    # The host install lands in the next task.
+    # 2. PATH — the launcher lands on PATH before the configuration, in the spec's
+    # order. The rc line is printed, never written: the rc is the user's file.
+    launcher = install_launcher(root, dict(os.environ))
+    print(f"\n  ok    launcher at {launcher}")
+    if not core.install.path_check(dict(os.environ)).ok:
+        print(f"  ..    {core.install.target_dir(dict(os.environ))} is not on PATH — add:")
+        print('        export PATH="$HOME/.local/bin:$PATH"')
+
+    # 3. config — the two passes.
+    _ask_config(cfg)
+
+    # 4. hosts — but only if the archive itself answers. Installing into a host on top
+    # of a Qdrant that does not answer produces a host wired to nothing.
+    after = core.setup.diagnose(core.load())
+    if should_stop_before_hosts(after):
+        print("\nstopping here — these must answer before a host install means anything:")
+        for c in after["blockers"]:
+            _render_check(c)
+
+        return
+
+    print("\nhosts:\n")
+    present_now = _host_install_group(args, root)
+    _host_cutover_group(args, root, present_now)
+
+    # 5. re-verify — including the no-shell check, which only a fresh read can prove.
+    print("\nre-checking:\n")
+    for c in [asdict(x) for x in core.install.plumbing(root, dict(os.environ))]:
+        _render_check(c)
+    for c in core.setup.diagnose(core.load())["checks"]:
+        _render_check(c)
+
+    # 6. what is left, and only you can do it.
+    print("\nwhat is left, and only you can do it:")
+    for step in MANUAL_STEPS:
+        print(f"  - {step}")
 
 
 # ---- memory ----------------------------------------------------------------
