@@ -12,6 +12,7 @@ import filecmp
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from .config import ENV_ALIASES, SECRET_FIELDS, load
@@ -51,10 +52,22 @@ def write_env_file(path: Path, values: dict) -> None:
     already there. The prefix that was found is kept — rewriting `export NAME=` as
     `NAME=` would leave the variable set but no longer exported to child processes.
 
-    The mode is an argument to `os.open`, not a `chmod` afterwards: the file holds a
-    plaintext key, and `write_text` then `chmod` leaves it world-readable for as long as
-    the two calls are apart. A file that already exists keeps the permissions its owner
-    gave it — writing a key into somebody's file is not a licence to re-mode it.
+    The mode is set on the file DESCRIPTOR, never with a `chmod` on a path that is
+    already holding the key: the file holds a plaintext credential, and `write_text` then
+    `chmod` leaves it world-readable for as long as the two calls are apart. A file that
+    already exists keeps the permissions its owner gave it — writing a key into somebody's
+    file is not a licence to re-mode it — and a file being created gets 0600.
+
+    ATOMIC REPLACE, never a truncation in place. `~/.secrets` may hold every credential
+    the user has, and `os.open(O_WRONLY|O_CREAT|O_TRUNC)` then `write` truncates FIRST: a
+    disk that filled up, or a process killed between the two calls, left the file empty.
+    Everything else in this repository that rewrites a user's file protects it before
+    touching it — both cutovers take a dated backup and refuse to proceed without one.
+    Here the target is never opened for writing at all: a temporary file in the same
+    directory (so the rename stays on one filesystem, where it is atomic) is written in
+    full, and only then moved over the target. A failure at any point before that leaves
+    the original exactly as it was, and takes the temporary with it — a directory of
+    half-written files each holding a plaintext key would be worse than the truncation.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = path.read_text().splitlines() if path.exists() else []
@@ -68,9 +81,17 @@ def write_env_file(path: Path, values: dict) -> None:
         else:
             lines.append(f"{name}={value}")
     body = "\n".join(lines) + "\n"
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
-                   "w") as handle:
-        handle.write(body)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.",
+                                     suffix=".tmp")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(body)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def read_env_names(path: Path) -> dict:

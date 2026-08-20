@@ -237,6 +237,58 @@ class CredentialFile(unittest.TestCase):
         os_chmod.assert_not_called()
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
+    def test_the_original_survives_a_write_that_fails_halfway(self):
+        """`~/.secrets` may hold every credential the user has, and the old shape was
+        `os.open(O_TRUNC)` then `write`: the truncation landed first, so a disk that
+        filled up — or a process killed between the two — left the file EMPTY. Every
+        other thing in this repository that rewrites a user's file takes a dated backup
+        before touching it; both cutovers do, and refuse to proceed without one.
+        """
+        import os
+        from unittest import mock
+        before = "EVERY=other-credential\nOTHER=keep\n"
+        self.path.write_text(before)
+
+        real_fdopen = os.fdopen
+
+        class Exploding:
+            def __init__(self, real):
+                self.real = real
+
+            def write(self, _body):
+                raise OSError(28, "No space left on device")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                self.real.close()
+
+                return False
+
+        with mock.patch("os.fdopen", lambda fd, *a, **kw: Exploding(real_fdopen(fd, *a, **kw))):
+            with self.assertRaises(OSError):
+                install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        self.assertEqual(self.path.read_text(), before,
+                         "a failed write truncated the user's credential file")
+
+    def test_the_replace_is_atomic_and_leaves_no_debris_when_it_fails(self):
+        """The target is never opened for writing at all: a temporary file in the same
+        directory is written in full and then `os.replace`d over it, which is atomic on
+        the same filesystem. And a replace that fails takes its own temporary with it —
+        a directory of `.env.…tmp` files each holding a plaintext key would be a worse
+        outcome than the truncation."""
+        import os
+        from unittest import mock
+        before = "OTHER=keep\n"
+        self.path.write_text(before)
+        with mock.patch("os.replace", side_effect=OSError(28, "No space left")):
+            with self.assertRaises(OSError):
+                install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        self.assertEqual(self.path.read_text(), before)
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], [self.path.name],
+                         "a temporary file holding the key was left behind")
+
     def test_it_does_not_re_mode_a_file_the_user_already_had(self):
         """`~/.secrets` is the user's file, with the user's permissions. Writing a key
         into it is not a licence to change them behind their back."""
