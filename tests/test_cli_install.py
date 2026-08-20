@@ -54,6 +54,16 @@ class CheckMode(unittest.TestCase):
         self.assertIn("launcher", done.stdout)
         self.assertIn("no-shell config", done.stdout)
 
+    def test_json_verdict_covers_the_plumbing_too(self):
+        """`ready` and `blockers` came from `diagnose` alone, so a machine with a healthy
+        Qdrant and no `qctx` on PATH was reported ready. The plumbing checks were merged
+        into `checks` and nowhere else, which is the half that an agent does not read."""
+        payload = json.loads(self.run_cli("--check", "--json").stdout)
+        named = {c["name"] for c in payload["blockers"]}
+        self.assertIn("launcher", named)
+        self.assertIn("no-shell config", named)
+        self.assertFalse(payload["ready"])
+
     def test_json_is_parseable_and_carries_both_shapes(self):
         done = self.run_cli("--check", "--json")
         payload = json.loads(done.stdout)
@@ -301,6 +311,21 @@ class ClosingBehaviour(unittest.TestCase):
 
     def setUp(self):
         self.qctx = load_cli()
+
+    def test_the_verdict_is_recomputed_over_the_merged_checks(self):
+        """The discriminating case, which no offline end-to-end run can produce: a
+        diagnose that says ready, over plumbing that does not."""
+        healthy = {"ready": True, "checks": [], "blockers": [], "warnings": [],
+                   "detected_dim": 1024, "memory_suggestions": []}
+        broken = [{"name": "launcher", "ok": False, "detail": "not on PATH",
+                   "fix_hint": None, "warning": False},
+                  {"name": "PATH", "ok": False, "detail": "not on PATH",
+                   "fix_hint": None, "warning": True}]
+        merged = self.qctx.merged_report(healthy, broken)
+        self.assertFalse(merged["ready"])
+        self.assertEqual([c["name"] for c in merged["blockers"]], ["launcher"])
+        self.assertEqual([c["name"] for c in merged["warnings"]], ["PATH"])
+        self.assertEqual([c["name"] for c in merged["checks"]], ["launcher", "PATH"])
 
     def test_blockers_stop_the_run_before_the_host_steps(self):
         """No Qdrant, no point installing into a host. It names what did not answer and

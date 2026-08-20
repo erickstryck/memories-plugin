@@ -535,6 +535,24 @@ def _store_secrets(secrets: dict) -> None:
         print("  PENDING: a key that lives only in this shell is gone in the next one")
 
 
+def merged_report(report: dict, plumbing: list[dict]) -> dict:
+    """One verdict over BOTH halves of the picture.
+
+    `ready` and `blockers` used to come from `core.setup.diagnose` alone, with the
+    plumbing merged into `checks` and nowhere else. So a machine with a reachable Qdrant
+    and no `qctx` on PATH answered `"ready": true` — and `ready` is the field a program
+    reads, which makes it the one that must not be optimistic.
+
+    The plumbing goes FIRST, matching the order the human rendering prints.
+    """
+    checks = plumbing + report["checks"]
+    blockers = [c for c in checks if not c["ok"] and not c["warning"]]
+    warnings = [c for c in checks if not c["ok"] and c["warning"]]
+
+    return {**report, "checks": checks, "blockers": blockers, "warnings": warnings,
+            "ready": not blockers}
+
+
 def cmd_install(args, cfg):
     """The wizard: diagnose, then offer to fix, one group at a time.
 
@@ -549,7 +567,7 @@ def cmd_install(args, cfg):
     hosts = [] if args.config_only else _host_sections(root)
 
     if args.json:
-        output({**report, "checks": plumbing + report["checks"], "hosts": hosts}, True)
+        output({**merged_report(report, plumbing), "hosts": hosts}, True)
 
         return
 
