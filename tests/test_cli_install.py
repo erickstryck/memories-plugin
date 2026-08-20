@@ -13,7 +13,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 CLI = REPO / "cli" / "qctx.py"
+
+from tests.isolation import assert_hermetic, hermetic_env  # noqa: E402
 
 
 class CheckMode(unittest.TestCase):
@@ -25,13 +28,20 @@ class CheckMode(unittest.TestCase):
         self.config.write_text("{}")
         self.addCleanup(self.tmp.cleanup)
 
-    def run_cli(self, *argv):
-        env = dict(os.environ)
-        env.update({"HOME": str(self.home), "QCTX_CONFIG": str(self.config),
-                    "QCTX_QDRANT_URL": "", "PATH": "/usr/bin:/bin"})
+    def env(self):
+        return hermetic_env(self.home, QCTX_CONFIG=self.config)
+
+    def run_cli(self, *argv, **kwargs):
         return subprocess.run([sys.executable, str(CLI), "install", *argv],
-                              capture_output=True, text=True, env=env, timeout=180,
-                              stdin=subprocess.DEVNULL)
+                              capture_output=True, text=True, env=self.env(),
+                              timeout=180, stdin=subprocess.DEVNULL, **kwargs)
+
+    def test_the_environment_it_runs_in_is_assembled_not_inherited(self):
+        """This module used to start from `dict(os.environ)`. The legacy aliases
+        (`QDRANT_URL`, `SERVER_BASE_URL`, …) survived that scrubbing, so five of these
+        check-only tests dialled the developer's real Qdrant and waited out its
+        timeouts."""
+        assert_hermetic(self, self.env(), allowed=("QCTX_CONFIG",))
 
     def test_check_writes_nothing(self):
         before = self.config.read_text()
@@ -78,7 +88,7 @@ class SkipSuiteVariable(unittest.TestCase):
         developer's machine to.
         """
         with TemporaryDirectory() as home:
-            env = dict(os.environ, CUTOVER_SKIP_SUITE="1", HOME=home)
+            env = hermetic_env(home, CUTOVER_SKIP_SUITE="1")
             done = subprocess.run(["bash", str(REPO / "scripts" / "cutover.sh"), "--apply"],
                                   capture_output=True, text=True, env=env, timeout=120)
         self.assertNotEqual(done.returncode, 0)
@@ -96,13 +106,21 @@ class WritingPass(unittest.TestCase):
         self.config.write_text("{}")
         self.addCleanup(self.tmp.cleanup)
 
-    def run_with_input(self, keystrokes: str):
-        env = dict(os.environ)
-        env.update({"HOME": str(self.home), "QCTX_CONFIG": str(self.config),
-                    "PATH": "/usr/bin:/bin", "QCTX_INSTALL_FORCE_TTY": "1"})
-        return subprocess.run([sys.executable, str(CLI), "install", "--config-only"],
+    def env(self):
+        return hermetic_env(self.home, QCTX_CONFIG=self.config,
+                            QCTX_INSTALL_FORCE_TTY="1")
+
+    def run_with_input(self, keystrokes: str, *argv):
+        return subprocess.run([sys.executable, str(CLI), "install", "--config-only",
+                               *argv],
                               input=keystrokes, capture_output=True, text=True,
-                              env=env, timeout=180)
+                              env=self.env(), timeout=180)
+
+    def test_the_environment_it_runs_in_is_assembled_not_inherited(self):
+        """With `HERMES_HOME` exported, the inherited form rewrote the developer's live
+        `~/.hermes/.env` with the `qkey`/`skey` this class types."""
+        assert_hermetic(self, self.env(),
+                        allowed=("QCTX_CONFIG", "QCTX_INSTALL_FORCE_TTY"))
 
     def test_writes_the_urls_and_keeps_the_defaults_on_enter(self):
         answers = "\n".join([
