@@ -73,5 +73,53 @@ class Plumbing(unittest.TestCase):
         self.assertIn("qdrant_url", check.detail)
 
 
+class FieldCoverage(unittest.TestCase):
+    """Simple must not cost complete.
+
+    The wizard is allowed to be short, and it is not allowed to leave a field of `Config`
+    with no place to be set. `_check_collections` learned this the expensive way: it
+    enumerated three of five roles and reported `ready` over a configuration where the
+    repository archive sat on top of the memory one.
+    """
+
+    def test_every_field_is_reachable_exactly_once(self):
+        from core import config
+        walked = (install.REQUIRED_FIELDS + install.OPTIONAL_FIELDS
+                  + install.DETECTED_FIELDS)
+        self.assertEqual(len(walked), len(set(walked)), "a field is listed twice")
+        self.assertEqual(set(walked), set(config.DEFAULTS),
+                         "the wizard and Config disagree about what configuration is")
+
+    def test_the_two_keys_are_asked_for(self):
+        """SECRET_FIELDS governs WHERE a value is written, never whether it is asked."""
+        from core import config
+        for secret in config.SECRET_FIELDS:
+            self.assertIn(secret, install.REQUIRED_FIELDS)
+
+
+class CredentialFile(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".env"
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_creates_with_owner_only_permissions(self):
+        install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertIn("SERVER_API_KEY=abc", self.path.read_text())
+
+    def test_replaces_instead_of_duplicating(self):
+        install.write_env_file(self.path, {"SERVER_API_KEY": "old"})
+        install.write_env_file(self.path, {"SERVER_API_KEY": "new"})
+        body = self.path.read_text()
+        self.assertEqual(body.count("SERVER_API_KEY="), 1)
+        self.assertIn("SERVER_API_KEY=new", body)
+
+    def test_leaves_other_lines_alone(self):
+        self.path.write_text("OTHER=keep\n")
+        install.write_env_file(self.path, {"SERVER_API_KEY": "abc"})
+        self.assertIn("OTHER=keep", self.path.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

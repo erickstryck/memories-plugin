@@ -85,5 +85,53 @@ class SkipSuiteVariable(unittest.TestCase):
         self.assertIn("suite unverified", done.stdout + done.stderr)
 
 
+class WritingPass(unittest.TestCase):
+    """The interactive pass, driven through stdin with --yes off."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.config = Path(self.tmp.name) / "config.json"
+        self.config.write_text("{}")
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_with_input(self, keystrokes: str):
+        env = dict(os.environ)
+        env.update({"HOME": str(self.home), "QCTX_CONFIG": str(self.config),
+                    "PATH": "/usr/bin:/bin", "QCTX_INSTALL_FORCE_TTY": "1"})
+        return subprocess.run([sys.executable, str(CLI), "install", "--config-only"],
+                              input=keystrokes, capture_output=True, text=True,
+                              env=env, timeout=180)
+
+    def test_writes_the_urls_and_keeps_the_defaults_on_enter(self):
+        answers = "\n".join([
+            "https://q.example",        # qdrant_url
+            "https://e.example/v1",     # api_base_url
+            "qkey", "skey",             # the two keys
+            "mem",                      # memory_collection
+        ] + [""] * 9) + "\n"            # pass 2: Enter all the way
+        self.run_with_input(answers)
+        written = json.loads(self.config.read_text())
+        self.assertEqual(written["qdrant_url"], "https://q.example")
+        self.assertEqual(written["memory_collection"], "mem")
+
+    def test_no_key_reaches_the_config_file_in_any_spelling(self):
+        answers = "\n".join([
+            "https://q.example", "https://e.example/v1", "qkey", "skey", "mem",
+        ] + [""] * 9) + "\n"
+        self.run_with_input(answers)
+        body = self.config.read_text()
+        for forbidden in ("qkey", "skey", "qdrant_api_key", "api_key"):
+            self.assertNotIn(forbidden, body)
+
+    def test_the_key_value_is_never_echoed(self):
+        answers = "\n".join([
+            "https://q.example", "https://e.example/v1", "qkey", "s3cr3t-value", "mem",
+        ] + [""] * 9) + "\n"
+        done = self.run_with_input(answers)
+        self.assertNotIn("s3cr3t-value", done.stdout + done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -287,6 +287,90 @@ def _host_sections(root: Path) -> list[dict]:
     return sections
 
 
+def _interactive(args) -> bool:
+    """Whether this run may ask questions and write.
+
+    `QCTX_INSTALL_FORCE_TTY` is set by the tests, which have no terminal and still need
+    the interactive path. A real TTY is the usual signal.
+    """
+    return bool(sys.stdin.isatty() or os.environ.get("QCTX_INSTALL_FORCE_TTY"))
+
+
+def _read_secret(prompt: str) -> str:
+    """Echo off when there is a terminal, plain read when there is not.
+
+    `getpass` opens /dev/tty and falls back to stdin with a warning when it cannot — two
+    different behaviours depending on where it runs, which is not something a test should
+    have to guess at. Choosing explicitly keeps the piped case deterministic.
+    """
+    if sys.stdin.isatty():
+        import getpass
+
+        return getpass.getpass(prompt)
+
+    return input(prompt)
+
+
+def _ask_config(cfg) -> None:
+    """The two passes. Blockers first, then everything else with Enter keeping."""
+    from core import config as _config
+
+    patch, secrets = {}, {}
+    print("\n--- required (Enter keeps the current value) ---")
+    for field in core.install.REQUIRED_FIELDS:
+        current = getattr(cfg, field)
+        if field in _config.SECRET_FIELDS:
+            shown = f"set, {len(current)} chars" if current else "MISSING"
+            entry = _read_secret(f"{field} [{shown}]: ").strip()
+            if entry:
+                secrets[_config.ENV_ALIASES[field][0]] = entry
+            continue
+        entry = input(f"{field} [{current or 'MISSING'}]: ").strip()
+        if entry:
+            patch[field] = entry
+
+    print("\n--- everything else (Enter keeps) ---")
+    for field in core.install.OPTIONAL_FIELDS:
+        entry = input(f"{field} [{getattr(cfg, field)}]: ").strip()
+        if entry:
+            patch[field] = int(entry) if field == "context_window" else entry
+
+    if patch:
+        core.save(patch)
+        print(f"\n  wrote {len(patch)} setting(s) to the config file")
+    if secrets:
+        _store_secrets(secrets)
+
+
+def _store_secrets(secrets: dict) -> None:
+    """The keys go to files that exist FOR credentials, and to no other file.
+
+    Never echoes a value: this output gets pasted into issues and chats. And on a machine
+    with no hermes there is no plugin-owned credential file at all — saying "done" there
+    would be the same lie the README told.
+    """
+    home = Path(os.path.expanduser("~"))
+    written_anywhere = False
+    hermes_env = Path(os.environ.get("HERMES_HOME", home / ".hermes")) / ".env"
+    if hermes_env.parent.is_dir():
+        core.install.write_env_file(hermes_env, secrets)
+        for name, value in secrets.items():
+            print(f"  ok    {name} written to {hermes_env} (len {len(value)})")
+        written_anywhere = True
+
+    shell_file = home / ".secrets"
+    if shell_file.exists():
+        core.install.write_env_file(shell_file, secrets)
+        print(f"  ok    also written to {shell_file}")
+        written_anywhere = True
+
+    if not written_anywhere:
+        print("  ..    no credential file on this machine — add these to your shell rc:")
+        for name in secrets:
+            print(f"          export {name}=…")
+        print("  PENDING: a key that lives only in this shell is gone in the next one")
+
+
 def cmd_install(args, cfg):
     """The wizard: diagnose, then offer to fix, one group at a time.
 
@@ -298,7 +382,7 @@ def cmd_install(args, cfg):
     root = Path(__file__).resolve().parent.parent
     report = core.setup.diagnose(cfg)
     plumbing = [asdict(c) for c in core.install.plumbing(root, dict(os.environ))]
-    hosts = _host_sections(root)
+    hosts = [] if args.config_only else _host_sections(root)
 
     if args.json:
         output({**report, "checks": plumbing + report["checks"], "hosts": hosts}, True)
@@ -317,11 +401,17 @@ def cmd_install(args, cfg):
 
     if args.check:
         return
-    if not sys.stdin.isatty() and not args.yes:
+    if not _interactive(args) and not args.yes:
         print("\n(no interactive terminal — nothing was changed)")
 
         return
-    print("\n(the writing pass lands in the next task)")
+
+    _ask_config(cfg)
+
+    if args.config_only:
+        return
+
+    # The host install lands in the next task.
 
 
 # ---- memory ----------------------------------------------------------------
@@ -903,6 +993,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("install", help="install and verify everything, step by step")
     p.add_argument("--check", action="store_true", help="report only; never writes")
     p.add_argument("--yes", action="store_true", help="answer yes to every group")
+    p.add_argument("--config-only", action="store_true",
+                   help="only the configuration pass; touch no host")
     p.set_defaults(fn=cmd_install)
 
     col = sub.add_parser("collections", help="inspect Qdrant collections")

@@ -22,6 +22,42 @@ LAUNCHER_NAME = "qctx"
 #: purpose: `save()` refuses them, so a config file is complete without them.
 NO_SHELL_FIELDS = ("qdrant_url", "memory_collection")
 
+#: Pass 1 — what blocks use. Asked outright, in this order.
+REQUIRED_FIELDS = ("qdrant_url", "api_base_url", "qdrant_api_key", "api_key",
+                   "memory_collection")
+
+#: Pass 2 — everything else, with the current value shown and Enter keeping it.
+#: `embed_url` and `rerank_url` are HERE and not derived away: with them empty, the config
+#: builds them from `api_base_url`, and a setup that serves rerank on another port then
+#: gets a URL that does not exist — measured on the author's own machine, embedding on
+#: :8003 and rerank on :8004.
+OPTIONAL_FIELDS = ("embed_url", "rerank_url", "embed_model", "rerank_model",
+                   "docs_collection", "library_collection", "repos_collection",
+                   "repos_registry_collection", "context_window")
+
+#: Written from what the endpoint answered, never typed.
+DETECTED_FIELDS = ("vector_size",)
+
+
+def write_env_file(path: Path, values: dict) -> None:
+    """Writes KEY=value lines into a credential file, replacing rather than appending.
+
+    Appending is what a person does by hand, and it leaves two lines for one variable —
+    whichever the loader reads last wins, which is a coin toss the operator cannot see.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text().splitlines() if path.exists() else []
+    for name, value in values.items():
+        replacement = f"{name}={value}"
+        for i, line in enumerate(lines):
+            if line.startswith(f"{name}="):
+                lines[i] = replacement
+                break
+        else:
+            lines.append(replacement)
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o600)
+
 
 def target_dir(env: dict) -> Path:
     """Where the launcher goes. One location, so the fix hint can name it."""
