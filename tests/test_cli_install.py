@@ -4,15 +4,19 @@
 and write NOTHING. A wizard that repairs while you are looking cannot be used to find out
 what state a machine is in.
 """
+import contextlib
 import http.server
+import io
 import json
 import os
+import shutil
 import subprocess
 import threading
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -234,6 +238,16 @@ class YesWithNoTerminal(unittest.TestCase):
         self.assertNotIn("EOFError", done.stderr)
         self.assertEqual(done.returncode, 0, done.stderr)
 
+    def test_the_launcher_is_actually_installed_by_the_full_path(self):
+        """Deleting the `install_launcher` call from `cmd_install` used to break no
+        test at all — step 2 of the wizard's own order had no witness. It runs before
+        the configuration pass, so a blocked machine still proves it."""
+        self.run_cli("--yes")
+        target = self.home / ".local" / "bin" / "qctx"
+        self.assertTrue(target.exists(), "the wizard never put qctx on PATH")
+        self.assertEqual(target.read_bytes(), (REPO / "bin" / "qctx").read_bytes())
+        self.assertTrue(os.access(target, os.X_OK))
+
     def test_the_full_path_with_yes_and_no_stdin_exits_clean(self):
         """The worse case: `install_launcher` has already written before the crash."""
         done = self.run_cli("--yes")
@@ -416,6 +430,173 @@ class LauncherInstall(unittest.TestCase):
         self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
         self.assertEqual(stand_in.read_text(),
                          "#!/usr/bin/env bash\necho the other checkout\n")
+
+
+class HostGroups(unittest.TestCase):
+    """The four host combinations, and the two groups that actually run things.
+
+    `_host_sections`, `_host_dry_run`, `_host_install_group` and `_host_cutover_group`
+    had no direct test at all, and they are the surface that calls
+    `subprocess(shell=True)` and `cutover.sh --apply`. The design's own test list asks
+    for none / claude only / hermes only / both; only "none" was covered, and only
+    because this machine happens to hide both binaries behind a reduced PATH.
+
+    Nothing real is executed: `root` is a fake tree whose two cutover scripts are stubs
+    that record their arguments, and the host binaries are stubs on a temporary PATH.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.home = self.dir / "home"
+        self.home.mkdir()
+        self.bin = self.dir / "bin"
+        self.bin.mkdir()
+        # The ONLY PATH these tests run with. Two shells are linked in because the
+        # cutovers are run as `bash <script>` and the host install commands go through
+        # `sh -c`; nothing else is, so a real `claude` or `hermes` on this machine
+        # cannot be reached from here by accident.
+        for tool in ("bash", "sh"):
+            (self.bin / tool).symlink_to(shutil.which(tool))
+        self.witness = self.dir / "witness"
+        self.addCleanup(self.tmp.cleanup)
+        self.qctx = load_cli()
+        self.root = self.fake_root()
+
+    def fake_root(self) -> Path:
+        """A tree with the two cutover names, and stubs behind them.
+
+        The real scripts are the host-state layer and are not this test's subject; what
+        is under test is WHICH of them the wizard runs, with which arguments.
+        """
+        root = self.dir / "tree"
+        (root / "scripts").mkdir(parents=True)
+        for host, script, skip in self.qctx.HOST_SECTIONS:
+            body = (f'#!/usr/bin/env bash\n'
+                    f'printf "%s plan skip=%s args=%s\\n" {host} "${{{skip}:-}}" "$*"\n'
+                    f'printf "%s %s\\n" {host} "$*" >> {self.witness}\n')
+            (root / script).write_text(body)
+            (root / script).chmod(0o755)
+
+        return root
+
+    def stub_host(self, name: str, exit_code: int = 0) -> None:
+        """A host binary on PATH that records every call instead of making one."""
+        path = self.bin / name
+        path.write_text(f'#!/usr/bin/env bash\n'
+                        f'printf "%s %s\\n" {name} "$*" >> {self.witness}\n'
+                        f'exit {exit_code}\n')
+        path.chmod(0o755)
+
+    def env(self, **extra):
+        return {"PATH": str(self.bin), "HOME": str(self.home), **extra}
+
+    def calls(self) -> str:
+        return self.witness.read_text() if self.witness.exists() else ""
+
+    def sections(self, *hosts):
+        for host in hosts:
+            self.stub_host(self.qctx.HOST_BINARIES[host])
+        with mock.patch.dict(os.environ, self.env(), clear=True):
+            return self.qctx._host_sections(self.root)
+
+    # ---- the four combinations ----
+
+    def test_no_host_on_this_machine_skips_both_without_failing(self):
+        sections = self.sections()
+        self.assertEqual([s["host"] for s in sections], ["claude-code", "hermes"])
+        for section in sections:
+            self.assertEqual(section["exit_code"], 0)
+            self.assertIn("is not on PATH", section["text"])
+        self.assertEqual(self.calls(), "", "a cutover ran for a host that is not here")
+
+    def test_claude_only_runs_the_claude_plan_and_skips_hermes(self):
+        sections = {s["host"]: s["text"] for s in self.sections("claude-code")}
+        self.assertIn("claude-code plan", sections["claude-code"])
+        self.assertIn("is not on PATH", sections["hermes"])
+        self.assertNotIn("hermes ", self.calls())
+
+    def test_hermes_only_runs_the_hermes_plan_and_skips_claude(self):
+        sections = {s["host"]: s["text"] for s in self.sections("hermes")}
+        self.assertIn("hermes plan", sections["hermes"])
+        self.assertIn("is not on PATH", sections["claude-code"])
+        self.assertNotIn("claude-code ", self.calls())
+
+    def test_both_hosts_each_get_their_own_section(self):
+        sections = {s["host"]: s["text"] for s in self.sections("claude-code", "hermes")}
+        self.assertIn("claude-code plan", sections["claude-code"])
+        self.assertIn("hermes plan", sections["hermes"])
+
+    def test_the_plan_asks_each_script_to_skip_its_suite(self):
+        """41s per host to draw a list. The apply runs it once; the plan never does."""
+        sections = {s["host"]: s["text"] for s in self.sections("claude-code", "hermes")}
+        for text in sections.values():
+            self.assertIn("skip=1", text)
+            self.assertNotIn("--apply", text)
+
+    # ---- the group that installs into the host ----
+
+    def test_an_installed_plugin_is_recognised_and_not_reinstalled(self):
+        self.stub_host("hermes")
+        (self.home / ".hermes" / "plugins" / "memories").mkdir(parents=True)
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            present = self.qctx._host_install_group(Args(), self.root)
+        self.assertTrue(present["hermes"])
+        self.assertIn("installed at", out.getvalue())
+        self.assertEqual(self.calls(), "", "it reinstalled a plugin that was there")
+
+    def test_a_missing_plugin_is_installed_with_the_commands_it_showed(self):
+        self.stub_host("hermes")
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            present = self.qctx._host_install_group(Args(), self.root)
+        shown = out.getvalue()
+        for command in self.qctx.HOST_INSTALL_COMMANDS["hermes"]:
+            self.assertIn(command, shown)
+        self.assertIn("plugins install", self.calls())
+        self.assertIn("config set memory.provider memories", self.calls())
+        self.assertTrue(present["hermes"])
+
+    def test_declining_leaves_the_host_alone(self):
+        self.stub_host("hermes")
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(self.qctx, "_ask", return_value="n"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            present = self.qctx._host_install_group(Args(yes=False), self.root)
+        self.assertFalse(present["hermes"])
+        self.assertEqual(self.calls(), "")
+
+    # ---- the group that applies the cutover ----
+
+    def test_only_a_host_with_a_plugin_gets_a_cutover(self):
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.qctx._host_cutover_group(Args(), self.root,
+                                          {"claude-code": True, "hermes": False})
+        self.assertIn("claude-code — cutover plan", out.getvalue())
+        self.assertNotIn("hermes — cutover plan", out.getvalue())
+        self.assertIn("claude-code --apply", self.calls())
+        self.assertNotIn("hermes --apply", self.calls())
+
+    def test_the_apply_is_the_same_script_with_the_suite_not_skipped(self):
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.qctx._host_cutover_group(Args(), self.root, {"hermes": True})
+        printed = out.getvalue()
+        self.assertIn("skip=1", printed)          # the plan
+        self.assertIn("skip= args=--apply", printed)   # the apply, suite not skipped
+        self.assertIn("hermes --apply", self.calls())
+
+
+class Args:
+    """The two attributes the host groups read off argparse."""
+
+    def __init__(self, yes=True, config_only=False):
+        self.yes = yes
+        self.config_only = config_only
+        self.check = False
+        self.json = False
 
 
 class ClosingBehaviour(unittest.TestCase):
