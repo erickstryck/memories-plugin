@@ -19,3 +19,4 @@ config.json
 # PUBLIC repository that is machine paths and internal notes, so the rule belongs here, where
 # it does not depend on another tool remembering.
 .superpowers/
+.superpowers-ledger-*.md
