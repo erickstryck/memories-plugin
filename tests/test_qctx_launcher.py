@@ -7,6 +7,7 @@ after the new commit.
 """
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -14,6 +15,34 @@ from tempfile import TemporaryDirectory
 
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / "bin" / "qctx"
+
+
+def run_with_own_tree_deleted(work: Path, env: dict, args=("--root",)):
+    """Run a copy of the launcher via `bash /proc/self/fd/N` after deleting the
+    directory it lives in — the race `own_tree()`'s header comment describes: the tree
+    vanishing after the script was opened, exactly what `claude plugin update` does
+    when it removes the old SHA directory.
+
+    All fd entries under /proc are symlinks, so `own_tree()`'s `[ -L "$target" ]` loop
+    follows `/proc/self/fd/N`, `readlink` yields the now-deleted path, and the final
+    `cd` inside `own_tree()` fails — the exact failure the `|| candidate=""` guard in
+    `resolve_root()` exists to catch. This is the mechanism the earlier round's probe
+    (`.superpowers/sdd/2026-08-19-install-wizard/probe_owntree.py`) proved works.
+    """
+    doomed = work / "doomed" / "bin"
+    doomed.mkdir(parents=True)
+    script = doomed / "qctx"
+    script.write_bytes(LAUNCHER.read_bytes())
+    script.chmod(0o755)
+
+    fd = os.open(script, os.O_RDONLY)
+    try:
+        shutil.rmtree(work / "doomed")
+        return subprocess.run(["bash", f"/proc/self/fd/{fd}", *args],
+                              capture_output=True, text=True, env=env,
+                              pass_fds=(fd,), timeout=30)
+    finally:
+        os.close(fd)
 
 
 def fake_tree(root: Path) -> Path:
@@ -79,6 +108,22 @@ class LauncherResolution(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("could not find", done.stderr)
 
+    def test_own_tree_failure_falls_through_to_hermes(self):
+        # own_tree() genuinely fails here (see run_with_own_tree_deleted): the script's
+        # directory is gone by the time it runs. Resolution must degrade to the next
+        # candidate instead of aborting under `set -euo pipefail`.
+        tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        done = run_with_own_tree_deleted(Path(self.tmp.name), self.env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), str(tree))
+
+    def test_own_tree_failure_with_no_candidates_fails_loudly_not_raw(self):
+        # Same broken own_tree(), but nothing else to fall back to. The user must see
+        # the controlled "could not find" message, never own_tree()'s raw `cd:` error.
+        done = run_with_own_tree_deleted(Path(self.tmp.name), self.env)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("could not find", done.stderr)
+        self.assertNotIn("cd:", done.stderr)
 
     def test_lazy_evaluation_skips_claude_tree_when_qctx_home_resolves(self):
         # Verify that claude_tree() is not called when QCTX_HOME resolves.
