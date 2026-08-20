@@ -88,6 +88,53 @@ class CountsMatchTheTree(unittest.TestCase):
         from hosts.hermes import tools
         self.assertEqual(self.counted("tool"), {len(tools.SCHEMAS)})
 
+    def test_collections(self):
+        """The two places that said "three collections" over five.
+
+        They survived the first pass because they were spelled as a word, and this test
+        reads digits. Digits are the contract: the README states the count as a numeral
+        so that a sixth collection field breaks this test the day it is added.
+        """
+        from core import config
+        real = len([k for k in config.DEFAULTS if k.endswith("_collection")])
+        self.assertEqual(self.counted("collection"), {real})
+
+
+class TheHeadlineInstallCommandRuns(unittest.TestCase):
+    """The first command a new user types has to survive this machine's cache.
+
+    `~/.claude/plugins/cache/…/*/scripts/install.sh` expands to one directory per
+    installed commit — five on the machine this was measured on. Bash then runs the
+    first and hands the other four to `qctx install`, which exits 2 on unrecognised
+    arguments. So the README's line is EXECUTED here, against a fake cache with five
+    SHA directories, and the stub it reaches reports how many arguments it was given.
+    """
+
+    def readme_claude_line(self) -> str:
+        for line in README.splitlines():
+            if line.startswith("bash ") and ".claude/plugins/cache" in line:
+                return line
+
+        self.fail("the README no longer shows a claude-code install.sh command")
+
+    def test_it_passes_exactly_one_path_with_five_cached_commits(self):
+        import subprocess
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as home:
+            cache = (Path(home) / ".claude" / "plugins" / "cache" / "memories-plugin"
+                     / "memories-plugin")
+            for sha in ("aaa1111", "bbb2222", "ccc3333", "ddd4444", "eee5555"):
+                script = cache / sha / "scripts" / "install.sh"
+                script.parent.mkdir(parents=True)
+                script.write_text("#!/usr/bin/env bash\nprintf 'argc=%s\\n' \"$#\"\n")
+                script.chmod(0o755)
+            done = subprocess.run(["bash", "-c", self.readme_claude_line()],
+                                  capture_output=True, text=True, timeout=60,
+                                  env={"HOME": home, "PATH": "/usr/bin:/bin"})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "argc=0",
+                         "the command handed extra cache paths to install.sh")
+
 
 if __name__ == "__main__":
     unittest.main()

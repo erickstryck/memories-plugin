@@ -88,8 +88,12 @@ On a machine where the plugin is already installed by its host, or on a fresh cl
 
 ```bash
 bash ~/.hermes/plugins/memories/scripts/install.sh          # installed by hermes
-bash ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh
 ./scripts/install.sh                                        # cloned
+
+# installed by claude-code. The cache holds one directory per commit and old ones stay
+# behind, so a bare glob expands to all of them and the extra paths land on `qctx
+# install` as unrecognised arguments. Take the newest, quoted, and pass one path.
+bash "$(ls -dt ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh | head -1)"
 ```
 
 It puts `qctx` on PATH, asks for what is missing, offers to install into whichever host is
@@ -102,9 +106,9 @@ months ago:
 qctx install --check      # reports; writes nothing
 ```
 
-`--check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the five
-collections, whether a shell-less process would find the configuration, and each host's
-own cutover report.
+`--check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the
+5 collections, whether a shell-less process would find the configuration, and each
+host's own cutover report.
 
 ### If you would rather do it by hand
 
@@ -515,7 +519,7 @@ python3 cli/qctx.py setup
 ```
 
 It checks Qdrant, the embedding endpoint (detecting the model's real dimension), the
-re-rank endpoint (including which scale it answers in) and the three collections — and
+re-rank endpoint (including which scale it answers in) and the 5 collections — and
 prints, for each missing item, the exact command that fixes it. In an interactive
 terminal it asks and writes; **with no TTY it never blocks**, it only reports. That is
 deliberate: the command is also called by agents and by scripts, and a prompt waiting
@@ -797,10 +801,10 @@ on purpose, and both are data rather than prose:
 
 ## Status
 
-Done and tested: the core, the CLI, the three archives, the guided diagnostics, all three
-hooks, all 3 skills and the plugin manifest for claude-code; the provider, its 22 tools,
-the shared configuration wizard and the install script for hermes-agent; and the big-file
-read guard on both hosts. Offline tests and integration tests against a real Qdrant
+Done and tested: the core, the CLI, the three archives, the guided diagnostics, all
+4 hooks, all 3 skills and the plugin manifest for claude-code; the provider, its 22
+tools, the shared configuration wizard and the install script for hermes-agent; and the
+big-file read guard on both hosts. Offline tests and integration tests against a real Qdrant
 and real models.
 
 Written against hermes-agent v0.20.1 as INSTALLED rather than as published, because the
