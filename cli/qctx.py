@@ -563,7 +563,30 @@ def _read_secret(prompt: str) -> str:
     return _ask(prompt)
 
 
-def _ask_config(cfg, interactive: bool = True) -> None:
+def _secret_status(field: str) -> str:
+    """What the prompt shows beside a key: where it already lives, or MISSING.
+
+    Reading only the process environment made a key that lives correctly in
+    `~/.hermes/.env` show as MISSING and be re-asked on every run — and the wizard runs
+    on every verification. That trains exactly the paste-a-secret-every-run reflex the
+    design forbids; already configured has to be RECOGNISED, not re-asked.
+    """
+    from core import config as _config
+
+    env = dict(os.environ)
+    for name in _config.ENV_ALIASES[field]:
+        if env.get(name):
+            return f"already set as {name} in the environment"
+    for path in credential_files(env):
+        names = core.install.read_env_names(path)
+        for name in _config.ENV_ALIASES[field]:
+            if name in names:
+                return f"already set as {name} in {path}"
+
+    return "MISSING"
+
+
+def _ask_config(cfg, interactive: bool = True, suggestions=()) -> None:
     """The two passes. Blockers first, then everything else with Enter keeping.
 
     With no terminal there is nobody to ask, so every value is kept. That is what `--yes`
@@ -583,10 +606,23 @@ def _ask_config(cfg, interactive: bool = True) -> None:
     for field in core.install.REQUIRED_FIELDS:
         current = getattr(cfg, field)
         if field in _config.SECRET_FIELDS:
-            shown = f"set, {len(current)} chars" if current else "MISSING"
-            entry = _read_secret(f"{field} [{shown}]: ").strip()
+            entry = _read_secret(f"{field} [{_secret_status(field)}]: ").strip()
             if entry:
                 secrets[_config.ENV_ALIASES[field][0]] = entry
+            continue
+        if field == "memory_collection" and suggestions:
+            # The design asks for this collection to be offered "with the suggestions of
+            # `suggest_collections`". They were computed for the report and then shown
+            # nowhere, while `cmd_setup` printed the same list twenty lines away.
+            print("\n  candidates (most populated first):")
+            for i, option in enumerate(suggestions, 1):
+                print(f"    {i}. {option['collection']:34} "
+                      f"{option['points']:>8} points")
+            choice = core.setup.choose_by_index(
+                [option["collection"] for option in suggestions],
+                _ask(f"{field} [{current or 'MISSING'}]: "))
+            if choice:
+                patch[field] = choice
             continue
         entry = _ask(f"{field} [{current or 'MISSING'}]: ").strip()
         if entry:
@@ -639,6 +675,35 @@ def _detect_vector_size() -> None:
           f"(the config said {cfg.vector_size})")
 
 
+def _warn_if_readable(path: Path) -> None:
+    """Says so when a credential file is readable by anyone but its owner.
+
+    `write_env_file` deliberately does not re-mode a file somebody already had — but
+    leaving that SILENT would be the other half of the same mistake.
+    """
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        print(f"  ..    {path} is mode {mode:o} — readable beyond its owner; "
+              f"`chmod 600 {path}` if that is not deliberate")
+
+
+def _shell_credential_file(home: Path) -> Path | None:
+    """The file the user names for their interactive shell, or None.
+
+    `~/.secrets` is offered as the DEFAULT only when it already exists: the design says
+    the wizard creates nothing on its own here. Naming a path is the consent to create
+    it; an empty answer with no `~/.secrets` present is a no, and the caller then prints
+    the `export` lines and leaves the key PENDING rather than claiming it is done.
+    """
+    default = home / ".secrets"
+    shown = str(default) if default.is_file() else "none — Enter to skip"
+    entry = _ask(f"  shell credential file [{shown}]: ").strip()
+    if entry:
+        return Path(os.path.expanduser(entry))
+
+    return default if default.is_file() else None
+
+
 def _store_secrets(secrets: dict) -> None:
     """The keys go to files that exist FOR credentials, and to no other file.
 
@@ -657,12 +722,14 @@ def _store_secrets(secrets: dict) -> None:
         core.install.write_env_file(hermes_env, secrets)
         for name, value in secrets.items():
             print(f"  ok    {name} written to {hermes_env} (len {len(value)})")
+        _warn_if_readable(hermes_env)
         written_anywhere = True
 
-    shell_file = home / ".secrets"
-    if shell_file.exists():
+    shell_file = _shell_credential_file(home)
+    if shell_file:
         core.install.write_env_file(shell_file, secrets)
         print(f"  ok    also written to {shell_file}")
+        _warn_if_readable(shell_file)
         written_anywhere = True
 
     if not written_anywhere:
@@ -726,7 +793,7 @@ def cmd_install(args, cfg):
         return
 
     if args.config_only:
-        _ask_config(cfg, _interactive(args))
+        _ask_config(cfg, _interactive(args), report["memory_suggestions"])
         _detect_vector_size()
 
         return
@@ -740,7 +807,7 @@ def cmd_install(args, cfg):
         print('        export PATH="$HOME/.local/bin:$PATH"')
 
     # 3. config — the two passes, then the one field that is answered by the endpoint.
-    _ask_config(cfg, _interactive(args))
+    _ask_config(cfg, _interactive(args), report["memory_suggestions"])
     _detect_vector_size()
 
     # 4. hosts — but only if the archive itself answers. Installing into a host on top

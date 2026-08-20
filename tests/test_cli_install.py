@@ -446,6 +446,131 @@ class LauncherInstall(unittest.TestCase):
                          "#!/usr/bin/env bash\necho the other checkout\n")
 
 
+class ConfigPass(unittest.TestCase):
+    """The two passes, driven directly.
+
+    `_ask` and `_read_secret` are replaced by scripted answers rather than a pipe, so
+    each assertion is about ONE prompt instead of about a whole transcript.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.addCleanup(self.tmp.cleanup)
+        self.qctx = load_cli()
+        self.saved = {}
+
+    def cfg(self, **over):
+        from core import config
+        values = dict(config.DEFAULTS)
+        values.update(over)
+
+        return config.Config(**values)
+
+    def ask_config(self, answers, secrets=("", ""), suggestions=(), env=None):
+        """Runs `_ask_config` and returns (printed, prompts seen by the key questions)."""
+        prompts = []
+
+        def read_secret(prompt):
+            prompts.append(prompt)
+
+            return secrets[len(prompts) - 1]
+
+        with mock.patch.dict(os.environ, env or {"HOME": str(self.home)}, clear=True), \
+                mock.patch.object(self.qctx.core, "save", self.saved.update), \
+                mock.patch.object(self.qctx, "_read_secret", read_secret), \
+                mock.patch.object(self.qctx, "_ask", side_effect=list(answers)), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.qctx._ask_config(self.cfg(), True, suggestions)
+
+        return out.getvalue(), prompts
+
+    def test_the_memory_collection_is_offered_with_its_suggestions(self):
+        """`report["memory_suggestions"]` was computed and shown nowhere, while
+        `cmd_setup` printed the same list twenty lines away. The design's pass 1 says
+        this collection is asked "with the suggestions of `suggest_collections`"."""
+        printed, _ = self.ask_config(
+            ["", "", "1"] + [""] * 9,
+            suggestions=[{"collection": "claude_memory", "points": 812},
+                         {"collection": "old_archive", "points": 12}])
+        self.assertIn("claude_memory", printed)
+        self.assertIn("812", printed)
+        self.assertEqual(self.saved.get("memory_collection"), "claude_memory",
+                         "choosing by index did not resolve to the suggestion")
+
+    def test_a_key_that_is_already_in_a_credential_file_is_not_asked_as_missing(self):
+        """It ran on every verification, so re-asking is not a small annoyance: it is
+        the paste-a-secret-every-run reflex the design forbids, taught by the tool."""
+        secrets_file = self.home / ".secrets"
+        secrets_file.write_text("export QDRANT_SERVICE_API_KEY=abcdef\n")
+        _, prompts = self.ask_config([""] * 12)
+        self.assertIn("already set as QDRANT_SERVICE_API_KEY", prompts[0])
+        self.assertIn(str(secrets_file), prompts[0])
+        self.assertIn("MISSING", prompts[1])          # the other key really is missing
+
+    def test_a_key_in_the_environment_is_recognised_too(self):
+        _, prompts = self.ask_config(
+            [""] * 12, env={"HOME": str(self.home), "SERVER_API_KEY": "abc"})
+        self.assertIn("already set as SERVER_API_KEY in the environment", prompts[1])
+
+
+class ShellCredentialFile(unittest.TestCase):
+    """`~/.secrets` is a DEFAULT, not a destination the wizard picks for you.
+
+    The design: "an file the user names; default `~/.secrets` IF IT ALREADY EXISTS. It
+    creates nothing on its own." The path was hard-coded, so a user who keeps
+    credentials anywhere else was told to paste `export` lines instead.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.addCleanup(self.tmp.cleanup)
+        self.qctx = load_cli()
+
+    def store(self, answer: str):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=True), \
+                mock.patch.object(self.qctx, "_ask", return_value=answer), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.qctx._store_secrets({"QCTX_QDRANT_API_KEY": "abcdef"})
+
+        return out.getvalue()
+
+    def test_it_writes_to_the_file_the_user_names(self):
+        named = Path(self.tmp.name) / "elsewhere" / "keys.env"
+        printed = self.store(str(named))
+        self.assertIn("QCTX_QDRANT_API_KEY=abcdef", named.read_text())
+        self.assertIn(str(named), printed)
+
+    def test_the_default_is_offered_only_when_it_already_exists(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=True), \
+                mock.patch.object(self.qctx, "_ask", return_value="") as asked, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.qctx._store_secrets({"QCTX_QDRANT_API_KEY": "abcdef"})
+        self.assertIn("Enter to skip", asked.call_args[0][0])
+        self.assertFalse((self.home / ".secrets").exists(),
+                         "the wizard created a credential file nobody asked for")
+
+        (self.home / ".secrets").write_text("OTHER=keep\n")
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}, clear=True), \
+                mock.patch.object(self.qctx, "_ask", return_value="") as asked, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.qctx._store_secrets({"QCTX_QDRANT_API_KEY": "abcdef"})
+        self.assertIn(str(self.home / ".secrets"), asked.call_args[0][0])
+        self.assertIn("QCTX_QDRANT_API_KEY=abcdef",
+                      (self.home / ".secrets").read_text())
+
+    def test_naming_nothing_leaves_the_key_pending_and_prints_the_exports(self):
+        """Never "done". A key that only lives in this shell is gone in the next one,
+        and saying otherwise is the lie that started this whole piece of work."""
+        printed = self.store("")
+        self.assertIn("export QCTX_QDRANT_API_KEY", printed)
+        self.assertIn("PENDING", printed)
+        self.assertNotIn("abcdef", printed)
+
+
 class HostGroups(unittest.TestCase):
     """The four host combinations, and the two groups that actually run things.
 
