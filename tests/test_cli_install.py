@@ -143,12 +143,72 @@ class WritingPass(unittest.TestCase):
         for forbidden in ("qkey", "skey", "qdrant_api_key", "api_key"):
             self.assertNotIn(forbidden, body)
 
+    def test_an_empty_hermes_home_does_not_drop_a_key_in_the_current_directory(self):
+        """`Path("")` is `Path(".")`, and `Path(".").is_dir()` is True, so the wizard
+        wrote a plaintext `.env` wherever it happened to be run — very likely a git
+        repository. The sibling `hermes_install_path` already used the `or` idiom."""
+        answers = "\n".join([
+            "https://q.example", "https://e.example/v1", "qkey", "skey", "mem",
+        ] + [""] * 9) + "\n"
+        here = Path(self.tmp.name) / "somebodys-repo"
+        here.mkdir()
+        subprocess.run([sys.executable, str(CLI), "install", "--config-only"],
+                       input=answers, capture_output=True, text=True, timeout=180,
+                       cwd=here, env=hermetic_env(self.home, QCTX_CONFIG=self.config,
+                                                  QCTX_INSTALL_FORCE_TTY="1",
+                                                  HERMES_HOME=""))
+        self.assertFalse((here / ".env").exists(),
+                         "a credential file was written into the working directory")
+
     def test_the_key_value_is_never_echoed(self):
         answers = "\n".join([
             "https://q.example", "https://e.example/v1", "qkey", "s3cr3t-value", "mem",
         ] + [""] * 9) + "\n"
         done = self.run_with_input(answers)
         self.assertNotIn("s3cr3t-value", done.stdout + done.stderr)
+
+
+class YesWithNoTerminal(unittest.TestCase):
+    """`--yes` exists FOR the machine with no terminal, and that is where it crashed.
+
+    The guard was `not _interactive and not args.yes`, so `--yes` with a closed stdin
+    fell straight into the prompts and the first `input()` raised an uncaught EOFError.
+    On the full path the launcher had already been copied into ~/.local/bin by then, so
+    the run died half-done.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.config = Path(self.tmp.name) / "config.json"
+        self.config.write_text('{"qdrant_url": "https://kept.example"}')
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_cli(self, *argv):
+        return subprocess.run([sys.executable, str(CLI), "install", *argv],
+                              capture_output=True, text=True, timeout=180,
+                              env=hermetic_env(self.home, QCTX_CONFIG=self.config),
+                              stdin=subprocess.DEVNULL)
+
+    def test_config_only_yes_with_no_stdin_exits_clean(self):
+        done = self.run_cli("--config-only", "--yes")
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertNotIn("EOFError", done.stderr)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_the_full_path_with_yes_and_no_stdin_exits_clean(self):
+        """The worse case: `install_launcher` has already written before the crash."""
+        done = self.run_cli("--yes")
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_it_keeps_every_current_value(self):
+        """Nothing was answered, so nothing may change. A `--yes` that wrote defaults
+        over a working configuration would be worse than the crash."""
+        before = self.config.read_text()
+        self.run_cli("--config-only", "--yes")
+        self.assertEqual(self.config.read_text(), before)
 
 
 def load_cli():
@@ -204,6 +264,34 @@ class LauncherInstall(unittest.TestCase):
         target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
         self.assertTrue(os.access(target, os.X_OK))
         self.assertEqual(target.read_bytes(), (REPO / "bin" / "qctx").read_bytes())
+
+    def bin_dir(self) -> Path:
+        d = self.home / ".local" / "bin"
+        d.mkdir(parents=True, exist_ok=True)
+
+        return d
+
+    def test_it_replaces_a_symlink_into_the_source_tree(self):
+        """The DOCUMENTED development install is exactly this symlink, and copying onto
+        it raised `shutil.SameFileError` — uncaught, so the wizard died on the one
+        machine shape the README tells people to create."""
+        link = self.bin_dir() / "qctx"
+        link.symlink_to(REPO / "bin" / "qctx")
+        target = self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
+        self.assertFalse(target.is_symlink(), "the symlink survived the install")
+        self.assertEqual(target.read_bytes(), (REPO / "bin" / "qctx").read_bytes())
+
+    def test_it_never_writes_through_a_symlink_into_another_checkout(self):
+        """Worse than the crash: pointing at a DIFFERENT checkout, the copy went
+        through the link and silently rewrote that checkout's `bin/qctx`."""
+        other = Path(self.tmp.name) / "other-checkout" / "bin"
+        other.mkdir(parents=True)
+        stand_in = other / "qctx"
+        stand_in.write_text("#!/usr/bin/env bash\necho the other checkout\n")
+        (self.bin_dir() / "qctx").symlink_to(stand_in)
+        self.qctx.install_launcher(REPO, {"HOME": str(self.home)})
+        self.assertEqual(stand_in.read_text(),
+                         "#!/usr/bin/env bash\necho the other checkout\n")
 
 
 class ClosingBehaviour(unittest.TestCase):

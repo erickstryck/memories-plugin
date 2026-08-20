@@ -337,6 +337,11 @@ def install_launcher(root: Path, env: dict) -> Path:
     target_dir = core.install.target_dir(env)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / core.install.LAUNCHER_NAME
+    # UNLINK FIRST, always. The documented development install makes this path a symlink
+    # into a checkout: copying onto it raises `SameFileError` when the link points at
+    # THIS tree, and silently rewrites somebody else's `bin/qctx` when it points at
+    # another one. Removing the name first turns both into a plain, correct copy.
+    target.unlink(missing_ok=True)
     shutil.copyfile(root / "bin" / core.install.LAUNCHER_NAME, target)
     target.chmod(0o755)
 
@@ -380,7 +385,7 @@ def _host_install_group(args, root: Path) -> dict:
         print(f"\n  {host} is on this machine and the plugin is not installed there:")
         for command in HOST_INSTALL_COMMANDS[host]:
             print(f"      {command}")
-        if args.yes or input("  run these? [y/N]: ").strip().lower() == "y":
+        if args.yes or _ask("  run these? [y/N]: ").strip().lower() == "y":
             for command in HOST_INSTALL_COMMANDS[host]:
                 subprocess.run(command, shell=True, check=False)
             present_now[host] = True
@@ -405,7 +410,7 @@ def _host_cutover_group(args, root: Path, present_now: dict) -> None:
         print(f"\n{host} — cutover plan:\n")
         plan = _host_dry_run(host, script, skip_var, root)
         print(plan["text"].rstrip())
-        if args.yes or input(f"\n  apply the {host} cutover? [y/N]: ").strip().lower() == "y":
+        if args.yes or _ask(f"\n  apply the {host} cutover? [y/N]: ").strip().lower() == "y":
             done = subprocess.run(["bash", str(root / script), "--apply"],
                                   capture_output=True, text=True,
                                   env=dict(os.environ), timeout=900)
@@ -421,6 +426,22 @@ def _interactive(args) -> bool:
     return bool(sys.stdin.isatty() or os.environ.get("QCTX_INSTALL_FORCE_TTY"))
 
 
+def _ask(prompt: str) -> str:
+    """`input()`, with end-of-input read as Enter.
+
+    A closed stdin is not an error in this wizard, it is the answer "keep what is there".
+    Without this, the run died with an uncaught `EOFError` the moment stdin ran out —
+    and on the full path the launcher had already been copied into `~/.local/bin`, so
+    the wizard failed half-done, which is the one outcome it exists to avoid.
+    """
+    try:
+        return input(prompt)
+    except EOFError:
+        print()
+
+        return ""
+
+
 def _read_secret(prompt: str) -> str:
     """Echo off when there is a terminal, plain read when there is not.
 
@@ -431,14 +452,28 @@ def _read_secret(prompt: str) -> str:
     if sys.stdin.isatty():
         import getpass
 
-        return getpass.getpass(prompt)
+        try:
+            return getpass.getpass(prompt)
+        except EOFError:
+            return ""
 
-    return input(prompt)
+    return _ask(prompt)
 
 
-def _ask_config(cfg) -> None:
-    """The two passes. Blockers first, then everything else with Enter keeping."""
+def _ask_config(cfg, interactive: bool = True) -> None:
+    """The two passes. Blockers first, then everything else with Enter keeping.
+
+    With no terminal there is nobody to ask, so every value is kept. That is what `--yes`
+    means here: the flag answers yes to the groups that ACT, and a configuration pass
+    with no answers has nothing to act on. Writing the defaults over a working config
+    because nobody was there to object would be worse than the crash this replaced.
+    """
     from core import config as _config
+
+    if not interactive:
+        print("\n  ..    no terminal to ask at — every configuration value is kept")
+
+        return
 
     patch, secrets = {}, {}
     print("\n--- required (Enter keeps the current value) ---")
@@ -450,13 +485,13 @@ def _ask_config(cfg) -> None:
             if entry:
                 secrets[_config.ENV_ALIASES[field][0]] = entry
             continue
-        entry = input(f"{field} [{current or 'MISSING'}]: ").strip()
+        entry = _ask(f"{field} [{current or 'MISSING'}]: ").strip()
         if entry:
             patch[field] = entry
 
     print("\n--- everything else (Enter keeps) ---")
     for field in core.install.OPTIONAL_FIELDS:
-        entry = input(f"{field} [{getattr(cfg, field)}]: ").strip()
+        entry = _ask(f"{field} [{getattr(cfg, field)}]: ").strip()
         if entry:
             patch[field] = int(entry) if field == "context_window" else entry
 
@@ -476,7 +511,11 @@ def _store_secrets(secrets: dict) -> None:
     """
     home = Path(os.path.expanduser("~"))
     written_anywhere = False
-    hermes_env = Path(os.environ.get("HERMES_HOME", home / ".hermes")) / ".env"
+    # `or`, not a default argument: `HERMES_HOME=""` makes `Path("")` — which is
+    # `Path(".")`, whose `is_dir()` is True — so the empty value used to write a
+    # plaintext key into whatever directory the wizard was run from. `hermes_install_path`
+    # already spelled it this way.
+    hermes_env = Path(os.environ.get("HERMES_HOME") or home / ".hermes") / ".env"
     if hermes_env.parent.is_dir():
         core.install.write_env_file(hermes_env, secrets)
         for name, value in secrets.items():
@@ -532,7 +571,7 @@ def cmd_install(args, cfg):
         return
 
     if args.config_only:
-        _ask_config(cfg)
+        _ask_config(cfg, _interactive(args))
 
         return
 
@@ -545,7 +584,7 @@ def cmd_install(args, cfg):
         print('        export PATH="$HOME/.local/bin:$PATH"')
 
     # 3. config — the two passes.
-    _ask_config(cfg)
+    _ask_config(cfg, _interactive(args))
 
     # 4. hosts — but only if the archive itself answers. Installing into a host on top
     # of a Qdrant that does not answer produces a host wired to nothing.
