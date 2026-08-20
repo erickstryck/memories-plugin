@@ -106,6 +106,24 @@ def _check_rerank(cfg: Config) -> Check:
     return Check("Re-rank", True, detail)
 
 
+def _check_context_window(cfg: Config) -> Check:
+    """Not declared is not an error — it is a silence with a cost, so it is a WARNING.
+
+    The big-file guard resolves the window from the model name when this is 0, and a model
+    outside the table resolves to 0 too — which allows every read. Whoever runs a 1M
+    variant is right not to declare it; whoever runs a 200k model, or any model the table
+    does not know, has a guard that is installed and inert.
+    """
+    if cfg.context_window:
+        return Check("Context window", True, f"{cfg.context_window} declared")
+
+    return Check("Context window", False,
+                 "not declared — resolved per model, and a model outside the table "
+                 "resolves to 0, which allows every read",
+                 f"{COMMAND_PREFIX} config set context-window <n> — only if your model is "
+                 f"not a 1M variant", warning=True)
+
+
 def _check_collections(cfg: Config, q) -> list[Check]:
     checks = []
     # ALL FIVE, and the count is the point. `Config._require_distinct` enumerates five; this
@@ -192,7 +210,7 @@ def diagnose(cfg: Config) -> dict:
     """Runs every check and returns the full picture."""
     check_q, q = _check_qdrant(cfg)
     check_emb, dim = _check_embed(cfg)
-    checks = [check_q, check_emb, _check_rerank(cfg)]
+    checks = [check_q, check_emb, _check_rerank(cfg), _check_context_window(cfg)]
     checks += _check_collections(cfg, q)
 
     blockers = [c for c in checks if not c.ok and not c.warning]
