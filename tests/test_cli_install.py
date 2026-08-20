@@ -4,9 +4,11 @@
 and write NOTHING. A wizard that repairs while you are looking cannot be used to find out
 what state a machine is in.
 """
+import http.server
 import json
 import os
 import subprocess
+import threading
 import sys
 import unittest
 from pathlib import Path
@@ -244,6 +246,93 @@ class YesWithNoTerminal(unittest.TestCase):
         before = self.config.read_text()
         self.run_cli("--config-only", "--yes")
         self.assertEqual(self.config.read_text(), before)
+
+
+class StubEmbeddings(http.server.BaseHTTPRequestHandler):
+    """An OpenAI-shaped /embeddings that answers in DIM dimensions and nothing else.
+
+    `vector_size` is the one field the wizard must not ask for — it is written from what
+    the endpoint answered. Proving it is written therefore needs an endpoint, and a
+    loopback stub is the pattern this suite already uses for the big-file hooks.
+    """
+
+    DIM = 7
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = json.dumps({"data": [{"index": 0,
+                                     "embedding": [0.1] * self.DIM}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+class EveryFieldIsSet(unittest.TestCase):
+    """The proof the design demanded, done properly.
+
+    It used to be a tuple compared against `config.DEFAULTS`. That is a declaration, not
+    a proof: `vector_size` sat in `DETECTED_FIELDS` and nothing in the wizard ever wrote
+    it, so 15 fields were claimed and 14 were walked. This drives the wizard end to end
+    and reads back where each of the 15 actually landed.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.hermes = Path(self.tmp.name) / "hermes"
+        self.hermes.mkdir()
+        self.config = Path(self.tmp.name) / "config.json"
+        self.config.write_text("{}")
+        self.addCleanup(self.tmp.cleanup)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubEmbeddings)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def value_for(self, field: str) -> str:
+        if field == "embed_url":
+            return f"{self.base}/embeddings"
+        if field == "context_window":
+            return "200000"
+        if field.endswith("_url"):
+            return f"https://{field.replace('_', '-')}.example"
+        if field.endswith("_collection"):
+            return f"coll-{field}"
+
+        return f"value-{field}"
+
+    def test_the_wizard_sets_all_fifteen(self):
+        from core import config, install
+        asked = install.REQUIRED_FIELDS + install.OPTIONAL_FIELDS
+        answers = "\n".join(self.value_for(f) for f in asked) + "\n"
+        done = subprocess.run(
+            [sys.executable, str(CLI), "install", "--config-only"],
+            input=answers, capture_output=True, text=True, timeout=180,
+            env=hermetic_env(self.home, QCTX_CONFIG=self.config,
+                             HERMES_HOME=self.hermes, QCTX_INSTALL_FORCE_TTY="1"))
+        self.assertNotIn("Traceback", done.stderr)
+        written = json.loads(self.config.read_text())
+        credentials = (self.hermes / ".env").read_text()
+        for field in config.DEFAULTS:
+            with self.subTest(field=field):
+                if field in config.SECRET_FIELDS:
+                    canonical = config.ENV_ALIASES[field][0]
+                    self.assertIn(f"{canonical}={self.value_for(field)}", credentials)
+                    self.assertNotIn(field, self.config.read_text())
+                elif field in install.DETECTED_FIELDS:
+                    self.assertEqual(written[field], StubEmbeddings.DIM,
+                                     "the wizard never wrote what the endpoint answered")
+                else:
+                    self.assertEqual(str(written[field]), self.value_for(field))
 
 
 def load_cli():

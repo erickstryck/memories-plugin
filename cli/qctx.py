@@ -526,6 +526,34 @@ def _ask_config(cfg, interactive: bool = True) -> None:
         _store_secrets(secrets)
 
 
+def _detect_vector_size() -> None:
+    """The fifteenth field, and the only one the wizard must NOT ask for.
+
+    A hand-typed dimension is a number that disagrees with the server the day the model
+    changes, and the compatibility guard then blames the collection. `cmd_setup` has
+    always written it from what the endpoint answered; the wizard declared the field in
+    `DETECTED_FIELDS` and never wrote it, so the completeness proof the design demanded
+    was green over a field nothing could set.
+
+    An unreachable endpoint is not an error here. The run already reports it as a
+    blocker, and raising at this point would throw away the fourteen answers just typed.
+    """
+    cfg = core.load()
+    try:
+        detected = core.build_embedder(cfg).detect_dimension()
+    except core.CoreError as exc:
+        print(f"  ..    vector_size not detected: {exc}")
+
+        return
+    if detected == cfg.vector_size:
+        print(f"  ok    vector_size = {detected}, confirmed by the endpoint")
+
+        return
+    core.save({"vector_size": detected})
+    print(f"  ok    vector_size = {detected}, detected from the endpoint "
+          f"(the config said {cfg.vector_size})")
+
+
 def _store_secrets(secrets: dict) -> None:
     """The keys go to files that exist FOR credentials, and to no other file.
 
@@ -614,6 +642,7 @@ def cmd_install(args, cfg):
 
     if args.config_only:
         _ask_config(cfg, _interactive(args))
+        _detect_vector_size()
 
         return
 
@@ -625,8 +654,9 @@ def cmd_install(args, cfg):
         print(f"  ..    {core.install.target_dir(dict(os.environ))} is not on PATH — add:")
         print('        export PATH="$HOME/.local/bin:$PATH"')
 
-    # 3. config — the two passes.
+    # 3. config — the two passes, then the one field that is answered by the endpoint.
     _ask_config(cfg, _interactive(args))
+    _detect_vector_size()
 
     # 4. hosts — but only if the archive itself answers. Installing into a host on top
     # of a Qdrant that does not answer produces a host wired to nothing.

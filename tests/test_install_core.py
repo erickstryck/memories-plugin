@@ -80,6 +80,13 @@ class FieldCoverage(unittest.TestCase):
     with no place to be set. `_check_collections` learned this the expensive way: it
     enumerated three of five roles and reported `ready` over a configuration where the
     repository archive sat on top of the memory one.
+
+    HALF the proof, and it says so. What follows compares three tuples against
+    `config.DEFAULTS`, which catches a new field with nowhere to go — but a tuple is a
+    declaration, and `vector_size` sat in `DETECTED_FIELDS` while nothing in the wizard
+    wrote it. The other half is
+    `tests.test_cli_install.EveryFieldIsSet.test_the_wizard_sets_all_fifteen`, which
+    drives the wizard end to end and reads back where each of the fifteen landed.
     """
 
     def test_every_field_is_reachable_exactly_once(self):
