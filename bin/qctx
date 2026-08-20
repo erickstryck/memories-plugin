@@ -23,7 +23,7 @@ own_tree() {
       *)  target="$(cd -P "$(dirname "$target")" && pwd)/$dest" ;;
     esac
   done
-  cd -P "$(dirname "$target")/.." && pwd
+  cd -P "$(dirname "$target")/.." 2>/dev/null && pwd || return 1
 }
 
 # The claude-code install path is not guessable: the cache directory is named after the
