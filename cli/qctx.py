@@ -729,9 +729,23 @@ def _store_secrets(secrets: dict) -> None:
     Never echoes a value: this output gets pasted into issues and chats. And on a machine
     with no hermes there is no plugin-owned credential file at all — saying "done" there
     would be the same lie the README told.
+
+    THE PROCESS ENVIRONMENT IS SET TOO, in addition to every file write and never instead
+    of one. Everything after this point re-reads configuration through `core.load()`,
+    which sees the config file plus this process's environment — and a key is in neither,
+    because a secret never enters the config file. So a key typed thirty seconds ago was
+    invisible to the `vector_size` probe and to the `diagnose` that decides whether the
+    host steps may run: on a store with authentication turned on the wizard answered 401
+    to itself and stopped, on exactly the fresh-machine flow it exists for.
+
+    It changes nothing about durability, and the "PENDING" verdict below still belongs to
+    the files alone: an environment variable is gone with this process, which is the whole
+    reason a credential file is asked for.
     """
     home = Path(os.path.expanduser("~"))
     written_anywhere = False
+    for name, value in secrets.items():
+        os.environ[name] = value
     # `or`, not a default argument: `HERMES_HOME=""` makes `Path("")` — which is
     # `Path(".")`, whose `is_dir()` is True — so the empty value used to write a
     # plaintext key into whatever directory the wizard was run from. `hermes_install_path`

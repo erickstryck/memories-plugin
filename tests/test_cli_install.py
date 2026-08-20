@@ -300,6 +300,95 @@ class StubEmbeddings(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class AuthenticatedStubEmbeddings(StubEmbeddings):
+    """The same endpoint, but it REFUSES a request that carries no key.
+
+    `StubEmbeddings` answers anybody, which is why 1265 tests could not see that a key
+    typed into the wizard never reached the process that dials the endpoint two lines
+    later. A real endpoint with authentication turned on answers 401, and that is the
+    only shape in which the defect is visible from outside.
+    """
+
+    TOKEN = "typed-just-now"
+
+    def do_POST(self):
+        if self.headers.get("Authorization") != f"Bearer {self.TOKEN}":
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = b'{"error":"no auth"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+            return
+        super().do_POST()
+
+
+class AKeyIsUsableInTheSameRun(unittest.TestCase):
+    """A key the user just typed has to be usable by the rest of THIS run.
+
+    `_store_secrets` wrote the key to a credential file and stopped there. Everything
+    afterwards re-reads configuration through `core.load()`, which sees the config file
+    plus the PROCESS environment — and the key is in neither, because a secret never
+    enters the config file and nothing had put it in the environment. So `vector_size`
+    detection, and then `diagnose`, ran unauthenticated on exactly the fresh-machine
+    flow the wizard exists for.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        self.hermes = Path(self.tmp.name) / "hermes"
+        self.hermes.mkdir()
+        self.config = Path(self.tmp.name) / "config.json"
+        self.config.write_text("{}")
+        self.addCleanup(self.tmp.cleanup)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                                 AuthenticatedStubEmbeddings)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_the_endpoint_that_needs_the_key_is_reached_with_it(self):
+        answers = "\n".join([
+            "https://q.example",                          # qdrant_url
+            f"{self.base}/v1",                            # api_base_url
+            "qkey",                                       # qdrant_api_key
+            AuthenticatedStubEmbeddings.TOKEN,            # api_key
+            "mem",                                        # memory_collection
+            f"{self.base}/embeddings",                    # embed_url
+        ] + [""] * 8) + "\n"
+        done = subprocess.run(
+            [sys.executable, str(CLI), "install", "--config-only"],
+            input=answers, capture_output=True, text=True, timeout=180,
+            env=hermetic_env(self.home, QCTX_CONFIG=self.config,
+                             HERMES_HOME=self.hermes, QCTX_INSTALL_FORCE_TTY="1"))
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertNotIn("401", done.stdout + done.stderr)
+        written = json.loads(self.config.read_text())
+        self.assertEqual(written.get("vector_size"), StubEmbeddings.DIM,
+                         "the key never reached the process that dialled the endpoint")
+
+    def test_the_value_is_still_kept_out_of_the_config_file_and_the_output(self):
+        """Putting the key in the environment is not a licence to persist or print it."""
+        answers = "\n".join([
+            "https://q.example", f"{self.base}/v1", "qkey",
+            AuthenticatedStubEmbeddings.TOKEN, "mem", f"{self.base}/embeddings",
+        ] + [""] * 8) + "\n"
+        done = subprocess.run(
+            [sys.executable, str(CLI), "install", "--config-only"],
+            input=answers, capture_output=True, text=True, timeout=180,
+            env=hermetic_env(self.home, QCTX_CONFIG=self.config,
+                             HERMES_HOME=self.hermes, QCTX_INSTALL_FORCE_TTY="1"))
+        self.assertNotIn(AuthenticatedStubEmbeddings.TOKEN, self.config.read_text())
+        self.assertNotIn(AuthenticatedStubEmbeddings.TOKEN, done.stdout + done.stderr)
+
+
 class EveryFieldIsSet(unittest.TestCase):
     """The proof the design demanded, done properly.
 
