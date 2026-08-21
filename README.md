@@ -108,6 +108,8 @@ months ago:
 
 ```bash
 qctx install --check      # reports; writes nothing
+qctx install --yes        # answers yes to every group — the script case
+qctx install --config-only  # the configuration pass only; touches no host
 ```
 
 `--check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the
@@ -642,6 +644,7 @@ running behind you.
 
 | command | what it does |
 |---|---|
+| `install` | the wizard: diagnose, then offer to fix, one group at a time; `--check` reports and never writes |
 | `setup` | probe everything and print the exact fix for each gap |
 | `config show` | the resolved configuration |
 | `config set` | write one setting to the file |
@@ -710,14 +713,29 @@ core/       the portable core — no reference to a host or an agent
   chunk.py      slicing on structural boundaries
   query.py      preparing the question (angles, trivial-prompt filter)
   breaker.py    circuit breaker for a saturated GPU
+  bigfile.py    the read guard's decision, pure — the budget and the cost, nothing else
   memory.py     memory CRUD + two-stage recall
   docs.py       document index, TTL, staleness
+  inventory.py  which documents are already in an archive
+  repos.py      repository archive: code chunks grouped by repo, plus its registry
+  scan.py       which files of a repository go into the archive
+  bindings.py   which repository this working copy is — declared, never derived
+  indexer.py    what the daemon runs, kept apart so the daemon never knows Qdrant
+  daemon.py     the background indexer: runs the queue, watches, ends with its hosts
+  jobs.py       the queue, on disk — a file a command writes and the daemon reads
+  lease.py      who is still using the daemon — one note per host, pid and moment
+  install.py    the wizard's checks, host-neutral, the same contract as setup.py
   setup.py      diagnostics and suggestions
+  knobs.py      the tuning knobs from the environment, read at import
+  names.py      turning a name into a filename — one owner of the expression
+  windows.py    the ceiling per model name: the largest window any variant can have
+  windowprobe.py  asking the serving endpoint how big its window is
+  windowcache.py  the window an endpoint reported, remembered between processes
   blocks.py     the injected block, in all four of its states — one renderer, both hosts
   session_state.py  what was already injected, and when the checkpoint is due
   prompts.py    the instructions and the checkpoint procedure, shared by both hosts
 cli/        the command-line interface over the core
-hooks/      the claude-code adapter: recall on every prompt, checkpoint every N
+hooks/      the claude-code adapter: recall.py, checkpoint.py, bigfile.py (the read guard), lease.py
 hosts/
   hermes/       the hermes-agent adapter: the provider object and its 22 tools
 skills/     memory, doc-index, repo-index
