@@ -82,6 +82,16 @@ python3 -m unittest discover -s tests
 
 ## Installation
 
+A fresh machine, in order, is three pieces:
+
+1. **The host installs the plugin.** The only step the wizard cannot do, because the
+   wizard lives inside the plugin. hermes: three lines at [Install on hermes-agent](#install-on-hermes-agent);
+   claude-code: two at [Install on Claude Code](#install-on-claude-code).
+2. **The wizard** — [The one command](#the-one-command). Configuration, credentials,
+   the host cutover, the re-check.
+3. **One manual step per host**, printed by the wizard at the end: hermes approves the
+   read guard once at a TTY; claude-code opens a new terminal.
+
 ### The one command
 
 On a machine where the plugin is already installed by its host, or on a fresh clone:
@@ -194,12 +204,19 @@ the context cost and adds no information.
 
 ### Install on hermes-agent
 
-One command, from git — plus `--force`, and the reason matters:
+A fresh hermes machine, three lines, in order:
 
 ```bash
 hermes plugins install erickstryck/memories-plugin --enable --force
 hermes config set memory.provider memories        # tell hermes to USE it
+bash ~/.hermes/plugins/memories/scripts/install.sh # the wizard: everything else
 ```
+
+The wizard takes the two keys (echo off; to `~/.hermes/.env`, never to a config
+file), writes the addresses to the config, re-checks everything including the
+shell-less path, and runs this host's cutover after your `y`. It ends with the one
+step it cannot do for you: approve the read guard once at a TTY. What each of the
+three lines costs, below.
 
 **Why `--force` is required, and what you are agreeing to.** hermes scans a cloned plugin before
 installing it, and this tree scores `caution`: it ships a thousand tests that shell out to `git`
