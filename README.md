@@ -85,8 +85,8 @@ python3 -m unittest discover -s tests
 A fresh machine, in order, is three pieces:
 
 1. **The host installs the plugin.** The only step the wizard cannot do, because the
-   wizard lives inside the plugin. hermes: three lines at [Install on hermes-agent](#install-on-hermes-agent);
-   claude-code: two at [Install on Claude Code](#install-on-claude-code).
+   wizard lives inside the plugin. hermes: [Install on hermes-agent](#install-on-hermes-agent);
+   claude-code: [Install on Claude Code](#install-on-claude-code).
 2. **The wizard** — [The one command](#the-one-command). Configuration, credentials,
    the host cutover, the re-check.
 3. **One manual step per host**, printed by the wizard at the end: hermes approves the
@@ -154,13 +154,26 @@ dependency would turn an environment failure into a silent loss of functionality
 
 ### Install on Claude Code
 
-The repository is at once a plugin and a single-plugin marketplace, so two commands do it —
-**from git**, with nothing cloned by hand:
+A fresh machine, in order:
 
 ```bash
 claude plugin marketplace add erickstryck/memories-plugin
 claude plugin install memories-plugin@memories-plugin
+bash "$(ls -dt ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh | head -1)"
 ```
+
+The last line is the wizard — and on this host its path is the awkward one, because
+claude copies the plugin into a cache directory named after the commit and the old
+directories stay behind (the full reason is under "The one command"). It does
+everything the hermes one does — keys, configuration, re-check — and offers to run
+`scripts/cutover.sh --apply`, which on this host also removes hooks you registered
+by hand in `settings.json` and any legacy qdrant-memory MCP server, with a dated
+backup of both files. It ends with the one step it cannot do for you: **open a new
+terminal** — the harness reads `settings.json` at start-up.
+
+The repository is at once a plugin and a single-plugin marketplace, so two commands
+do it — **from git**, with nothing cloned by hand. The wizard runs exactly these two
+when it finds a `claude` binary and no plugin yet.
 
 For **development**, add it from a path instead, and edits take effect with no reinstall:
 
