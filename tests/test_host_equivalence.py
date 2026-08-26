@@ -1887,7 +1887,7 @@ class TestEachHostAppliesItsOwnReadCeiling(unittest.TestCase):
                 self.assertFalse(h.block, "hermes loads a fraction of it and must not block")
 
 
-README = REPO / "README.md"
+ARCH_DOC = REPO / "docs" / "architecture.md"
 SKILL = REPO / "skills" / "doc-index" / "SKILL.md"
 HOOKS_JSON = REPO / "hooks" / "hooks.json"
 CUTOVER = REPO / "scripts" / "hermes_cutover.sh"
@@ -1939,12 +1939,17 @@ class TestBothHostsActuallyREGISTERTheGuard(unittest.TestCase):
 
 #: Named rather than guessed, for the reason `DIVERGENCE_HEADING` is: a renamed heading has
 #: to fail loudly here, not turn every check below into an `assertIn` over "".
-GUARD_HEADING = "### The big-file read guard"
+GUARD_HEADING = "## The big-file read guard"
 
 
 def guard_section() -> str:
-    """The README's guard section, heading to the next section of the level above."""
-    text = README.read_text()
+    """The architecture doc's guard section, heading to the next section of the level above.
+
+    The section left the README on 2026-08-26, when the README became the install path and
+    the deep end moved to docs/architecture.md; this test follows it, still deriving every
+    number from the code.
+    """
+    text = ARCH_DOC.read_text()
     start = text.find(GUARD_HEADING)
     if start < 0:
         return ""
@@ -2034,7 +2039,9 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
         the one with a test on it."""
         section = guard_section()
         self.assertIn(SPEC.name, section)
-        self.assertNotIn(DIVERGENCE_HEADING, README.read_text())
+        self.assertNotIn(DIVERGENCE_HEADING, (REPO / "README.md").read_text()
+                              + ARCH_DOC.read_text()
+                              + (REPO / "docs" / "usage.md").read_text())
 
     def test_it_says_how_to_declare_the_window_the_hosts_cannot_read(self):
         """The accepted cost of the ceiling table is a guard that sleeps until this is set.

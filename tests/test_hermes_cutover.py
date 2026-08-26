@@ -135,10 +135,11 @@ class CutoverCase(unittest.TestCase):
 
 
 class TestTheDocumentedAliasesMatchTheCode(unittest.TestCase):
-    """The README's table and the script's credential check both enumerate `ENV_ALIASES`, and
-    both were missing `QDRANT_API_KEY` — the third name the core accepts for the Qdrant key.
+    """The docs' table and the script's credential check both enumerate `ENV_ALIASES`, and
+    both were missing `QDRANT_API_KEY`, the third name the core accepts for the Qdrant key.
     A list of accepted names is worth exactly what it is complete to: the core resolved that
-    key while the script FAILED and the README said "both spellings".
+    key while the script FAILED and the docs said "both spellings". The table lived in the
+    README until the 2026-08-26 split put the configuration reference in docs/usage.md.
     """
 
     def aliases(self):
@@ -147,11 +148,12 @@ class TestTheDocumentedAliasesMatchTheCode(unittest.TestCase):
         return ENV_ALIASES
 
     def test_the_readme_table_lists_every_alias_the_core_accepts(self):
-        rows = dict(re.findall(r"^\| `([a-z_]+)` \| (.+?) \|$", (REPO / "README.md").read_text(),
+        rows = dict(re.findall(r"^\| `([a-z_]+)` \| (.+?) \|$",
+                               (REPO / "docs" / "usage.md").read_text(),
                                re.M))
         for field, aliases in self.aliases().items():
             with self.subTest(field=field):
-                self.assertIn(field, rows, "the config field is not in the README table")
+                self.assertIn(field, rows, "the config field is not in the docs table")
                 self.assertEqual(tuple(re.findall(r"`([A-Z_]+)`", rows[field])), aliases)
 
     def test_the_script_checks_every_alias_of_the_two_secrets(self):
