@@ -234,14 +234,15 @@ class TestTheREADMEStatesWhatFAILSSILENTLY(unittest.TestCase):
     keys, a config file left empty while the shell has the values, and a read guard that
     `plugins install` cannot register. Each was measured on a working installation, and
     each looked like "the archive is just empty". What is pinned here is that the docs
-    NAME them; the wording is free. The content moved across README.md, docs/usage.md
-    and docs/architecture.md on 2026-08-26, and this test follows it: a failure that
-    loses its name anywhere in the three files goes back to being silent.
+    NAME them; the wording is free. The content moved across README.md, docs/usage.md,
+    docs/install.md and docs/architecture.md on 2026-08-26, and this test follows it: a
+    failure that loses its name anywhere in the four files goes back to being silent.
     """
 
     def docs(self) -> str:
         return ((REPO / "README.md").read_text()
                 + (REPO / "docs" / "usage.md").read_text()
+                + (REPO / "docs" / "install.md").read_text()
                 + (REPO / "docs" / "architecture.md").read_text())
 
     def test_it_says_the_keys_need_a_second_home_for_a_shell_less_hermes(self):

@@ -1,7 +1,8 @@
 # Usage and configuration
 
 Command reference for `qctx`, the full configuration picture, and the diagnostics
-that tell you what is still missing. The [README](../README.md) covers installation;
+that tell you what is still missing. The [README](../README.md) covers installation
+([install.md](install.md) covers what each installation step does);
 [architecture](architecture.md) covers why things are the way they are.
 
 ## Every command, at a glance

@@ -2039,9 +2039,11 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
         the one with a test on it."""
         section = guard_section()
         self.assertIn(SPEC.name, section)
-        self.assertNotIn(DIVERGENCE_HEADING, (REPO / "README.md").read_text()
-                              + ARCH_DOC.read_text()
-                              + (REPO / "docs" / "usage.md").read_text())
+        all_docs = (REPO / "README.md").read_text() \
+            + ARCH_DOC.read_text() \
+            + (REPO / "docs" / "usage.md").read_text() \
+            + (REPO / "docs" / "install.md").read_text()
+        self.assertNotIn(DIVERGENCE_HEADING, all_docs)
 
     def test_it_says_how_to_declare_the_window_the_hosts_cannot_read(self):
         """The accepted cost of the ceiling table is a guard that sleeps until this is set.

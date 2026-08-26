@@ -28,7 +28,9 @@ The two local models are the plugin's defaults:
 | rerank | `bge-reranker-v2-m3` | [gpustack/bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |
 
 The local stack runs on CPU alone, on x86 and on ARM: a MacBook or a laptop can be the
-whole backend. [Local models, step by step](#local-models).
+whole backend. The two model servers run best in the [official llama.cpp
+containers](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md);
+[Local models, step by step](#local-models) is the full setup.
 
 ## Install, by OS
 
@@ -46,10 +48,13 @@ On Windows you run it under WSL or git-bash.
 **Linux**
 
 ```bash
-# 1. infrastructure, all local: Qdrant on :6333, llama.cpp on :8003 and :8004
+# 1. infrastructure, all local: Qdrant on :6333, the two llama.cpp containers on :8003 and :8004
+mkdir -p ~/llama-models
+curl -L -o ~/llama-models/bge-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
+curl -L -o ~/llama-models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
 docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant
-llama-server --hf-repo gpustack/bge-m3-GGUF --hf-file bge-m3-Q4_K_M.gguf --embedding --port 8003 &
-llama-server --hf-repo gpustack/bge-reranker-v2-m3-GGUF --hf-file bge-reranker-v2-m3-Q4_K_M.gguf --reranking -c 8192 -b 8192 -ub 8192 --port 8004 &
+docker run -d --name embed -v ~/llama-models:/models -p 8003:8080 ghcr.io/ggml-org/llama.cpp:server -m /models/bge-m3-Q4_K_M.gguf --port 8080 --host 0.0.0.0 --embedding
+docker run -d --name rerank -v ~/llama-models:/models -p 8004:8080 ghcr.io/ggml-org/llama.cpp:server -m /models/bge-reranker-v2-m3-Q4_K_M.gguf --port 8080 --host 0.0.0.0 --reranking -c 8192 -b 8192 -ub 8192
 
 # 2. the host: pick the agent you use
 hermes plugins install erickstryck/memories-plugin --enable --force && hermes config set memory.provider memories
@@ -63,29 +68,29 @@ bash "$(ls -dt ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts
 
 **macOS**
 
-Same three steps; the only extra line is installing llama.cpp once:
-
-```bash
-brew install llama.cpp
-```
-
-Then the infrastructure, host and wizard lines exactly as on Linux.
+Same three steps; the only difference is how the container runs. The official
+[llama.cpp docker doc](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md)
+covers Docker Desktop, and on M-series Macs the
+[GPU-accelerated container setup from the llama.cpp discussions](https://github.com/ggml-org/llama.cpp/discussions/12985)
+is the one to follow: same `docker run` lines as above, with the GPU flags that doc
+adds. Then the host and wizard lines exactly as on Linux.
 
 **Windows**
 
-```powershell
-# 1. infrastructure; one terminal per llama-server
-winget install llama.cpp      # once; open a new terminal after
-docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant
-llama-server --hf-repo gpustack/bge-m3-GGUF --hf-file bge-m3-Q4_K_M.gguf --embedding --port 8003
-llama-server --hf-repo gpustack/bge-reranker-v2-m3-GGUF --hf-file bge-reranker-v2-m3-Q4_K_M.gguf --reranking -c 8192 -b 8192 -ub 8192 --port 8004
-```
+Same containers as Linux (Docker Desktop or WSL2); the model downloads and the three
+`docker run` lines are identical. Two Windows specifics:
 
-Then the host lines, and the wizard in a terminal with `bash` (WSL or git-bash). The
-one Windows-specific gotcha: `~/.local/bin` is not on PATH by default. Either add it
-(Settings, system, environment variables) or call the wizard by its full path; the
-wizard copies `qctx` there, so once the directory is on PATH every later step is just
-`qctx ...`.
+- the model download: PowerShell's `Invoke-WebRequest` instead of `curl`, or plain
+  `wget` from WSL:
+  ```powershell
+  Invoke-WebRequest https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf -OutFile $env:USERPROFILE\llama-models\bge-m3-Q4_K_M.gguf
+  ```
+- `~/.local/bin` is not on PATH by default. Either add it
+  (Settings, system, environment variables) or call the wizard by its full path; the
+  wizard copies `qctx` there, so once the directory is on PATH every later step is just
+  `qctx ...`.
+
+Then the host lines, and the wizard in a terminal with `bash` (WSL or git-bash).
 
 ### The wizard
 
@@ -125,19 +130,17 @@ qctx install --config-only  # the configuration pass only; touches no host
 The fastest local setup for the three endpoints, step by step. If your models are
 already in the cloud, skip to [the cloud paragraph](#or-use-models-in-the-cloud).
 
-### 1. Install llama.cpp
+### 1. Run llama.cpp
 
-| OS | command |
-|---|---|
-| macOS or Linux | `brew install llama.cpp` |
-| Windows | `winget install llama.cpp` |
-| any, via conda | `conda install -c conda-forge llama.cpp` |
-
-Each lands a `llama-server` binary on PATH. Prefer a prebuilt from the
-[releases page](https://github.com/ggml-org/llama.cpp/releases) if you want a pinned
-version: `llama-b*-bin-macos-arm64.tar.gz` (and `-macos-x64`),
-`llama-b*-bin-ubuntu-x64.tar.gz` (and `-ubuntu-arm64`), or
-`llama-b*-bin-win-cpu-x64.zip` (and `-win-cpu-arm64`). Unpack and put the binary on PATH.
+The official way to run llama.cpp is its [Docker
+image](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md): a pinned
+binary with the toolchain inside, no build on the host, and the same command on
+every machine. For M-series Macs, the [GPU-accelerated container setup in the
+llama.cpp discussions](https://github.com/ggml-org/llama.cpp/discussions/12985) is
+the one to follow. Native builds (brew, winget, conda-forge, or a prebuilt from the
+[releases
+page](https://github.com/ggml-org/llama.cpp/releases)) work too, for a host without
+a container runtime; the `llama-server` binary in step 3 is the same either way.
 
 ### 2. Start Qdrant
 
@@ -152,19 +155,31 @@ A local Qdrant has no API key.
 
 ### 3. Serve the two models
 
-One model per `llama-server` process, so two processes on two ports. `--hf-repo` and
-`--hf-file` download the GGUF to a cache on the first run and reuse it after. The GGUFs
-carry their own pooling and an 8192-token context, so there is no `--pooling` flag to set.
+One model per `llama-server`, so two servers on two ports. In a container the
+image's entrypoint is already `llama-server`, the binary listens on `8080` inside
+it, and you map the container port to the host port:
 
 ```bash
+mkdir -p ~/llama-models
+curl -L -o ~/llama-models/bge-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
+curl -L -o ~/llama-models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
+
 # embedding, on :8003
-llama-server --hf-repo gpustack/bge-m3-GGUF --hf-file bge-m3-Q4_K_M.gguf \
-  --embedding --host 127.0.0.1 --port 8003
+docker run -d --name embed -v ~/llama-models:/models -p 8003:8080 \
+  ghcr.io/ggml-org/llama.cpp:server \
+  -m /models/bge-m3-Q4_K_M.gguf --port 8080 --host 0.0.0.0 --embedding
 
 # rerank, on :8004
-llama-server --hf-repo gpustack/bge-reranker-v2-m3-GGUF --hf-file bge-reranker-v2-m3-Q4_K_M.gguf \
-  --reranking -c 8192 -b 8192 -ub 8192 --host 127.0.0.1 --port 8004
+docker run -d --name rerank -v ~/llama-models:/models -p 8004:8080 \
+  ghcr.io/ggml-org/llama.cpp:server \
+  -m /models/bge-reranker-v2-m3-Q4_K_M.gguf --port 8080 --host 0.0.0.0 --reranking -c 8192 -b 8192 -ub 8192
 ```
+
+A native `llama-server` runs the same flags with `--hf-repo` and `--hf-file`
+instead of `-m` (it downloads the GGUF to a cache on first run and reuses it after),
+`--port 8003`/`8004` directly, and no `--host` (it binds localhost by default). The
+GGUFs carry their own pooling and an 8192-token context, so there is no `--pooling`
+flag to set either way.
 
 Three things here are not optional, and each fails in its own way if skipped:
 
@@ -291,6 +306,8 @@ python3 -m unittest discover -s tests
 
 - [docs/usage.md](docs/usage.md): the full command reference (memory, docs, repos, the
   background indexer, configuration and diagnostics), with an example session.
-- [docs/architecture.md](docs/architecture.md): how the two-stage search works, the two
-  hosts and their install gotchas, the big-file read guard, the manual-from-clone install,
-  the layout and the design decisions.
+- [docs/install.md](docs/install.md): what each install step does and what it costs:
+  the per-host installs with their measured gotchas, and the manual install from a
+  clone.
+- [docs/architecture.md](docs/architecture.md): how the two-stage search works, the
+  big-file read guard, the layout and the design decisions.

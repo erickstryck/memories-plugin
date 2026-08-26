@@ -7,10 +7,10 @@ own, it rots because nothing reads it, so this reads it.
 
 The 2026-08-26 split: README.md is the install path (what a machine needs, by OS, and
 the local-models guide), docs/usage.md is the command and configuration reference,
-docs/architecture.md is the deep end (the hosts, the read guard, the layout, the
-design). All three are read here with the same rules: every `qctx` command they cite
-must exist, every count they state must match the tree, and the local-stack sections
-must stay true.
+docs/install.md is what each install step does, and docs/architecture.md is the design
+(the hosts, the read guard, the layout, the decisions). All four are read here with the
+same rules: every `qctx` command they cite must exist, every count they state must
+match the tree, and the local-stack sections must stay true.
 
 Counts are written as DIGITS on purpose. A test that has to parse "three" would be a
 test nobody keeps working.
@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO))
 README = (REPO / "README.md").read_text()
 DOCS = {
     "usage": (REPO / "docs" / "usage.md").read_text(),
+    "install": (REPO / "docs" / "install.md").read_text(),
     "architecture": (REPO / "docs" / "architecture.md").read_text(),
 }
 ALL_DOCS = README + "\n" + "\n".join(DOCS.values())
@@ -155,18 +156,20 @@ class TheHeadlineInstallCommandRuns(unittest.TestCase):
 
 class TheLocalStackStaysTrue(unittest.TestCase):
     """`## What you need`, `## Install, by OS` and `## Local models` tell a reader on
-    THEIR machine how to stand up the three endpoints, with llama.cpp and the two
-    gpustack GGUFs or with cloud endpoints.
+    THEIR machine how to stand up the three endpoints, with the llama.cpp containers
+    and the two gpustack GGUFs or with cloud endpoints.
 
     What is pinned is the load-bearing surface, not the prose: the install section has
     a block per OS (the wizard is the same on every OS: bash plus python3, and a
     reader must not be left to wonder if it is a Linux thing), the two model
     repositories by name, the serving switch the rerank route exists without, the
-    batch flags the first real rerank fails on, and that every plain-http address is
-    localhost, because the one failure this must not repeat is pointing a stranger at
-    the author's machines. Cloud examples are https and are not addresses of anyone's
-    machine. The em-dash ban is pinned across all three files: a style rule a reader
-    will hold them to, so a single reintroduction is a regression, not a preference.
+    batch flags the first real rerank fails on, that the model servers run in the
+    OFFICIAL llama.cpp containers (the recommendation a native-binary rewrite quietly
+    deletes), and that every plain-http address is localhost, because the one failure
+    this must not repeat is pointing a stranger at the author's machines. Cloud
+    examples are https and are not addresses of anyone's machine. The em-dash ban is
+    pinned across all four files: a style rule a reader will hold them to, so a single
+    reintroduction is a regression, not a preference.
     """
 
     def section(self, header: str, text: str = README) -> str:
@@ -245,7 +248,7 @@ class TheLocalStackStaysTrue(unittest.TestCase):
         self.assertLess(wizard, first_os,
                         "the wizard's OS-neutrality is stated after the first OS block")
 
-    def test_no_spaced_em_dash_in_any_of_the_three_files(self):
+    def test_no_spaced_em_dash_in_any_of_the_docs(self):
         """A standing style rule, pinned because prose rots: the README had 98 of them
         until 2026-08-25, and the one a reader remembers is the one that comes back
         first."""
@@ -257,6 +260,18 @@ class TheLocalStackStaysTrue(unittest.TestCase):
                              "banned in this tree:\n"
                              + "\n".join(f"  {i}: {text.splitlines()[i-1]}"
                                         for i in offenders[:10]))
+
+    def test_the_llama_cpp_docs_are_the_official_ones(self):
+        """The container recommendation points at llama.cpp's own documentation.
+
+        A copy of docker.md's commands would go stale on every release; the two URLs
+        are the ones that stay true, and the image name is the stable part of that doc.
+        """
+        for url in ("https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md",
+                    "https://github.com/ggml-org/llama.cpp/discussions/12985"):
+            self.assertIn(url, self.section("## Local models"))
+        self.assertIn("ghcr.io/ggml-org/llama.cpp:server",
+                      self.section("## Local models"))
 
 
 if __name__ == "__main__":
