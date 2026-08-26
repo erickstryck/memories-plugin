@@ -136,5 +136,82 @@ class TheHeadlineInstallCommandRuns(unittest.TestCase):
                          "the command handed extra cache paths to install.sh")
 
 
+class TheLocalStackSectionStaysTrue(unittest.TestCase):
+    """`## Running Qdrant and the models` and `### Quick install` tell a reader on THEIR
+    machine how to stand up the three endpoints with llama.cpp and the two gpustack GGUFs.
+
+    What is pinned is the load-bearing surface, not the prose: the two model repositories
+    by name, the serving switch the rerank route exists without, the batch flags the first
+    real rerank fails on, and that every address in the section is localhost, because the
+    one failure this section must not repeat is pointing a stranger at the author's
+    machines. The em-dash ban is pinned file-wide: a style rule a reader will hold this
+    file to, so a single reintroduction is a regression, not a preference.
+    """
+
+    def section(self, header: str) -> str:
+        """The body of a heading, up to the next heading of the SAME or HIGHER level.
+
+        A `## ` section runs to the next `## `, a `### ` section runs to the next `### `
+        or `## `. Two traps the first version fell into: stopping only at `## ` made a
+        `###` section swallow every later `###` sibling, and reading `#`-led lines without
+        tracking code fences made a bash comment inside a block (like `# embedding, on
+        :8003`) look like a level-1 heading and truncate the section there.
+        """
+        lines = README.splitlines()
+        try:
+            start = next(i for i, line in enumerate(lines) if line == header)
+        except StopIteration:
+            self.fail(f"the README no longer has a {header!r} section")
+        level = len(header) - len(header.lstrip("#"))
+        end = len(lines)
+        in_fence = False
+        for i in range(start + 1, len(lines)):
+            line = lines[i]
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            match = re.match(r"^(#+) ", line)
+            if match and len(match.group(1)) <= level:
+                end = i
+                break
+        return "\n".join(lines[start:end])
+
+    def test_the_model_repositories_are_named(self):
+        section = self.section("## Running Qdrant and the models")
+        for repo in ("gpustack/bge-m3-GGUF", "gpustack/bge-reranker-v2-m3-GGUF"):
+            self.assertIn(repo, section,
+                          f"the local stack section no longer names {repo}")
+
+    def test_the_rerank_serving_requirements_are_still_there(self):
+        section = self.section("## Running Qdrant and the models")
+        self.assertIn("--reranking", section,
+                      "without this flag the rerank route answers 501; the section must say so")
+        self.assertIn("8192", section,
+                      "the rerank batch flags are the ones a first real rerank fails on")
+
+    def test_every_address_is_localhost(self):
+        section = self.section("## Running Qdrant and the models")
+        quick = self.section("### Quick install")
+        for host in re.findall(r"http://([A-Za-z0-9_.-]+)", section + quick):
+            self.assertIn(host, ("127.0.0.1", "localhost"),
+                          f"the local stack sections point at {host}, not at a reader's own machine")
+
+    def test_quick_install_covers_all_three_oses(self):
+        quick = self.section("### Quick install")
+        for os_name in ("Linux", "macOS", "Windows"):
+            self.assertRegex(quick, rf"(?m)^\*\*{os_name}\*\*$",
+                             f"the quick install no longer has an {os_name} block")
+
+    def test_the_readme_never_uses_the_spaced_em_dash(self):
+        """A standing style rule, pinned because prose rots: the file had 98 of them until
+        2026-08-25, and the one a reader remembers is the one that comes back first."""
+        offenders = [i for i, line in enumerate(README.splitlines(), 1) if "\u2014" in line]
+        self.assertEqual(offenders, [],
+                         "these lines use the spaced em-dash, which is banned in this file:\n"
+                         + "\n".join(f"  {i}: {README.splitlines()[i-1]}" for i in offenders[:10]))
+
+
 if __name__ == "__main__":
     unittest.main()
