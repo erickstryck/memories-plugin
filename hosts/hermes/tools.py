@@ -310,7 +310,10 @@ def _memory_delete(args: dict, cfg) -> str:
 
 
 def _memory_list(args: dict, cfg) -> str:
-    return _ok(_memory(cfg).list_page(_int(args, "limit", 20)))
+    # `_text` and not `_require`: the first page has no cursor, and a blank string from a
+    # model that filled the field with nothing means "no cursor", not "cursor of empty".
+    return _ok(_memory(cfg).list_page(_int(args, "limit", 20),
+                                      _text(args, "offset")))
 
 
 def _memory_search_collections(args: dict, cfg) -> str:
@@ -553,14 +556,26 @@ SCHEMAS = [
     },
     {
         "name": "memory_list",
-        "description": ("Page through the archive without a query, newest page first. Use "
-                        "it to inspect or audit what is stored — never to answer a "
-                        "question, which is what memory_recall is for."),
+        "description": ("Page through the archive without a query, newest first (by "
+                        "`updated_at`). Use it to inspect or audit what is stored, "
+                        "never to answer a question, which is what memory_recall is "
+                        "for. Every page states the order it actually used in `order`: "
+                        "`updated_at_desc` is ordered by recency, `unordered` means the "
+                        "archive could not be ordered and the page carries a `warning` "
+                        "saying so, in which case the first page is NOT the newest "
+                        "records. To read the next page, send back the `next_offset` "
+                        "this call returns; a null `next_offset` means there is no "
+                        "next page."),
         "parameters": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer",
                           "description": "Records in this page (default 20)."},
+                "offset": {"type": "string",
+                           "description": ("The `next_offset` from a previous "
+                                           "memory_list call, to continue where it "
+                                           "stopped. Omit it for the newest page. It is "
+                                           "an opaque cursor, not a record id.")},
             },
             "required": [],
         },
