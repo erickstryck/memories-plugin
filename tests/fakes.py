@@ -16,12 +16,25 @@ import threading
 import zlib
 
 
+class FakeQdrantRefusal(ValueError):
+    """What the real server answers, in the shape callers branch on.
+
+    A `ValueError` and not a `QdrantError` on purpose: the fakes import nothing from
+    `core`, and the property under test is that the CALLER decides by `.status`.
+    """
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 class FakeVectorStore:
     """A vector store in a dict. Real similarity (cosine), not simulated."""
 
     def __init__(self):
         self.collections: dict[str, dict] = {}   # name -> {"size", "points": {id: point}}
         self.calls: list[tuple] = []
+        self.indexes: dict[str, set] = {}        # collection -> indexed payload fields
 
     # ---- collections ----
     def list_collections(self) -> list[str]:
@@ -47,6 +60,7 @@ class FakeVectorStore:
 
     def ensure_payload_index(self, name: str, field: str, schema: str) -> None:
         self.calls.append(("ensure_payload_index", name, field))
+        self.indexes.setdefault(name, set()).add(field)
 
     def delete_collection(self, name: str) -> None:
         self.collections.pop(name, None)
@@ -110,10 +124,38 @@ class FakeVectorStore:
         return out[:limit]
 
     def scroll(self, name: str, limit: int = 256, offset=None,
-               with_vector: bool = False, filter_: dict | None = None):
+               with_vector: bool = False, filter_: dict | None = None,
+               payload_fields: list[str] | None = None,
+               order_by: dict | None = None):
+        """REFUSES to order by an unindexed field, because the server does.
+
+        Measured on 1.18.2: `order_by` without a range index answers HTTP 400, ordering
+        excludes records that lack the key entirely, `start_from` INCLUDES the boundary
+        value, and `next_page_offset` comes back null on any ordered scroll. A fake that
+        is kinder than that hides the degradation path this feature is built around.
+        """
         items = [{"id": pid, "payload": p.get("payload", {})}
                  for pid, p in self.collections.get(name, {}).get("points", {}).items()
                  if not filter_ or _matches_filter(p.get("payload", {}), filter_)]
+        # `has_id` lives here and not in `_matches_filter`: that helper sees a payload,
+        # and this exclusion is about the point's ID, which only this method knows.
+        excluded = {i for cond in (filter_ or {}).get("must_not", [])
+                    for i in cond.get("has_id", [])}
+        if excluded:
+            items = [i for i in items if i["id"] not in excluded]
+        if order_by is None:
+            return items[:limit], None
+        key = order_by.get("key")
+        if key not in self.indexes.get(name, set()):
+            raise FakeQdrantRefusal(
+                f"Wrong input: No range index for `order_by` key: `{key}`. Please "
+                f"create one to use `order_by`.")
+        items = [i for i in items if i["payload"].get(key) is not None]
+        items.sort(key=lambda i: i["payload"][key],
+                   reverse=order_by.get("direction", "asc") == "desc")
+        start = order_by.get("start_from")
+        if start is not None:
+            items = [i for i in items if i["payload"][key] <= start]
 
         return items[:limit], None
 

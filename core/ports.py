@@ -109,7 +109,12 @@ class VectorStore(Protocol):
         ...
 
     def scroll(self, name: str, limit: int = ..., offset=...,
-               with_vector: bool = ..., filter_: dict | None = ...) -> tuple[list[dict], object]:
+               with_vector: bool = ..., filter_: dict | None = ...,
+               payload_fields: list[str] | None = ...,
+               order_by: dict | None = ...) -> tuple[list[dict], object]:
+        """`order_by` orders the walk by a payload key; it requires a range index on that
+        key and is mutually exclusive with `offset`. An implementation that cannot order
+        must RAISE rather than return an unordered page as if it had ordered."""
         ...
 
     def scroll_all(self, name: str, filter_: dict | None = ..., with_vector: bool = ...):

@@ -118,5 +118,69 @@ class TestDerivingTheNextCursor(unittest.TestCase):
                                              limit=1, previous=None))
 
 
+class TestTheFakeStoreIsAsPoorAsTheRealOne(unittest.TestCase):
+    """The fake must REFUSE what Qdrant refuses.
+
+    Measured: ordering by a payload key with no range index answers HTTP 400 ("No range
+    index for `order_by` key"). A fake that happily orders anyway makes the degradation
+    path unreachable offline, and the degradation path is the entire honesty of this
+    feature. `tests/fakes.py` already argues this for `payload_fields`.
+    """
+
+    def setUp(self):
+        from tests.fakes import FakeVectorStore
+        self.q = FakeVectorStore()
+        self.q.ensure_collection("mem", 8)
+        for pid, value in (("a", "2026-01-01T00:00:00+00:00"),
+                           ("b", "2026-09-01T00:00:00+00:00"),
+                           ("c", "2026-05-05T10:00:00+00:00")):
+            self.q.upsert("mem", [{"id": pid, "vector": [0.0] * 8,
+                                   "payload": {"updated_at": value,
+                                               "document": f"doc {pid}"}}])
+
+    def test_ordering_without_an_index_is_refused_the_way_the_server_refuses_it(self):
+        from tests.fakes import FakeQdrantRefusal
+        with self.assertRaises(FakeQdrantRefusal) as caught:
+            self.q.scroll("mem", limit=10,
+                          order_by={"key": "updated_at", "direction": "desc"})
+        self.assertEqual(caught.exception.status, 400,
+                         "the caller decides by status, so the fake has to carry one")
+
+    def test_with_the_index_it_orders_newest_first(self):
+        self.q.ensure_payload_index("mem", "updated_at", "datetime")
+        points, _ = self.q.scroll("mem", limit=10,
+                                  order_by={"key": "updated_at", "direction": "desc"})
+        self.assertEqual([p["id"] for p in points], ["b", "c", "a"])
+
+    def test_start_from_is_inclusive_like_the_server(self):
+        self.q.ensure_payload_index("mem", "updated_at", "datetime")
+        points, _ = self.q.scroll("mem", limit=10,
+                                  order_by={"key": "updated_at", "direction": "desc",
+                                            "start_from": "2026-05-05T10:00:00+00:00"})
+        self.assertEqual([p["id"] for p in points], ["c", "a"],
+                         "the boundary record comes back, which is why ids are excluded")
+
+    def test_an_ordered_scroll_returns_no_server_offset(self):
+        self.q.ensure_payload_index("mem", "updated_at", "datetime")
+        _, offset = self.q.scroll("mem", limit=1,
+                                  order_by={"key": "updated_at", "direction": "desc"})
+        self.assertIsNone(offset, "measured: next_page_offset is null when ordering")
+
+    def test_a_record_without_the_key_is_invisible_to_an_ordered_scroll(self):
+        self.q.ensure_payload_index("mem", "updated_at", "datetime")
+        self.q.upsert("mem", [{"id": "d", "vector": [0.0] * 8,
+                               "payload": {"document": "undated"}}])
+        points, _ = self.q.scroll("mem", limit=10,
+                                  order_by={"key": "updated_at", "direction": "desc"})
+        self.assertNotIn("d", [p["id"] for p in points])
+        plain, _ = self.q.scroll("mem", limit=10)
+        self.assertIn("d", [p["id"] for p in plain], "and it is still THERE")
+
+    def test_an_unordered_scroll_behaves_exactly_as_before(self):
+        points, offset = self.q.scroll("mem", limit=2)
+        self.assertEqual(len(points), 2)
+        self.assertIsNone(offset)
+
+
 if __name__ == "__main__":
     unittest.main()
