@@ -1087,7 +1087,7 @@ def cmd_memory_search_collections(args, cfg):
 
 
 def cmd_memory_list(args, cfg):
-    output(core.build_memory(cfg).list_page(args.limit), True)
+    output(core.build_memory(cfg).list_page(args.limit, args.offset), True)
 
 
 # ---- docs ------------------------------------------------------------------
@@ -1624,6 +1624,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = memsub.add_parser("list")
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--offset", default=None,
+                   help="the next_offset from a previous listing, to continue it")
     p.set_defaults(fn=cmd_memory_list)
 
     p = memsub.add_parser("store-many", help="a batch of facts, all-or-nothing")
