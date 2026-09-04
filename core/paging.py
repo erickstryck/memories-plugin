@@ -104,15 +104,21 @@ def decode_cursor(cursor: str) -> tuple:
 def _as_instant(value) -> str | None:
     """`value` as a comparable instant, or None when it is not a timestamp.
 
-    Duplicated in `memory._instant` rather than imported, and deliberately: this module
-    imports nothing from the rest of the package except its error base, which is what
-    lets the cursor rule be tested with no store, no config and no network at all.
+    It lives HERE, and only here, because comparing boundary values is this module's job.
+    An identical helper briefly existed in `memory` too, from a version where the
+    comparison was expected to live there; it ended up never called, and a second copy of
+    a rule this delicate is a rule that will drift.
+
+    The import is local so this module keeps depending on nothing but its error base,
+    which is what lets the cursor rule be tested with no store, no config and no network.
     """
     from datetime import datetime
 
     if not isinstance(value, str) or not value.strip():
         return None
     try:
+        # `Z` is not accepted by `fromisoformat` before 3.11 and this package supports
+        # older hosts, so it is normalized rather than relied upon.
         return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).isoformat()
     except ValueError:
         return None

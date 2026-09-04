@@ -51,31 +51,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _instant(value) -> str | None:
-    """`value` as a COMPARABLE instant key, or None when it is not a timestamp at all.
-
-    Two spellings of the same moment must compare equal here, because the server compares
-    instants and this module compares what it gets back. Measured consequence of getting
-    it wrong: with `2026-09-01T00:00:00Z` and `2026-09-01T00:00:00+00:00` in one archive,
-    a tie at the page boundary was only half detected, the undetected half was never
-    excluded, and the walk returned 50 rows for 6 records, repeated one 18 times, never
-    reached a seventh, and never terminated.
-
-    Anything unparseable answers None, and the caller treats that as "cannot anchor a
-    cursor here" rather than guessing: the server excludes such a record from an ordered
-    scroll entirely, so there is nothing to page from.
-    """
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    try:
-        # `Z` is not accepted by `fromisoformat` before 3.11 and this package supports
-        # older hosts, so it is normalized rather than relied upon.
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
-    except ValueError:
-        return None
-
-
 #: Statuses that mean "the archive is not answering this at all", as opposed to "it
 #: refused THIS request". An ALLOW-list and not a deny-list: a deny-list turns every
 #: unforeseen 4xx into a successful-looking page, which is the direction that ages badly.
