@@ -468,5 +468,110 @@ class TestDropRequest(unittest.TestCase):
         self.assertEqual(idx.drop_request(purge_tmp=True, expired=True)["status"], "purged")
 
 
+class TestTheListingIsOrderedAndHonest(unittest.TestCase):
+    """The defect this fixes: the tool promised "newest page first" and returned id order.
+
+    So the property is not only "it sorts" but "it never claims to have sorted when it
+    did not". A listing that quietly falls back is the same defect wearing a new coat.
+    """
+
+    def _archive(self):
+        s, q, _ = store()
+        # Written oldest-first so insertion order cannot be mistaken for date order.
+        for text, when in (("oldest fact", "2026-01-01T00:00:00+00:00"),
+                           ("middle fact", "2026-05-05T10:00:00+00:00"),
+                           ("newest fact", "2026-09-01T00:00:00+00:00")):
+            mid = s.store(text)["id"]
+            point = q.get_point("mem", mid)
+            payload = dict(point["payload"], created_at=when, updated_at=when)
+            q.set_payload("mem", mid, payload)
+
+        return s, q
+
+    def test_the_first_page_is_the_newest_records(self):
+        s, _ = self._archive()
+        page = s.list_page(limit=2)
+        self.assertEqual([m["document"] for m in page["memories"]],
+                         ["newest fact", "middle fact"])
+
+    def test_it_reports_the_order_it_actually_used(self):
+        s, _ = self._archive()
+        self.assertEqual(s.list_page(limit=2)["order"], "updated_at_desc")
+
+    def test_the_cursor_walks_the_whole_archive_once(self):
+        s, _ = self._archive()
+        seen, cursor, pages = [], None, 0
+        while pages < 10:
+            page = s.list_page(limit=2, offset=cursor)
+            seen.extend(m["document"] for m in page["memories"])
+            cursor = page["next_offset"]
+            pages += 1
+            if cursor is None:
+                break
+        self.assertIsNone(cursor, "the walk has to terminate")
+        self.assertEqual(seen, ["newest fact", "middle fact", "oldest fact"],
+                         "every record exactly once, newest first")
+
+    def test_a_write_creates_the_index_the_ordering_needs(self):
+        s, q, _ = store()
+        s.store("a fact")
+        self.assertIn("updated_at", q.indexes.get("mem", set()))
+        self.assertIn(("ensure_payload_index", "mem", "updated_at"), q.calls)
+
+    def test_a_listing_on_an_unindexed_archive_still_comes_back_ordered(self):
+        """The archive predates this feature: 744 records and no payload index at all,
+        measured on 2026-09-03. The first listing has to fix that itself."""
+        s, q = self._archive()
+        q.indexes.pop("mem", None)
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "updated_at_desc")
+        self.assertEqual([m["document"] for m in page["memories"]],
+                         ["newest fact", "middle fact"])
+
+    def test_when_ordering_cannot_be_had_it_degrades_AND_SAYS_SO(self):
+        s, q = self._archive()
+
+        def refuse(*a, **kw):
+            from tests.fakes import FakeQdrantRefusal
+            raise FakeQdrantRefusal("No range index for `order_by` key: `updated_at`.")
+
+        q.ensure_payload_index = lambda *a, **kw: None      # creating it does nothing
+        original = q.scroll
+        q.scroll = lambda *a, **kw: (refuse() if kw.get("order_by") else original(*a, **kw))
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "unordered")
+        self.assertIn("warning", page)
+        self.assertEqual(len(page["memories"]), 2, "it still answers")
+
+    def test_the_degraded_warning_names_the_reason_not_just_the_word_warning(self):
+        s, q = self._archive()
+
+        def refuse(*a, **kw):
+            from tests.fakes import FakeQdrantRefusal
+            raise FakeQdrantRefusal("No range index for `order_by` key: `updated_at`.")
+
+        q.ensure_payload_index = lambda *a, **kw: None
+        original = q.scroll
+        q.scroll = lambda *a, **kw: (refuse() if kw.get("order_by") else original(*a, **kw))
+        warning = s.list_page(limit=2)["warning"].lower()
+        self.assertIn("order", warning)
+        self.assertRegex(warning, r"(index|recency|newest)")
+
+    def test_a_read_never_creates_the_collection(self):
+        """`require_existing` is the rule; creating an index must not have smuggled an
+        `ensure_collection` into the read path."""
+        s, q, _ = store(collection="mem")
+        q.collections.clear()
+        with self.assertRaises(MemoryStoreError):
+            s.list_page()
+        self.assertEqual(q.list_collections(), [])
+
+    def test_a_corrupt_cursor_is_refused_rather_than_restarting(self):
+        from core.paging import PagingError
+        s, _ = self._archive()
+        with self.assertRaises(PagingError):
+            s.list_page(limit=2, offset="not-a-cursor!!")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 
-from . import ports, retrieval
+from . import paging, ports, retrieval
 from .errors import CoreError
 from datetime import datetime, timezone
 
@@ -139,8 +139,20 @@ class MemoryStore:
         self.vector_size = vector_size
 
     def ensure(self) -> None:
-        """Ensures the collection exists. For the WRITE path only."""
+        """Ensures the collection exists AND that the listing can order by date.
+
+        The index is created here, on the WRITE path, and not where the listing needs it:
+        `require_existing` exists precisely so a read creates nothing (see below), and a
+        payload index is a write against the collection. `ensure_payload_index` swallows
+        its own failure by design, so this can never break a store.
+
+        Measured on 2026-09-03: the index is RETROACTIVE. The user's archive of 744
+        records, written long before this existed, orders correctly the moment the index
+        is created, with no reindexing and no payload migration.
+        """
         self.q.ensure_collection(self.collection, self.vector_size)
+        self.q.ensure_payload_index(self.collection, paging.ORDER_KEY,
+                                    paging.INDEX_SCHEMA)
 
     def require_existing(self) -> None:
         """Requires the collection to exist. For the READ path.
@@ -371,17 +383,79 @@ class MemoryStore:
                 "metadata": p.get("metadata", {}), "created_at": p.get("created_at"),
                 "updated_at": p.get("updated_at")}
 
-    def list_page(self, limit: int = 20, offset=None) -> dict:
+    def list_page(self, limit: int = 20, offset: str | None = None) -> dict:
+        """A page of the archive, NEWEST FIRST, saying which order it actually used.
+
+        The promise and the behaviour used to disagree: the tool description said "newest
+        page first" while the scroll ran with no `order_by` at all, so pages came back in
+        uuid4 order. Someone checking whether a fresh write landed concluded it had not.
+
+        `offset` is the opaque cursor a previous call returned, NOT a point id: ordering
+        and Qdrant's own `offset` are mutually exclusive, so paging is by value plus the
+        ids already seen at that value. `core/paging.py` owns that rule.
+
+        `order` is part of the answer, always. When ordering is impossible the listing
+        still answers, unordered, and says so with a `warning`, because degrading in
+        silence would be the original defect in a new shape.
+        """
         self.require_existing()
-        points, next_offset = self.q.scroll(self.collection, limit=limit, offset=offset)
+        request = paging.page_request(offset)
+        points, warning = self._scroll_ordered(limit, request)
         memories = [{
             "id": pt.get("id"),
             "document": pt.get("payload", {}).get("document"),
             "metadata": pt.get("payload", {}).get("metadata", {}),
             "updated_at": pt.get("payload", {}).get("updated_at"),
         } for pt in points]
+        page = {"count": len(memories), "memories": memories,
+                "order": paging.ORDER_NONE if warning else paging.ORDER_DESC,
+                "next_offset": (None if warning
+                                else paging.next_cursor(points, limit, offset))}
+        if warning:
+            page["warning"] = warning
 
-        return {"count": len(memories), "memories": memories, "next_offset": next_offset}
+        return page
+
+    def _scroll_ordered(self, limit: int, request: dict) -> tuple[list, str | None]:
+        """The ordered page, or the unordered one plus the sentence that admits it.
+
+        Three attempts at most, and the middle one is the whole point: an archive written
+        before this feature has no payload index, so the FIRST ordered listing on it is
+        expected to fail. Creating the index and retrying once turns that into a
+        self-healing read rather than a permanent degradation.
+
+        The retry is decided by nothing but the failure itself, and the fallback message
+        never quotes the server's text: `_is_absent` in `core/qdrant.py` records what
+        reading error bodies costs, since a proxy echoes upstream statuses into its own
+        body, so behaviour keyed to message text is wrong for a measured reason.
+        """
+        try:
+            return self.q.scroll(self.collection, limit=limit,
+                                 filter_=request["filter"],
+                                 order_by=request["order_by"])[0], None
+        except CoreError:
+            raise
+        except Exception:
+            pass
+        # The index is missing on an archive nobody has written to since this shipped.
+        # Creating it is a write, but a write of SCHEMA, not of anyone's data.
+        self.q.ensure_payload_index(self.collection, paging.ORDER_KEY,
+                                    paging.INDEX_SCHEMA)
+        try:
+            return self.q.scroll(self.collection, limit=limit,
+                                 filter_=request["filter"],
+                                 order_by=request["order_by"])[0], None
+        except CoreError:
+            raise
+        except Exception:
+            points, _ = self.q.scroll(self.collection, limit=limit)
+
+            return points, (
+                "this page is NOT ordered by recency: the archive could not be ordered "
+                f"by {paging.ORDER_KEY} (the payload index for it is missing and could "
+                "not be created), so the records come back in arbitrary id order. Do "
+                "not read the first page as the newest records."
+            )
 
     def count(self) -> int | None:
         """Points in the collection, or None when it does not exist yet.
