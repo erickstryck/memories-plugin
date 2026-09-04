@@ -298,5 +298,69 @@ class TestDocsIntegration(unittest.TestCase):
                          "no chunk from the previous indexing may be left behind")
 
 
+@unittest.skipUnless(ENABLED, "set QCTX_INTEGRATION=1")
+class TestTheListingOrdersAgainstTheRealServer(unittest.TestCase):
+    """Ordering is a SERVER capability, so an offline test cannot prove this one.
+
+    Measured 2026-09-03 against 1.18.2: `order_by` needs a range index (400 without
+    one), and the index is retroactive. Both are properties of the deployment, not of
+    this code, which is exactly what an integration test is for. It writes only to the
+    throwaway collection; the real archive is never touched.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = write_config()
+        cls.store = core.build_memory(cls.cfg)
+        cls.q = core.build_qdrant(cls.cfg)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.q.delete_collection(THROWAWAY_COLLECTION)
+
+    def test_the_first_page_is_the_most_recent_record(self):
+        newest = self.store.store("the most recent fact")["id"]
+        page = self.store.list_page(limit=1)
+        self.assertEqual(page["order"], "updated_at_desc")
+        self.assertEqual(page["memories"][0]["id"], newest,
+                         "the record written last has to come back first")
+
+    def test_the_index_the_ordering_needs_exists_after_a_write(self):
+        self.store.store("a fact that creates the schema")
+        info = self.q.request("GET", f"/collections/{THROWAWAY_COLLECTION}")
+        schema = info["result"].get("payload_schema", {})
+        self.assertIn("updated_at", schema,
+                      "the write path has to leave the collection orderable")
+
+    def test_the_cursor_walks_without_repeating(self):
+        ids = [self.store.store(f"walkable fact {i}")["id"] for i in range(5)]
+        seen, cursor = [], None
+        for _ in range(10):
+            page = self.store.list_page(limit=2, offset=cursor)
+            seen.extend(m["id"] for m in page["memories"])
+            cursor = page["next_offset"]
+            if cursor is None:
+                break
+        self.assertIsNone(cursor, "the walk has to terminate")
+        self.assertEqual(len(seen), len(set(seen)), "a record came back twice")
+        for mid in ids:
+            self.assertIn(mid, seen, "the walk skipped a record")
+
+    def test_a_batch_written_with_one_timestamp_still_pages(self):
+        """`store_many` stamps every record in the batch with the SAME `updated_at`, so
+        the tie handling is exercised by ordinary use, not by a contrived fixture."""
+        res = self.store.store_many([{"information": f"tied fact {i}"} for i in range(4)])
+        seen, cursor = [], None
+        for _ in range(10):
+            page = self.store.list_page(limit=2, offset=cursor)
+            seen.extend(m["id"] for m in page["memories"])
+            cursor = page["next_offset"]
+            if cursor is None:
+                break
+        self.assertEqual(len(seen), len(set(seen)), "a tied record came back twice")
+        for mid in res["ids"]:
+            self.assertIn(mid, seen, "a tied record was skipped")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

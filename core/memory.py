@@ -51,6 +51,34 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: Statuses that mean "the archive is not answering this at all", as opposed to "it
+#: refused THIS request". They are named as the exclusions rather than listing what may
+#: be absorbed, because the direction that ages well is: an unforeseen status reaches the
+#: caller as a failure instead of being silently turned into a successful-looking page.
+_NOT_A_REFUSAL = frozenset({401, 403, 404, 429})
+
+
+def _refuses_to_order(exc: Exception) -> bool:
+    """Whether `exc` means "I cannot order by that key", decided by STATUS.
+
+    A rejected request (4xx) is the store saying the query is not one it can run, which
+    is exactly the case ordering has to survive: Qdrant answers 400 when the payload key
+    has no range index. Anything without a status, or with a status that means gone,
+    forbidden or rate-limited, is NOT a refusal to order and must surface.
+
+    By status and never by message text, for the reason `_is_absent` documents in
+    `core/qdrant.py`: this Qdrant sits behind a proxy, and proxies echo upstream statuses
+    into their own error bodies, so text matching reads a 502 as whatever it quotes.
+
+    A store that is not the Qdrant adapter (a fake, another implementation) may raise
+    something with no `status` at all; `getattr` keeps that from being a crash, and the
+    absence of a status is treated as "not a refusal I understand", which fails loudly.
+    """
+    status = getattr(exc, "status", None)
+
+    return isinstance(status, int) and 400 <= status < 500 and status not in _NOT_A_REFUSAL
+
+
 #: The metadata shortcuts every host offers by name, declared once so no caller retypes
 #: them. They are conventions, not a schema — `metadata` accepts any keys.
 METADATA_FIELDS = ("type", "project", "area")
@@ -424,19 +452,29 @@ class MemoryStore:
         expected to fail. Creating the index and retrying once turns that into a
         self-healing read rather than a permanent degradation.
 
-        The retry is decided by nothing but the failure itself, and the fallback message
-        never quotes the server's text: `_is_absent` in `core/qdrant.py` records what
-        reading error bodies costs, since a proxy echoes upstream statuses into its own
-        body, so behaviour keyed to message text is wrong for a measured reason.
+        WHAT MAY BE ABSORBED IS DECIDED BY STATUS, and that distinction was not academic:
+        a first version of this method re-raised every `CoreError` and absorbed the rest.
+        `QdrantError` IS a `CoreError`, so it re-raised the exact refusal it existed to
+        handle. The whole offline suite stayed green, because the fake raises a
+        `ValueError`, and the real archive answered HTTP 400 on the very first listing.
+
+        So: only a REJECTED REQUEST (a 4xx that is not "gone" or "not allowed") becomes
+        degradation, because that is what "I cannot order this" looks like. A 404, a 403,
+        a timeout or an unreachable server must reach the caller as a failure. Dressing
+        those up as an unordered page would report a partial or empty archive as a
+        successful listing, which is the worst lie a memory tool can tell.
+
+        The status and nothing else, never the message text: `_is_absent` in
+        `core/qdrant.py` records what reading error bodies costs, since a proxy echoes
+        upstream statuses into its own body.
         """
         try:
             return self.q.scroll(self.collection, limit=limit,
                                  filter_=request["filter"],
                                  order_by=request["order_by"])[0], None
-        except CoreError:
-            raise
-        except Exception:
-            pass
+        except Exception as exc:
+            if not _refuses_to_order(exc):
+                raise
         # The index is missing on an archive nobody has written to since this shipped.
         # Creating it is a write, but a write of SCHEMA, not of anyone's data.
         self.q.ensure_payload_index(self.collection, paging.ORDER_KEY,
@@ -445,9 +483,9 @@ class MemoryStore:
             return self.q.scroll(self.collection, limit=limit,
                                  filter_=request["filter"],
                                  order_by=request["order_by"])[0], None
-        except CoreError:
-            raise
-        except Exception:
+        except Exception as exc:
+            if not _refuses_to_order(exc):
+                raise
             points, _ = self.q.scroll(self.collection, limit=limit)
 
             return points, (

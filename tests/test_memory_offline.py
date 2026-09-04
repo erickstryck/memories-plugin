@@ -566,6 +566,56 @@ class TestTheListingIsOrderedAndHonest(unittest.TestCase):
             s.list_page()
         self.assertEqual(q.list_collections(), [])
 
+    def test_it_degrades_when_the_refusal_arrives_as_the_REAL_error_type(self):
+        """The regression that offline tests missed and the real server caught.
+
+        `QdrantError` IS a `CoreError`, so a first version of this guard, which
+        re-raised every `CoreError` and absorbed everything else, re-raised the very
+        refusal it existed to handle. Against `FakeQdrantRefusal` (a `ValueError`) it
+        looked correct; against the real archive the listing died with HTTP 400 instead
+        of degrading. So the fixture here is the REAL exception class, and the decision
+        under test is by STATUS, not by type.
+        """
+        from core.qdrant import QdrantError
+        s, q = self._archive()
+
+        def refuse(*a, **kw):
+            error = QdrantError(
+                "HTTP 400 on POST /collections/mem/points/scroll: Wrong input: No range "
+                "index for `order_by` key: `updated_at`.")
+            error.status = 400
+            raise error
+
+        q.ensure_payload_index = lambda *a, **kw: None
+        original = q.scroll
+        q.scroll = lambda *a, **kw: (refuse() if kw.get("order_by") else original(*a, **kw))
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "unordered")
+        self.assertIn("warning", page)
+        self.assertEqual(len(page["memories"]), 2)
+
+    def test_a_failure_that_is_NOT_about_ordering_still_reaches_the_caller(self):
+        """Degradation is for "I cannot order", never for "the archive is unreachable".
+
+        A 404, an auth failure or a timeout must not be dressed up as an unordered page:
+        that would report an empty or partial archive as a successful listing, which is
+        the worst possible lie for a memory tool.
+        """
+        from core.qdrant import QdrantError
+        for status, label in ((404, "collection vanished"), (403, "forbidden"),
+                              (None, "network failure, no status at all")):
+            with self.subTest(failure=label):
+                s, q = self._archive()
+
+                def explode(*a, **kw):
+                    error = QdrantError(f"HTTP {status} on POST /points/scroll")
+                    error.status = status
+                    raise error
+
+                q.scroll = explode
+                with self.assertRaises(QdrantError):
+                    s.list_page(limit=2)
+
     def test_a_corrupt_cursor_is_refused_rather_than_restarting(self):
         from core.paging import PagingError
         s, _ = self._archive()
