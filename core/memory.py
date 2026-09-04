@@ -511,16 +511,32 @@ class MemoryStore:
             if not _refuses_to_order(exc):
                 raise
             refusal = str(exc)
-            # Unordered, and paged by the server's cursor: the order is what was lost
-            # here, not the rest of the archive.
-            points, server_offset = self.q.scroll(self.collection, limit=limit)
-
-            return points, server_offset, (
-                f"this page is NOT ordered by recency: the archive refused to order by "
-                f"{paging.ORDER_KEY} and the reason it gave is {refusal!r}. The records "
-                "come back in arbitrary id order, so do not read the first page as the "
-                "newest records. Paging still works: keep following `next_offset`."
+        if request["continuing"]:
+            # MID-WALK MODE CHANGE, refused. An ordered cursor carries a timestamp plus
+            # the ids seen at it; an unordered scroll cannot be positioned by either, so
+            # the fallback would restart from the head and re-deliver everything the
+            # earlier pages already gave. Measured: pages 1 and 2 returned m9..m6, the
+            # index was dropped, and page 3 came back m3..m6, repeating m6.
+            #
+            # Silently repeating records is worse than stopping, because the caller has
+            # no way to tell the difference. So this fails, names what happened, and lets
+            # the caller restart the walk with no cursor, which is correct and cheap.
+            raise MemoryStoreError(
+                f"the archive stopped being able to order by {paging.ORDER_KEY} in the "
+                f"middle of this listing ({refusal}), and an unordered walk cannot "
+                f"continue from an ordered cursor without repeating records. Start the "
+                f"listing again with no 'offset'."
             )
+        # Unordered from the FIRST page, and paged by the server's cursor: the order is
+        # what was lost here, not the rest of the archive.
+        points, server_offset = self.q.scroll(self.collection, limit=limit)
+
+        return points, server_offset, (
+            f"this page is NOT ordered by recency: the archive refused to order by "
+            f"{paging.ORDER_KEY} and the reason it gave is {refusal!r}. The records "
+            "come back in arbitrary id order, so do not read the first page as the "
+            "newest records. Paging still works: keep following `next_offset`."
+        )
 
     def count(self) -> int | None:
         """Points in the collection, or None when it does not exist yet.

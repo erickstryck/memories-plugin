@@ -127,25 +127,30 @@ def _as_instant(value) -> str | None:
 def page_request(cursor: str | None) -> dict:
     """What to ask the store for the page `cursor` points at.
 
-    Returns `{"order_by", "filter", "offset", "ordered"}`. `ordered` False means the
-    caller must NOT send `order_by` (the store already said it cannot order) and must
-    pass `offset` through, which is how an unordered scroll pages.
+    Returns `{"order_by", "filter", "offset", "ordered", "continuing"}`. `ordered` False
+    means the caller must NOT send `order_by` (the store already said it cannot order) and
+    must pass `offset` through, which is how an unordered scroll pages. `continuing` says
+    whether this is a later page of a walk already in progress: falling back to an
+    unordered scroll is only safe on the FIRST page, because an unordered scroll cannot be
+    positioned at an ordered cursor and would re-deliver what earlier pages already gave.
 
     `filter` is None rather than an empty `must_not`: an empty clause is one the server
     still has to evaluate, and it reads as "something is excluded" to anyone debugging.
     """
     order_by = {"key": ORDER_KEY, "direction": "desc"}
     if cursor is None:
-        return {"order_by": order_by, "filter": None, "offset": None, "ordered": True}
+        return {"order_by": order_by, "filter": None, "offset": None,
+                "ordered": True, "continuing": False}
     value, seen, ordered = decode_cursor(cursor)
     if not ordered:
         # An unordered continuation: the server's own scroll offset, nothing else.
-        return {"order_by": None, "filter": None, "offset": value, "ordered": False}
+        return {"order_by": None, "filter": None, "offset": value,
+                "ordered": False, "continuing": True}
     order_by["start_from"] = value
 
     return {"order_by": order_by,
             "filter": {"must_not": [{"has_id": list(seen)}]} if seen else None,
-            "offset": None, "ordered": True}
+            "offset": None, "ordered": True, "continuing": True}
 
 
 def next_cursor(points: list[dict], limit: int, previous: str | None) -> str | None:

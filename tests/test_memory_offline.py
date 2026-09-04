@@ -709,6 +709,37 @@ class TestTheListingIsOrderedAndHonest(unittest.TestCase):
         self.assertEqual(len(index_calls), 1,
                          f"one index call for four writes, got {index_calls}")
 
+    def test_losing_the_order_MID_WALK_fails_instead_of_repeating_records(self):
+        """Found in round 2 of review, against the real server.
+
+        An ordered cursor carries a timestamp plus the ids seen at it. An unordered scroll
+        cannot be positioned by either, so falling back mid-walk restarts from the head:
+        measured, pages 1 and 2 delivered m9..m6, the index was dropped, and page 3 came
+        back m3..m6, repeating m6. Silently repeating records is worse than stopping,
+        because the caller cannot tell the difference. Failing with an actionable message
+        lets the walk restart, which is correct and cheap.
+        """
+        s, q = self._archive()
+        first = s.list_page(limit=1)
+        self.assertEqual(first["order"], "updated_at_desc")
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        with self.assertRaises(MemoryStoreError) as caught:
+            s.list_page(limit=1, offset=first["next_offset"])
+        message = str(caught.exception).lower()
+        self.assertIn("offset", message, "it has to say how to recover")
+        self.assertIn("repeat", message, "and why it refused")
+
+    def test_the_FIRST_page_still_degrades_rather_than_failing(self):
+        """The refusal above is about continuity, not about degradation: with no cursor
+        there is nothing to be continuous with, so a first page still answers."""
+        s, q = self._archive()
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "unordered")
+        self.assertEqual(page["count"], 2)
+
     def test_a_corrupt_cursor_is_refused_rather_than_restarting(self):
         from core.paging import PagingError
         s, _ = self._archive()
