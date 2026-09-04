@@ -51,32 +51,57 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _instant(value) -> str | None:
+    """`value` as a COMPARABLE instant key, or None when it is not a timestamp at all.
+
+    Two spellings of the same moment must compare equal here, because the server compares
+    instants and this module compares what it gets back. Measured consequence of getting
+    it wrong: with `2026-09-01T00:00:00Z` and `2026-09-01T00:00:00+00:00` in one archive,
+    a tie at the page boundary was only half detected, the undetected half was never
+    excluded, and the walk returned 50 rows for 6 records, repeated one 18 times, never
+    reached a seventh, and never terminated.
+
+    Anything unparseable answers None, and the caller treats that as "cannot anchor a
+    cursor here" rather than guessing: the server excludes such a record from an ordered
+    scroll entirely, so there is nothing to page from.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        # `Z` is not accepted by `fromisoformat` before 3.11 and this package supports
+        # older hosts, so it is normalized rather than relied upon.
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        return None
+
+
 #: Statuses that mean "the archive is not answering this at all", as opposed to "it
-#: refused THIS request". They are named as the exclusions rather than listing what may
-#: be absorbed, because the direction that ages well is: an unforeseen status reaches the
-#: caller as a failure instead of being silently turned into a successful-looking page.
-_NOT_A_REFUSAL = frozenset({401, 403, 404, 429})
+#: refused THIS request". An ALLOW-list and not a deny-list: a deny-list turns every
+#: unforeseen 4xx into a successful-looking page, which is the direction that ages badly.
+#: 408 belongs to nobody's idea of "I cannot order" and was absorbed by the first version
+#: of this rule, which is exactly the failure a listing must never disguise as data.
+_ORDERING_REFUSAL_STATUSES = frozenset({400})
 
 
 def _refuses_to_order(exc: Exception) -> bool:
     """Whether `exc` means "I cannot order by that key", decided by STATUS.
 
-    A rejected request (4xx) is the store saying the query is not one it can run, which
-    is exactly the case ordering has to survive: Qdrant answers 400 when the payload key
-    has no range index. Anything without a status, or with a status that means gone,
-    forbidden or rate-limited, is NOT a refusal to order and must surface.
+    Qdrant answers 400 when the payload key has no range index, and 400 is the only
+    status that means "this query is not one I can run". Everything else, including 404,
+    403, 429, 408 and every 5xx, is the archive failing, and must reach the caller: an
+    unreachable or forbidden archive dressed up as an unordered page reports a partial
+    listing as a complete one, which is the worst lie a memory tool can tell.
 
     By status and never by message text, for the reason `_is_absent` documents in
     `core/qdrant.py`: this Qdrant sits behind a proxy, and proxies echo upstream statuses
     into their own error bodies, so text matching reads a 502 as whatever it quotes.
 
-    A store that is not the Qdrant adapter (a fake, another implementation) may raise
-    something with no `status` at all; `getattr` keeps that from being a crash, and the
-    absence of a status is treated as "not a refusal I understand", which fails loudly.
+    A store that is not the Qdrant adapter may raise something with no `status` at all;
+    `getattr` keeps that from crashing, and a missing status is NOT a refusal to order,
+    so it fails loudly.
     """
-    status = getattr(exc, "status", None)
-
-    return isinstance(status, int) and 400 <= status < 500 and status not in _NOT_A_REFUSAL
+    return getattr(exc, "status", None) in _ORDERING_REFUSAL_STATUSES
 
 
 #: The metadata shortcuts every host offers by name, declared once so no caller retypes
@@ -167,20 +192,24 @@ class MemoryStore:
         self.vector_size = vector_size
 
     def ensure(self) -> None:
-        """Ensures the collection exists AND that the listing can order by date.
+        """Ensures the collection exists AND, when it is new, that it can be ordered.
 
-        The index is created here, on the WRITE path, and not where the listing needs it:
-        `require_existing` exists precisely so a read creates nothing (see below), and a
-        payload index is a write against the collection. `ensure_payload_index` swallows
-        its own failure by design, so this can never break a store.
+        The index is created ONLY when `ensure_collection` reports it just created the
+        collection, which is the pattern `core/docs.py:172-177` and `core/repos.py:121-126`
+        already follow. Calling it on every write cost a synchronous
+        `PUT /collections/<c>/index?wait=true`, measured at ~25 ms against this Qdrant, and
+        took a `store` from 45 ms to 74 ms for nothing: the index either exists or the
+        listing creates it.
 
-        Measured on 2026-09-03: the index is RETROACTIVE. The user's archive of 744
-        records, written long before this existed, orders correctly the moment the index
-        is created, with no reindexing and no payload migration.
+        A PREEXISTING collection therefore gets its index from the READ path
+        (`_scroll_page`), which is deliberate and covered: the user's archive of 744
+        records had no payload index at all, and the first ordered listing on it is
+        expected to take a 400, create the index and retry. Measured on 2026-09-03: the
+        index is RETROACTIVE, so nothing is reindexed and no payload is migrated.
         """
-        self.q.ensure_collection(self.collection, self.vector_size)
-        self.q.ensure_payload_index(self.collection, paging.ORDER_KEY,
-                                    paging.INDEX_SCHEMA)
+        if self.q.ensure_collection(self.collection, self.vector_size):
+            self.q.ensure_payload_index(self.collection, paging.ORDER_KEY,
+                                        paging.INDEX_SCHEMA)
 
     def require_existing(self) -> None:
         """Requires the collection to exist. For the READ path.
@@ -419,33 +448,44 @@ class MemoryStore:
         uuid4 order. Someone checking whether a fresh write landed concluded it had not.
 
         `offset` is the opaque cursor a previous call returned, NOT a point id: ordering
-        and Qdrant's own `offset` are mutually exclusive, so paging is by value plus the
-        ids already seen at that value. `core/paging.py` owns that rule.
+        and Qdrant's own `offset` are mutually exclusive, so an ordered walk pages by
+        value plus the ids already seen at that value. `core/paging.py` owns that rule.
 
         `order` is part of the answer, always. When ordering is impossible the listing
         still answers, unordered, and says so with a `warning`, because degrading in
-        silence would be the original defect in a new shape.
+        silence would be the original defect in a new shape. IT STILL PAGES: an unordered
+        walk keeps the server's own cursor, so losing the order must not cost the rest of
+        the archive. Forcing `next_offset` to null here made a 749-record archive look
+        like it ended after one page, while the tool description told the reader that a
+        null `next_offset` means there is nothing more.
         """
         self.require_existing()
         request = paging.page_request(offset)
-        points, warning = self._scroll_ordered(limit, request)
+        points, server_offset, warning = self._scroll_page(limit, request)
         memories = [{
             "id": pt.get("id"),
             "document": pt.get("payload", {}).get("document"),
             "metadata": pt.get("payload", {}).get("metadata", {}),
             "updated_at": pt.get("payload", {}).get("updated_at"),
         } for pt in points]
+        degraded = warning is not None or not request["ordered"]
         page = {"count": len(memories), "memories": memories,
-                "order": paging.ORDER_NONE if warning else paging.ORDER_DESC,
-                "next_offset": (None if warning
+                "order": paging.ORDER_NONE if degraded else paging.ORDER_DESC,
+                "next_offset": (paging.unordered_cursor(server_offset) if degraded
                                 else paging.next_cursor(points, limit, offset))}
         if warning:
             page["warning"] = warning
+        elif degraded:
+            page["warning"] = (
+                "this page is NOT ordered by recency: it continues an unordered walk "
+                "that an earlier page fell back to, so the records come back in "
+                "arbitrary id order."
+            )
 
         return page
 
-    def _scroll_ordered(self, limit: int, request: dict) -> tuple[list, str | None]:
-        """The ordered page, or the unordered one plus the sentence that admits it.
+    def _scroll_page(self, limit: int, request: dict) -> tuple[list, object, str | None]:
+        """`(points, server_offset, warning)`. Warning set means the order was lost.
 
         Three attempts at most, and the middle one is the whole point: an archive written
         before this feature has no payload index, so the FIRST ordered listing on it is
@@ -457,21 +497,28 @@ class MemoryStore:
         `QdrantError` IS a `CoreError`, so it re-raised the exact refusal it existed to
         handle. The whole offline suite stayed green, because the fake raises a
         `ValueError`, and the real archive answered HTTP 400 on the very first listing.
+        A second version then absorbed every 4xx, which swallowed 408 and 409 as well;
+        `_refuses_to_order` is an allow-list of exactly 400 for that reason.
 
-        So: only a REJECTED REQUEST (a 4xx that is not "gone" or "not allowed") becomes
-        degradation, because that is what "I cannot order this" looks like. A 404, a 403,
-        a timeout or an unreachable server must reach the caller as a failure. Dressing
-        those up as an unordered page would report a partial or empty archive as a
-        successful listing, which is the worst lie a memory tool can tell.
-
-        The status and nothing else, never the message text: `_is_absent` in
-        `core/qdrant.py` records what reading error bodies costs, since a proxy echoes
-        upstream statuses into its own body.
+        THE WARNING QUOTES THE SERVER AND DIAGNOSES NOTHING. It used to assert "the
+        payload index is missing and could not be created", which the code never checked:
+        a malformed filter, an invalid `start_from` and an oversized payload are all 400s
+        and all got that same sentence. Asserting an unverified cause in the very field
+        added to stop the tool from asserting unverified things would be this feature's
+        original defect, reincarnated.
         """
+        if not request["ordered"]:
+            # Already degraded upstream; continue the unordered walk and page it.
+            points, server_offset = self.q.scroll(self.collection, limit=limit,
+                                                  offset=request["offset"])
+
+            return points, server_offset, None
         try:
-            return self.q.scroll(self.collection, limit=limit,
-                                 filter_=request["filter"],
-                                 order_by=request["order_by"])[0], None
+            points, _ = self.q.scroll(self.collection, limit=limit,
+                                      filter_=request["filter"],
+                                      order_by=request["order_by"])
+
+            return points, None, None
         except Exception as exc:
             if not _refuses_to_order(exc):
                 raise
@@ -480,19 +527,24 @@ class MemoryStore:
         self.q.ensure_payload_index(self.collection, paging.ORDER_KEY,
                                     paging.INDEX_SCHEMA)
         try:
-            return self.q.scroll(self.collection, limit=limit,
-                                 filter_=request["filter"],
-                                 order_by=request["order_by"])[0], None
+            points, _ = self.q.scroll(self.collection, limit=limit,
+                                      filter_=request["filter"],
+                                      order_by=request["order_by"])
+
+            return points, None, None
         except Exception as exc:
             if not _refuses_to_order(exc):
                 raise
-            points, _ = self.q.scroll(self.collection, limit=limit)
+            refusal = str(exc)
+            # Unordered, and paged by the server's cursor: the order is what was lost
+            # here, not the rest of the archive.
+            points, server_offset = self.q.scroll(self.collection, limit=limit)
 
-            return points, (
-                "this page is NOT ordered by recency: the archive could not be ordered "
-                f"by {paging.ORDER_KEY} (the payload index for it is missing and could "
-                "not be created), so the records come back in arbitrary id order. Do "
-                "not read the first page as the newest records."
+            return points, server_offset, (
+                f"this page is NOT ordered by recency: the archive refused to order by "
+                f"{paging.ORDER_KEY} and the reason it gave is {refusal!r}. The records "
+                "come back in arbitrary id order, so do not read the first page as the "
+                "newest records. Paging still works: keep following `next_offset`."
             )
 
     def count(self) -> int | None:

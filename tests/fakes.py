@@ -127,15 +127,23 @@ class FakeVectorStore:
                with_vector: bool = False, filter_: dict | None = None,
                payload_fields: list[str] | None = None,
                order_by: dict | None = None):
-        """REFUSES to order by an unindexed field, because the server does.
+        """REFUSES what Qdrant refuses, and PAGES the way Qdrant pages.
 
-        Measured on 1.18.2: `order_by` without a range index answers HTTP 400, ordering
-        excludes records that lack the key entirely, `start_from` INCLUDES the boundary
-        value, and `next_page_offset` comes back null on any ordered scroll. A fake that
-        is kinder than that hides the degradation path this feature is built around.
+        Measured on 1.18.2, and every line below exists because the real server does it:
+        `order_by` without a range index answers 400; `order_by` together with `offset`
+        answers 400; an ordered scroll EXCLUDES records lacking the key and returns
+        `next_page_offset` null; `start_from` INCLUDES the boundary value; an UNORDERED
+        scroll pages by `offset` and hands back the next one.
+
+        The unordered paging is not a nicety. While this fake ignored `offset` and always
+        returned the head, the whole offline suite was blind to a real defect: the
+        degraded listing dropped the server's cursor, so a 749-record archive answered as
+        if it ended after one page. A fake more generous than production hides exactly the
+        bug it should catch.
         """
+        points = self.collections.get(name, {}).get("points", {})
         items = [{"id": pid, "payload": p.get("payload", {})}
-                 for pid, p in self.collections.get(name, {}).get("points", {}).items()
+                 for pid, p in points.items()
                  if not filter_ or _matches_filter(p.get("payload", {}), filter_)]
         # `has_id` lives here and not in `_matches_filter`: that helper sees a payload,
         # and this exclusion is about the point's ID, which only this method knows.
@@ -144,13 +152,29 @@ class FakeVectorStore:
         if excluded:
             items = [i for i in items if i["id"] not in excluded]
         if order_by is None:
-            return items[:limit], None
+            # Unordered: page by position in the (stable) insertion order, like the
+            # server pages by its internal id order, and report the next cursor.
+            ids = [i["id"] for i in items]
+            start = ids.index(offset) if offset in ids else 0
+            window = items[start:start + limit]
+            nxt = ids[start + limit] if start + limit < len(ids) else None
+
+            return window, nxt
+        if offset is not None:
+            raise FakeQdrantRefusal(
+                "Wrong input: Cannot use an `offset` when using `order_by`. The "
+                "alternative for paging is to use `order_by.start_from` and a filter to "
+                "exclude the IDs that you've already seen for the `order_by.start_from` "
+                "value")
         key = order_by.get("key")
         if key not in self.indexes.get(name, set()):
             raise FakeQdrantRefusal(
                 f"Wrong input: No range index for `order_by` key: `{key}`. Please "
                 f"create one to use `order_by`.")
-        items = [i for i in items if i["payload"].get(key) is not None]
+        # A non-string value is EXCLUDED, not fatal: measured, the real server drops such
+        # a record from an ordered scroll. Sorting it with a bare `<` raised TypeError
+        # here, which trains a test on a failure production does not have.
+        items = [i for i in items if isinstance(i["payload"].get(key), str)]
         items.sort(key=lambda i: i["payload"][key],
                    reverse=order_by.get("direction", "asc") == "desc")
         start = order_by.get("start_from")
