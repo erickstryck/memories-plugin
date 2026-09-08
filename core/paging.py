@@ -109,19 +109,36 @@ def _as_instant(value) -> str | None:
     comparison was expected to live there; it ended up never called, and a second copy of
     a rule this delicate is a rule that will drift.
 
+    It converts to a COMMON ZONE, and that is the whole point. `fromisoformat(...)
+    .isoformat()` round-trips the offset it was given, so `...T00:00:00+00:00` and
+    `...T21:00:00-03:00` came back as two different strings for one moment and the tie
+    at a page boundary went undetected: measured, a 4-record archive walked with mixed
+    offsets returned 60 rows, repeated one record 16 times and never terminated. Handling
+    only `Z` was handling only the pair the textual replace below already collapses.
+
+    A NAIVE value is read as UTC, matching how the server reads one: Qdrant's `datetime`
+    index stores an instant, so a stamp with no zone has to be assigned one somewhere,
+    and assuming the local zone of whichever host happens to run the listing would make
+    the comparison depend on the reader.
+
     The import is local so this module keeps depending on nothing but its error base,
     which is what lets the cursor rule be tested with no store, no config and no network.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     if not isinstance(value, str) or not value.strip():
         return None
     try:
         # `Z` is not accepted by `fromisoformat` before 3.11 and this package supports
         # older hosts, so it is normalized rather than relied upon.
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).isoformat()
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def page_request(cursor: str | None) -> dict:

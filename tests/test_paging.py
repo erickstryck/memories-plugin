@@ -221,6 +221,11 @@ class TestTiesAcrossTIMESTAMPFORMATS(unittest.TestCase):
 
     Z = "2026-09-01T00:00:00Z"
     OFFSET = "2026-09-01T00:00:00+00:00"
+    #: The SAME instant carried with a non-UTC offset, and with no zone at all. These are
+    #: the spellings a textual `Z` replacement does not reach, and the ones an independent
+    #: reviewer measured into a 60-row walk over 4 records that never terminated.
+    MINUS_THREE = "2026-08-31T21:00:00-03:00"
+    NAIVE = "2026-09-01T00:00:00"
 
     def test_the_two_spellings_of_one_instant_are_the_same_boundary(self):
         points = [point("a", self.Z), point("b", self.OFFSET)]
@@ -229,6 +234,26 @@ class TestTiesAcrossTIMESTAMPFORMATS(unittest.TestCase):
         self.assertEqual(sorted(seen), ["a", "b"],
                          "both ids share the instant, so both must be excluded next page")
 
+    def test_a_non_utc_offset_is_the_same_boundary_as_utc(self):
+        """The `Z` pair is collapsed by a string replace, so it never proved the rule.
+
+        Two different OFFSETS for one moment are what distinguish comparing instants from
+        comparing normalized text, and this is the case that was failing.
+        """
+        points = [point("a", self.OFFSET), point("b", self.MINUS_THREE)]
+        value, seen, _ = paging.decode_cursor(
+            paging.next_cursor(points, limit=2, previous=None))
+        self.assertEqual(sorted(seen), ["a", "b"],
+                         "-03:00 and +00:00 name one instant; both ids must be excluded")
+
+    def test_a_stamp_with_no_zone_is_read_as_utc(self):
+        """A naive stamp has to be assigned a zone somewhere. It is UTC, as the server
+        reads it, and never the local zone of whoever happens to run the listing."""
+        points = [point("a", self.NAIVE), point("b", self.OFFSET)]
+        value, seen, _ = paging.decode_cursor(
+            paging.next_cursor(points, limit=2, previous=None))
+        self.assertEqual(sorted(seen), ["a", "b"])
+
     def test_a_cursor_written_in_one_spelling_matches_a_page_in_the_other(self):
         previous = paging.encode_cursor(self.Z, ["a"])
         points = [point("b", self.OFFSET), point("c", self.OFFSET)]
@@ -236,6 +261,14 @@ class TestTiesAcrossTIMESTAMPFORMATS(unittest.TestCase):
             paging.next_cursor(points, limit=2, previous=previous))
         self.assertEqual(sorted(seen), ["a", "b", "c"],
                          "the accumulated id must survive a change of spelling")
+
+    def test_a_cursor_in_another_offset_still_accumulates(self):
+        """The accumulated ids must survive a change of ZONE, not merely of suffix."""
+        previous = paging.encode_cursor(self.MINUS_THREE, ["a"])
+        points = [point("b", self.OFFSET), point("c", self.OFFSET)]
+        value, seen, _ = paging.decode_cursor(
+            paging.next_cursor(points, limit=2, previous=previous))
+        self.assertEqual(sorted(seen), ["a", "b", "c"])
 
     def test_the_value_sent_back_is_the_one_the_server_wrote(self):
         """Normalizing for COMPARISON is right; positioning the server with a
