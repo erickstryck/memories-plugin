@@ -184,14 +184,45 @@ class TestSchemas(unittest.TestCase):
     def test_the_list_description_matches_what_the_listing_does(self):
         """It claimed "newest page first" while the scroll had no `order_by` at all, so
         pages came back in uuid4 order and a fresh write looked absent. The description
-        and the ordering are asserted together so neither can drift alone."""
+        and the ordering are asserted together so neither can drift alone.
+
+        The claims are named INDIVIDUALLY rather than by a keyword or two. A guard that
+        only looks for "newest" and "order" stays green while the sentences explaining
+        degradation and the cursor are deleted, as an independent review measured, and a
+        description that keeps the word but loses the meaning is the same defect this
+        test exists to prevent.
+        """
         by_name = {s["name"]: s for s in tools.SCHEMAS}
         listing = by_name["memory_list"]
-        self.assertIn("offset", listing["parameters"]["properties"],
-                      "a cursor the caller cannot send back is not pagination")
+        offset = listing["parameters"]["properties"].get("offset")
+        self.assertIsNotNone(offset,
+                             "a cursor the caller cannot send back is not pagination")
+        self.assertIn("next_offset", offset["description"],
+                      "the caller has to be told WHICH value to send back")
         text = listing["description"].lower()
-        self.assertIn("newest", text)
-        self.assertIn("order", text, "it has to name the field it reports the order in")
+
+        # Each claim the return value actually makes, so none can be dropped in silence.
+        for claim, why in (
+            ("newest", "the order it promises"),
+            ("updated_at", "the field that order is by"),
+            ("order", "the key every page reports the order in"),
+            ("updated_at_desc", "the value that means it WAS ordered"),
+            ("unordered", "the value that means it was not"),
+            ("warning", "what carries the reason when it was not"),
+            ("next_offset", "the cursor that makes a second page reachable"),
+            ("null", "how the caller knows the walk ended"),
+        ):
+            with self.subTest(claim=claim):
+                self.assertIn(claim, text, f"the description has to state {why}")
+
+    def test_the_list_description_does_not_promise_an_order_it_may_not_deliver(self):
+        """The defect being fixed was a description stating an order the code did not
+        provide. So the text may not claim recency unconditionally: it has to admit the
+        degraded case, where the first page is NOT the newest records."""
+        by_name = {s["name"]: s for s in tools.SCHEMAS}
+        text = by_name["memory_list"]["description"].lower()
+        self.assertTrue("not the newest" in text or "could not be ordered" in text,
+                        "an unconditional promise of recency is the original defect")
 
     def test_the_schemas_survive_the_wire(self):
         """hermes serializes these into a chat-completions request. Anything that does not
