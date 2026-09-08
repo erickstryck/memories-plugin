@@ -464,5 +464,40 @@ class TestParser(unittest.TestCase):
         self.assertGreater(found, 15, "the walk should reach every leaf, not a couple")
 
 
+class TestTheMemoryListingPages(unittest.TestCase):
+    """The CLI is the claude-code surface for this command (`skills/memory/SKILL.md`),
+    so a cursor only the hermes tool can send would leave one host without page 2."""
+
+    def test_the_parser_accepts_an_offset(self):
+        cli = load_cli()
+        args = cli.build_parser().parse_args(
+            ["memory", "list", "--limit", "2", "--offset", "abc"])
+        self.assertEqual(args.limit, 2)
+        self.assertEqual(args.offset, "abc")
+
+    def test_omitting_it_asks_for_the_newest_page(self):
+        cli = load_cli()
+        args = cli.build_parser().parse_args(["memory", "list"])
+        self.assertIsNone(args.offset)
+
+    def test_the_handler_forwards_both_arguments(self):
+        import unittest.mock
+        cli = load_cli()
+        seen = {}
+
+        class Store:
+            def list_page(self, limit, offset=None):
+                seen.update(limit=limit, offset=offset)
+
+                return {"count": 0, "memories": [], "next_offset": None,
+                        "order": "updated_at_desc"}
+
+        with unittest.mock.patch.object(cli.core, "build_memory",
+                                        lambda cfg, **kw: Store()):
+            rendered(cli.cmd_memory_list,
+                     type("A", (), {"limit": 3, "offset": "cur", "json": True})(), None)
+        self.assertEqual(seen, {"limit": 3, "offset": "cur"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

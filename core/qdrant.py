@@ -167,13 +167,19 @@ class Qdrant:
 
     def scroll(self, name: str, limit: int = 256, offset=None,
                with_vector: bool = False, filter_: dict | None = None,
-               payload_fields: list[str] | None = None) -> tuple[list[dict], object]:
+               payload_fields: list[str] | None = None,
+               order_by: dict | None = None) -> tuple[list[dict], object]:
         """`payload_fields` names the payload keys to fetch; None means the whole payload.
 
         Naming them matters for anything that runs on a loop. The watcher polls this every few
         seconds only to read a handful of `metadata` fields, and the full payload carries the
         CHUNK TEXT — so the cheap half of the change check was pulling the repository's entire
         indexed content over the network on every cycle.
+
+        `order_by` is handed to the server as it comes: it needs a range index on the key,
+        it cannot be combined with `offset` (the server refuses both together), and it makes
+        `next_page_offset` null even when more pages exist. Those are the caller's problem
+        to reason about, in `core/paging.py`; no rule about them lives here.
         """
         body = {"limit": limit, "with_vector": with_vector,
                 "with_payload": payload_fields if payload_fields else True}
@@ -181,6 +187,8 @@ class Qdrant:
             body["offset"] = offset
         if filter_:
             body["filter"] = filter_
+        if order_by:
+            body["order_by"] = order_by
         res = self.request("POST", f"/collections/{name}/points/scroll", body).get("result", {})
 
         return res.get("points", []), res.get("next_page_offset")

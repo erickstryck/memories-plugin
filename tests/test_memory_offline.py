@@ -468,5 +468,284 @@ class TestDropRequest(unittest.TestCase):
         self.assertEqual(idx.drop_request(purge_tmp=True, expired=True)["status"], "purged")
 
 
+class TestTheListingIsOrderedAndHonest(unittest.TestCase):
+    """The defect this fixes: the tool promised "newest page first" and returned id order.
+
+    So the property is not only "it sorts" but "it never claims to have sorted when it
+    did not". A listing that quietly falls back is the same defect wearing a new coat.
+    """
+
+    def _archive(self):
+        s, q, _ = store()
+        # Written oldest-first so insertion order cannot be mistaken for date order.
+        for text, when in (("oldest fact", "2026-01-01T00:00:00+00:00"),
+                           ("middle fact", "2026-05-05T10:00:00+00:00"),
+                           ("newest fact", "2026-09-01T00:00:00+00:00")):
+            mid = s.store(text)["id"]
+            point = q.get_point("mem", mid)
+            payload = dict(point["payload"], created_at=when, updated_at=when)
+            q.set_payload("mem", mid, payload)
+
+        return s, q
+
+    def test_the_first_page_is_the_newest_records(self):
+        s, _ = self._archive()
+        page = s.list_page(limit=2)
+        self.assertEqual([m["document"] for m in page["memories"]],
+                         ["newest fact", "middle fact"])
+
+    def test_it_reports_the_order_it_actually_used(self):
+        s, _ = self._archive()
+        self.assertEqual(s.list_page(limit=2)["order"], "updated_at_desc")
+
+    def test_the_cursor_walks_the_whole_archive_once(self):
+        s, _ = self._archive()
+        seen, cursor, pages = [], None, 0
+        while pages < 10:
+            page = s.list_page(limit=2, offset=cursor)
+            seen.extend(m["document"] for m in page["memories"])
+            cursor = page["next_offset"]
+            pages += 1
+            if cursor is None:
+                break
+        self.assertIsNone(cursor, "the walk has to terminate")
+        self.assertEqual(seen, ["newest fact", "middle fact", "oldest fact"],
+                         "every record exactly once, newest first")
+
+    def test_a_write_that_CREATES_the_collection_leaves_it_orderable(self):
+        """The index is born with the collection, matching `core/docs.py` and
+        `core/repos.py`. A collection that already exists gets its index from the read
+        path instead, which is what keeps a `store` from paying ~25 ms every time."""
+        q, emb = FakeVectorStore(), FakeEmbedder()
+        s = MemoryStore(q, emb, None, "fresh", emb.dim)
+        s.store("the first fact in a brand new collection")
+        self.assertIn("updated_at", q.indexes.get("fresh", set()))
+        self.assertIn(("ensure_payload_index", "fresh", "updated_at"), q.calls)
+
+    def test_a_listing_on_an_unindexed_archive_still_comes_back_ordered(self):
+        """The archive predates this feature: 744 records and no payload index at all,
+        measured on 2026-09-03. The first listing has to fix that itself."""
+        s, q = self._archive()
+        q.indexes.pop("mem", None)
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "updated_at_desc")
+        self.assertEqual([m["document"] for m in page["memories"]],
+                         ["newest fact", "middle fact"])
+
+    def test_when_ordering_cannot_be_had_it_degrades_AND_SAYS_SO(self):
+        s, q = self._archive()
+
+        def refuse(*a, **kw):
+            from tests.fakes import FakeQdrantRefusal
+            raise FakeQdrantRefusal("No range index for `order_by` key: `updated_at`.")
+
+        q.ensure_payload_index = lambda *a, **kw: None      # creating it does nothing
+        original = q.scroll
+        q.scroll = lambda *a, **kw: (refuse() if kw.get("order_by") else original(*a, **kw))
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "unordered")
+        self.assertIn("warning", page)
+        self.assertEqual(len(page["memories"]), 2, "it still answers")
+
+    def test_the_degraded_warning_names_the_reason_not_just_the_word_warning(self):
+        s, q = self._archive()
+
+        def refuse(*a, **kw):
+            from tests.fakes import FakeQdrantRefusal
+            raise FakeQdrantRefusal("No range index for `order_by` key: `updated_at`.")
+
+        q.ensure_payload_index = lambda *a, **kw: None
+        original = q.scroll
+        q.scroll = lambda *a, **kw: (refuse() if kw.get("order_by") else original(*a, **kw))
+        warning = s.list_page(limit=2)["warning"].lower()
+        self.assertIn("order", warning)
+        self.assertRegex(warning, r"(index|recency|newest)")
+
+    def test_a_read_never_creates_the_collection(self):
+        """`require_existing` is the rule; creating an index must not have smuggled an
+        `ensure_collection` into the read path."""
+        s, q, _ = store(collection="mem")
+        q.collections.clear()
+        with self.assertRaises(MemoryStoreError):
+            s.list_page()
+        self.assertEqual(q.list_collections(), [])
+
+    def test_it_degrades_when_the_refusal_arrives_as_the_REAL_error_type(self):
+        """The regression that offline tests missed and the real server caught.
+
+        `QdrantError` IS a `CoreError`, so a first version of this guard, which
+        re-raised every `CoreError` and absorbed everything else, re-raised the very
+        refusal it existed to handle. Against `FakeQdrantRefusal` (a `ValueError`) it
+        looked correct; against the real archive the listing died with HTTP 400 instead
+        of degrading. So the fixture here is the REAL exception class, and the decision
+        under test is by STATUS, not by type.
+        """
+        s, q = self._archive()
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "unordered")
+        self.assertIn("warning", page)
+        self.assertEqual(len(page["memories"]), 2)
+
+    def _refuse_ordering(self, q, status=400):
+        """Make ONLY the ordered scroll fail, with a real `QdrantError` carrying `status`.
+
+        Replacing `q.scroll` wholesale is what let a broken guard look tested: with every
+        scroll exploding, the fallback exploded too, so `assertRaises` passed no matter
+        what the guard decided. The unordered scroll has to keep working here, or the test
+        proves nothing about which failures are absorbed.
+        """
+        from core.qdrant import QdrantError
+        original = q.scroll
+
+        def maybe_refuse(*a, **kw):
+            if kw.get("order_by"):
+                error = QdrantError(f"HTTP {status} on POST /points/scroll: refused")
+                error.status = status
+                raise error
+
+            return original(*a, **kw)
+
+        q.scroll = maybe_refuse
+
+    def test_a_failure_that_is_NOT_about_ordering_still_reaches_the_caller(self):
+        """Degradation is for "I cannot order", never for "the archive is unreachable".
+
+        A 404, an auth failure, a timeout or a conflict must not be dressed up as an
+        unordered page: that would report a partial archive as a successful listing,
+        which is the worst possible lie for a memory tool.
+
+        Only the ORDERED scroll fails here, so a guard that absorbs too much produces a
+        successful degraded page and this test fails. An earlier version replaced every
+        scroll, which made it pass with the guard entirely disabled: verified by
+        neutralizing `_refuses_to_order` to `return True`, and the suite stayed green.
+        """
+        from core.qdrant import QdrantError
+        for status in (401, 403, 404, 408, 409, 429, 500, 502, 503, None):
+            with self.subTest(status=status):
+                s, q = self._archive()
+                self._refuse_ordering(q, status=status)
+                with self.assertRaises(QdrantError,
+                                       msg=f"HTTP {status} was absorbed as a page"):
+                    s.list_page(limit=2)
+
+    def test_the_warning_quotes_the_server_instead_of_diagnosing_the_cause(self):
+        """It used to assert "the payload index is missing and could not be created" for
+        EVERY 400, a cause nothing in the path verified. A malformed filter got the same
+        sentence. Asserting an unverified cause in the field added to stop the tool from
+        asserting unverified things is the original defect, reincarnated."""
+        s, q = self._archive()
+        q.ensure_payload_index = lambda *a, **kw: None
+        from core.qdrant import QdrantError
+        original = q.scroll
+
+        def refuse(*a, **kw):
+            if kw.get("order_by"):
+                error = QdrantError("HTTP 400: Format error in JSON body: Expected some "
+                                    "form of condition")
+                error.status = 400
+                raise error
+
+            return original(*a, **kw)
+
+        q.scroll = refuse
+        warning = s.list_page(limit=2)["warning"]
+        self.assertIn("Format error in JSON body", warning,
+                      "the reason has to be the one the server actually gave")
+        self.assertNotIn("index for it is missing", warning,
+                         "it must not diagnose a cause it never checked")
+
+    def test_a_degraded_page_STILL_PAGES_through_the_whole_archive(self):
+        """The regression a fake that ignored `offset` could not see.
+
+        Forcing `next_offset` to null on degradation meant the archive ended after one
+        page, while the tool description says a null `next_offset` means there is nothing
+        more. On the real archive that is 2 records out of 749, reported as complete.
+        """
+        s, q = self._archive()
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        seen, cursor, pages = [], None, 0
+        while pages < 10:
+            page = s.list_page(limit=2, offset=cursor)
+            self.assertEqual(page["order"], "unordered")
+            self.assertIn("warning", page)
+            seen.extend(m["document"] for m in page["memories"])
+            cursor = page["next_offset"]
+            pages += 1
+            if cursor is None:
+                break
+        self.assertIsNone(cursor, "the degraded walk has to terminate")
+        self.assertEqual(sorted(seen),
+                         ["middle fact", "newest fact", "oldest fact"],
+                         "a degraded listing still has to reach every record")
+
+    def test_a_cursor_from_a_degraded_walk_is_never_used_as_a_timestamp(self):
+        """The two modes carry different things in `value` (an instant vs a point id), so
+        feeding one to the other would send a uuid to `order_by.start_from` and take a
+        400 from the server. The cursor names its mode for that reason."""
+        from core import paging
+        s, q = self._archive()
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        cursor = s.list_page(limit=2)["next_offset"]
+        self.assertIsNotNone(cursor)
+        _, _, ordered = paging.decode_cursor(cursor)
+        self.assertFalse(ordered, "a degraded cursor must not claim to be ordered")
+        self.assertFalse(paging.page_request(cursor)["ordered"])
+        self.assertIsNone(paging.page_request(cursor)["order_by"],
+                          "continuing an unordered walk must not ask for ordering")
+
+    def test_a_write_does_not_pay_for_the_index_on_every_store(self):
+        """~25 ms per `PUT /index?wait=true`, measured against this Qdrant, took a store
+        from 45 ms to 74 ms. `core/docs.py` and `core/repos.py` both create their indexes
+        only when the collection is new; this now matches them."""
+        q, emb = FakeVectorStore(), FakeEmbedder()
+        s = MemoryStore(q, emb, None, "fresh", emb.dim)
+        for i in range(4):
+            s.store(f"fact {i}")
+        index_calls = [c for c in q.calls if c[0] == "ensure_payload_index"]
+        self.assertEqual(len(index_calls), 1,
+                         f"one index call for four writes, got {index_calls}")
+
+    def test_losing_the_order_MID_WALK_fails_instead_of_repeating_records(self):
+        """Found in round 2 of review, against the real server.
+
+        An ordered cursor carries a timestamp plus the ids seen at it. An unordered scroll
+        cannot be positioned by either, so falling back mid-walk restarts from the head:
+        measured, pages 1 and 2 delivered m9..m6, the index was dropped, and page 3 came
+        back m3..m6, repeating m6. Silently repeating records is worse than stopping,
+        because the caller cannot tell the difference. Failing with an actionable message
+        lets the walk restart, which is correct and cheap.
+        """
+        s, q = self._archive()
+        first = s.list_page(limit=1)
+        self.assertEqual(first["order"], "updated_at_desc")
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        with self.assertRaises(MemoryStoreError) as caught:
+            s.list_page(limit=1, offset=first["next_offset"])
+        message = str(caught.exception).lower()
+        self.assertIn("offset", message, "it has to say how to recover")
+        self.assertIn("repeat", message, "and why it refused")
+
+    def test_the_FIRST_page_still_degrades_rather_than_failing(self):
+        """The refusal above is about continuity, not about degradation: with no cursor
+        there is nothing to be continuous with, so a first page still answers."""
+        s, q = self._archive()
+        q.ensure_payload_index = lambda *a, **kw: None
+        self._refuse_ordering(q, status=400)
+        page = s.list_page(limit=2)
+        self.assertEqual(page["order"], "unordered")
+        self.assertEqual(page["count"], 2)
+
+    def test_a_corrupt_cursor_is_refused_rather_than_restarting(self):
+        from core.paging import PagingError
+        s, _ = self._archive()
+        with self.assertRaises(PagingError):
+            s.list_page(limit=2, offset="not-a-cursor!!")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

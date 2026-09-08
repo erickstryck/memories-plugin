@@ -181,6 +181,18 @@ class TestSchemas(unittest.TestCase):
         store_type = by_name["memory_store"]["parameters"]["properties"]["type"]
         self.assertNotIn("replace", store_type["description"].lower())
 
+    def test_the_list_description_matches_what_the_listing_does(self):
+        """It claimed "newest page first" while the scroll had no `order_by` at all, so
+        pages came back in uuid4 order and a fresh write looked absent. The description
+        and the ordering are asserted together so neither can drift alone."""
+        by_name = {s["name"]: s for s in tools.SCHEMAS}
+        listing = by_name["memory_list"]
+        self.assertIn("offset", listing["parameters"]["properties"],
+                      "a cursor the caller cannot send back is not pagination")
+        text = listing["description"].lower()
+        self.assertIn("newest", text)
+        self.assertIn("order", text, "it has to name the field it reports the order in")
+
     def test_the_schemas_survive_the_wire(self):
         """hermes serializes these into a chat-completions request. Anything that does not
         JSON-encode takes the WHOLE toolset down, not just this provider's part."""
@@ -661,6 +673,31 @@ class TestMemoryTools(unittest.TestCase):
         res = self.call("memory_list", limit=2)
         self.assertEqual(res["count"], 2)
         self.assertEqual(len(res["memories"]), 2)
+
+    def test_list_returns_the_newest_first_and_names_the_order(self):
+        for i in range(3):
+            self.call("memory_store", information=f"fact {i}")
+        res = self.call("memory_list", limit=2)
+        self.assertEqual(res["order"], "updated_at_desc")
+        self.assertEqual(res["count"], 2)
+
+    def test_list_accepts_the_cursor_it_handed_out(self):
+        """`next_offset` was decorative: nothing could send it back, so page 2 did not
+        exist on any surface. A cursor no caller can use is not pagination."""
+        for i in range(5):
+            self.call("memory_store", information=f"fact {i}")
+        first = self.call("memory_list", limit=2)
+        self.assertIsNotNone(first["next_offset"])
+        second = self.call("memory_list", limit=2, offset=first["next_offset"])
+        self.assertEqual(second["count"], 2)
+        first_ids = {m["id"] for m in first["memories"]}
+        second_ids = {m["id"] for m in second["memories"]}
+        self.assertEqual(first_ids & second_ids, set(), "page 2 repeated page 1")
+
+    def test_a_bad_cursor_is_reported_as_an_error_the_model_can_act_on(self):
+        res = self.call("memory_list", offset="garbage!!")
+        self.assertIn("error", res)
+        self.assertIn("cursor", res["error"].lower())
 
     def test_search_collections_is_read_only_and_reports_what_it_skipped(self):
         """It searches OTHER systems' archives. A collection built by another embedding

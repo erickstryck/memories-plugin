@@ -20,7 +20,7 @@ the CLI name is on the left, the hermes tool name on the right.
 | `memory find` | `memory_find` | dense search, cheap, no re-rank |
 | `memory recall` | `memory_recall` | two-stage search with re-rank, the accurate one |
 | `memory get` | `memory_get` | read one by id |
-| `memory list` | `memory_list` | list what is stored |
+| `memory list` | `memory_list` | list what is stored, newest first |
 | `memory update` | `memory_update` | correct a fact in place |
 | `memory delete` | `memory_delete` | remove one |
 | `memory search-collections` | `memory_search_collections` | read-only search in someone else's archive |

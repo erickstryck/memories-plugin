@@ -16,12 +16,25 @@ import threading
 import zlib
 
 
+class FakeQdrantRefusal(ValueError):
+    """What the real server answers, in the shape callers branch on.
+
+    A `ValueError` and not a `QdrantError` on purpose: the fakes import nothing from
+    `core`, and the property under test is that the CALLER decides by `.status`.
+    """
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 class FakeVectorStore:
     """A vector store in a dict. Real similarity (cosine), not simulated."""
 
     def __init__(self):
         self.collections: dict[str, dict] = {}   # name -> {"size", "points": {id: point}}
         self.calls: list[tuple] = []
+        self.indexes: dict[str, set] = {}        # collection -> indexed payload fields
 
     # ---- collections ----
     def list_collections(self) -> list[str]:
@@ -47,6 +60,7 @@ class FakeVectorStore:
 
     def ensure_payload_index(self, name: str, field: str, schema: str) -> None:
         self.calls.append(("ensure_payload_index", name, field))
+        self.indexes.setdefault(name, set()).add(field)
 
     def delete_collection(self, name: str) -> None:
         self.collections.pop(name, None)
@@ -110,10 +124,62 @@ class FakeVectorStore:
         return out[:limit]
 
     def scroll(self, name: str, limit: int = 256, offset=None,
-               with_vector: bool = False, filter_: dict | None = None):
+               with_vector: bool = False, filter_: dict | None = None,
+               payload_fields: list[str] | None = None,
+               order_by: dict | None = None):
+        """REFUSES what Qdrant refuses, and PAGES the way Qdrant pages.
+
+        Measured on 1.18.2, and every line below exists because the real server does it:
+        `order_by` without a range index answers 400; `order_by` together with `offset`
+        answers 400; an ordered scroll EXCLUDES records lacking the key and returns
+        `next_page_offset` null; `start_from` INCLUDES the boundary value; an UNORDERED
+        scroll pages by `offset` and hands back the next one.
+
+        The unordered paging is not a nicety. While this fake ignored `offset` and always
+        returned the head, the whole offline suite was blind to a real defect: the
+        degraded listing dropped the server's cursor, so a 749-record archive answered as
+        if it ended after one page. A fake more generous than production hides exactly the
+        bug it should catch.
+        """
+        points = self.collections.get(name, {}).get("points", {})
         items = [{"id": pid, "payload": p.get("payload", {})}
-                 for pid, p in self.collections.get(name, {}).get("points", {}).items()
+                 for pid, p in points.items()
                  if not filter_ or _matches_filter(p.get("payload", {}), filter_)]
+        # `has_id` lives here and not in `_matches_filter`: that helper sees a payload,
+        # and this exclusion is about the point's ID, which only this method knows.
+        excluded = {i for cond in (filter_ or {}).get("must_not", [])
+                    for i in cond.get("has_id", [])}
+        if excluded:
+            items = [i for i in items if i["id"] not in excluded]
+        if order_by is None:
+            # Unordered: page by position in the (stable) insertion order, like the
+            # server pages by its internal id order, and report the next cursor.
+            ids = [i["id"] for i in items]
+            start = ids.index(offset) if offset in ids else 0
+            window = items[start:start + limit]
+            nxt = ids[start + limit] if start + limit < len(ids) else None
+
+            return window, nxt
+        if offset is not None:
+            raise FakeQdrantRefusal(
+                "Wrong input: Cannot use an `offset` when using `order_by`. The "
+                "alternative for paging is to use `order_by.start_from` and a filter to "
+                "exclude the IDs that you've already seen for the `order_by.start_from` "
+                "value")
+        key = order_by.get("key")
+        if key not in self.indexes.get(name, set()):
+            raise FakeQdrantRefusal(
+                f"Wrong input: No range index for `order_by` key: `{key}`. Please "
+                f"create one to use `order_by`.")
+        # A non-string value is EXCLUDED, not fatal: measured, the real server drops such
+        # a record from an ordered scroll. Sorting it with a bare `<` raised TypeError
+        # here, which trains a test on a failure production does not have.
+        items = [i for i in items if isinstance(i["payload"].get(key), str)]
+        items.sort(key=lambda i: i["payload"][key],
+                   reverse=order_by.get("direction", "asc") == "desc")
+        start = order_by.get("start_from")
+        if start is not None:
+            items = [i for i in items if i["payload"][key] <= start]
 
         return items[:limit], None
 

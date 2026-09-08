@@ -159,7 +159,7 @@ language.
 | create | `qctx memory store "<text>" --type T` |
 | update | `qctx memory update <id> --text "..."` |
 | delete | `qctx memory delete <id>` |
-| list | `qctx memory list --limit N` |
+| list | `qctx memory list --limit N [--offset <cursor>]` |
 | read another system's archive | `qctx memory search-collections "<topic>" --collections <name>` |
 | see config | `qctx config show` · `qctx collections list` |
 
