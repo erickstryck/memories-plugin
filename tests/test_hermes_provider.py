@@ -45,6 +45,10 @@ IMPLEMENTED = {
     "prefetch", "queue_prefetch", "recall_status", "system_prompt_block",
     "on_turn_start", "on_session_end", "sync_turn",
     "get_tool_schemas", "handle_tool_call", "get_config_schema", "save_config",
+    # v0.21: `identity_signature` is called on an uninitialized instance on EVERY inbound
+    # gateway message, and `pre_compress_checkpoint_api_version` decides whether the manager
+    # treats a pre-compress extraction as durably checkpointed.
+    "identity_signature", "pre_compress_checkpoint_api_version",
 }
 HERMES_ABSTRACTS = {"get_tool_schemas", "initialize", "is_available", "name"}
 
@@ -86,6 +90,27 @@ class TestTheContract(unittest.TestCase):
 
     def test_the_name_is_the_install_directory_name(self):
         self.assertEqual(MemoriesProvider().name, "memories")
+
+    def test_identity_signature_is_empty_and_costs_no_round_trip(self):
+        """Two contracts in one, and both are about WHERE hermes calls this.
+
+        The gateway calls `identity_signature()` on an UNINITIALIZED instance on every
+        inbound message, and folds the result into the cached-agent key. Empty is correct
+        here because the archive is keyed by collection, not by writer: a value that varied
+        per participant would partition a shared session's memory AND bust the agent cache
+        on every speaker change.
+
+        It must also answer without `initialize()` — no client, no config read, no Qdrant.
+        A construction-only instance is exactly what the gateway has."""
+        self.assertEqual(MemoriesProvider().identity_signature(), {})
+
+    def test_it_does_not_claim_to_checkpoint_what_it_never_writes(self):
+        """`memory_manager` reads this to decide whether every successful `on_pre_compress()`
+        was durably checkpointed. `on_pre_compress()` here returns "" and stores nothing, so
+        1 (the ABC's legacy default) is the honest answer; 2 would be a promise the adapter
+        does not keep. Raise it in the same commit that teaches that hook to write."""
+        self.assertEqual(MemoriesProvider().pre_compress_checkpoint_api_version, 1)
+        self.assertEqual(MemoriesProvider().on_pre_compress([{"role": "user", "content": "x"}]), "")
 
     def test_register_hands_the_provider_to_the_collector(self):
         class Collector:

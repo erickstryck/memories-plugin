@@ -742,6 +742,35 @@ class MemoriesProvider(_Base):
         HERMES_HOME that `hermes backup` would otherwise miss."""
         return []
 
+    # -- two more the ABC grew after the five above ---------------------------
+    #
+    # Same reason as that block, one hermes version later: v0.21.1's MemoryProvider has 23
+    # public names where v0.20.1 had 21, and the two new ones are here. In production they
+    # would be inherited from `_Base` for free; the offline suite builds this class with
+    # `_Base = object`, so nothing would answer to them without an explicit definition.
+    #
+    # Neither was found by reading a changelog. `test_hermes_provider.py` reads the surface
+    # off the INSTALLED ABC and failed — which is the whole reason it measures instead of
+    # comparing against a list someone typed.
+
+    #: Legacy best-effort, which is the ABC's own default and the honest value here:
+    #: `on_pre_compress()` above is a no-op, so there is no durable checkpoint to advertise.
+    #: Declaring 2 would tell `memory_manager` this provider persists every successful
+    #: pre-compress extraction (`_LEGACY_PRE_COMPRESS_API_VERSION`, agent/memory_manager.py),
+    #: and it persists none. Raise it if and when that hook learns to write.
+    pre_compress_checkpoint_api_version = 1
+
+    def identity_signature(self) -> dict:
+        """No identity-mapping values, so nothing here should ever bust a cached gateway
+        agent. The archive is keyed by COLLECTION, not by writer identity: two participants
+        in a shared session read and write the same points, which is the intended behaviour
+        and is exactly what an identity in this signature would start partitioning.
+
+        Empty also keeps it cheap, and that matters more than it looks: the gateway calls
+        this on an UNINITIALIZED instance on every inbound message, so reading config or
+        touching Qdrant here would put a round-trip in front of every message."""
+        return {}
+
 
 def _load_tools():
     """Import the sibling `tools` module, in either of the two load modes.
