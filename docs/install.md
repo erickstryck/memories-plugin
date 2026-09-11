@@ -128,9 +128,12 @@ big-file read guard is **not** registered. That is what the script below is for:
 ```
 
 It reports the credentials, the URLs a shell-less hermes would find, the symlink, the provider
-selection and the guard, and `--apply` writes only what is missing. It accepts either install
-shape: a symlink at the repository root (what a git install produces) and one at `hosts/hermes`
-both load, and it leaves whichever you have alone.
+selection and the guard, and `--apply` writes only what is missing. It accepts all three install
+shapes and leaves whichever you have alone: the CLONE that `hermes plugins install` puts at
+`$HERMES_HOME/plugins/memories` (it copies the repository there, it does not link), a symlink to
+the repository root, and a symlink to `hosts/hermes`. All three load, because the root
+`__init__.py` re-exports the same provider the adapter directory does. The test is the inode,
+not the text of the link, so a relative symlink counts as the same install as an absolute one.
 
 **Then approve the hook once.** After registration `hermes hooks list` shows it
 `✗ not allowlisted`: the first file read of a new session asks at the TTY, and **a hermes with no

@@ -306,33 +306,35 @@ note "memory.memory_enabled: ${enabled:-<unset>} (gates hermes' built-in store, 
 say ""
 say "=== install location ==="
 
-# TWO targets are correct, and this used to know only one. `$ROOT/hosts/hermes` is the adapter
-# directory; `$ROOT` itself is the repository root, whose `__init__.py` re-exports the same
-# provider so that `hermes plugins install owner/repo` — which clones the WHOLE repository into
-# `plugins/<name>/` — works. Both load: verified against hermes' own `_load_provider_from_dir`,
-# 20 tools either way. Insisting on one of them would have this script silently undo a link
-# somebody made on purpose, and the report would call a working install wrong.
-if [ -L "$LINK" ]; then
-  current_target="$(readlink "$LINK")"
-  if [ "$current_target" = "$TARGET" ] || [ "$current_target" = "$ROOT" ]; then
-    ok "already installed: $LINK -> $current_target"
+# THREE shapes are correct, and this file has learned them one at a time. `$ROOT/hosts/hermes`
+# is the adapter directory; `$ROOT` itself is the repository root, whose `__init__.py`
+# re-exports the same provider; and `$LINK` can BE `$ROOT`, because `hermes plugins install
+# owner/repo` CLONES the whole repository into `plugins/<name>/` rather than linking. All
+# three load: verified against hermes' own `_load_provider_from_dir`, 22 tools either way.
+# Insisting on one of them would have this script silently undo an install somebody made on
+# purpose, and the report would call a working one wrong.
+#
+# THE TEST IS `-ef`, NOT A STRING COMPARE, and that is the third fix to this same decision.
+# `readlink` returns the link's TEXT, so an equally valid relative link
+# (`ln -s ../../Documentos/memories-plugin memories`) failed a `= "$ROOT"` compare, fell past
+# every branch, and got silently repointed by the apply — the exact bug this file already
+# fixed twice for other spellings of the same shape. `-ef` compares inodes and `$ROOT` is
+# already physical (`cd -P`, above), so every spelling of "it already points here" collapses
+# into one condition. It is also false for a broken link and for a path that does not exist,
+# which is what keeps the branches below reachable.
+if [ "$LINK" -ef "$ROOT" ] || [ "$LINK" -ef "$TARGET" ]; then
+  if [ -L "$LINK" ]; then
+    ok "already installed: $LINK -> $(readlink "$LINK")"
   else
-    note "$LINK points at $current_target — will repoint it at $TARGET"
-  fi
-elif [ -e "$LINK" ]; then
-  # THE THIRD SHAPE, and the one the README's own install line produces: not a symlink at
-  # all, but the repository ITSELF, because `hermes plugins install owner/repo` CLONES into
-  # `$PLUGINS/<name>/`. The root `__init__.py` re-exports the provider, so this loads
-  # exactly like the two links above — verified against hermes' own `_load_provider_from_dir`,
-  # 22 tools either way.
-  #
-  # Refusing it told every non-developer that a correct install was broken: step 2 of the
-  # README creates this shape and step 3 called it "move it aside by hand".
-  if [ "$LINK" -ef "$ROOT" ]; then
+    # The git-install shape: not a link at all, but the clone itself. Refusing it told every
+    # non-developer that a correct install was broken — step 2 of the README creates this
+    # shape and step 3 called it "move it aside by hand".
     ok "already installed: $LINK is the git-installed clone itself"
-  else
-    fail "$LINK exists and is NOT a symlink — move it aside by hand"
   fi
+elif [ -L "$LINK" ]; then
+  note "$LINK points at $(readlink "$LINK") — will repoint it at $TARGET"
+elif [ -e "$LINK" ]; then
+  fail "$LINK exists and is NOT a symlink — move it aside by hand"
 else
   note "$LINK will be created -> $TARGET"
 fi
@@ -698,7 +700,15 @@ fi
 # --------------------------------------------------------------------------- dry run
 say ""
 say "=== what changes ==="
-say "  $LINK -> $TARGET   (symlink; one source of truth)"
+# THE BANNER HAS TO AGREE WITH THE DECISION ABOVE. It used to announce the symlink
+# unconditionally, so an operator whose install is already one of the three working shapes
+# read "will replace my clone with a symlink into itself" two screens after being told the
+# install was fine — promising exactly the destruction this script does not do.
+if [ "$LINK" -ef "$ROOT" ] || [ "$LINK" -ef "$TARGET" ]; then
+  say "  $LINK   (UNCHANGED: it already loads)"
+else
+  say "  $LINK -> $TARGET   (symlink; one source of truth)"
+fi
 say "  $CONFIG: memory.provider: ${current:-<unset>} -> memories"
 if [ -z "$guard_entry" ] && [ "$hooks_shape" != seq ]; then
   say "  $CONFIG: hooks.pre_tool_call += matcher read_file -> $GUARD"
@@ -732,21 +742,18 @@ fi
 if ! mkdir -p "$PLUGINS"; then
   fail "could not create $PLUGINS — the symlink has nowhere to go"
 fi
-# LEAVES A LINK THAT ALREADY WORKS ALONE. `$ROOT` and `$ROOT/hosts/hermes` both load — the
-# repository root's `__init__.py` re-exports the same provider so a `hermes plugins install`
-# clone works — and this used to repoint either one at `$TARGET` unconditionally. The report
-# above learned to accept both first, and for one run this half did not: it silently undid a
-# root link somebody had made on purpose while the report called the install fine. Same fact,
-# two places, and only one of them was fixed; the condition now lives beside the write.
-if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$ROOT" ]; then
-  ok "symlink left as it is: $LINK -> $ROOT (the repository root loads too)"
-elif [ ! -L "$LINK" ] && [ -e "$LINK" ] && [ "$LINK" -ef "$ROOT" ]; then
-  # The git-install shape. Without this branch the apply falls through to the `else` below
-  # and FAILS — `elif [ -L "$LINK" ] || [ ! -e "$LINK" ]` is false for a real directory, so
-  # a clone never reached the `ln -sfn` (it refused rather than clobbering; measured).
-  # The cost was a cutover that passed every check and then exited 1 on the shape the
-  # README's own install line produces, with the config rewrite and the guard left undone.
-  ok "left as it is: $LINK is the git-installed clone itself"
+# LEAVES AN INSTALL THAT ALREADY WORKS ALONE, whichever of the three shapes it is. This is
+# the SAME decision as the report above, and keeping the two in agreement is the whole
+# lesson of this block: it once repointed a `$ROOT` link the report had just called fine,
+# then it had no branch at all for the git-installed clone. `-ef` is what collapses every
+# spelling — absolute link, relative link, the clone itself — into one condition, and it
+# is deliberately identical to the report's so the two cannot drift again.
+if [ "$LINK" -ef "$ROOT" ] || [ "$LINK" -ef "$TARGET" ]; then
+  if [ -L "$LINK" ]; then
+    ok "symlink left as it is: $LINK -> $(readlink "$LINK") (it already loads)"
+  else
+    ok "left as it is: $LINK is the git-installed clone itself"
+  fi
 elif [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
   if ln -sfn "$TARGET" "$LINK"; then
     ok "symlink in place"

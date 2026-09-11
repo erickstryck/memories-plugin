@@ -61,7 +61,7 @@ The same core serves two hosts, with the same operations and the same configurat
 | | claude-code | hermes-agent |
 |---|---|---|
 | adapter | `hooks/` | `hosts/hermes/` |
-| install | `claude plugin marketplace add .` | a symlink into `$HERMES_HOME/plugins/memories` |
+| install | `claude plugin marketplace add .` | a clone or a symlink at `$HERMES_HOME/plugins/memories` |
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
 | big-file guard | `PreToolUse` hook on `Read` | `pre_tool_call` shell hook, matcher `read_file` |

@@ -202,6 +202,22 @@ class TestDryRunReportsAndChangesNothing(CutoverCase):
         self.assertFalse((self.hermes / "plugins" / "memories").exists(),
                          "the dry run created the symlink")
 
+    def test_the_banner_does_not_promise_a_symlink_it_will_not_create(self):
+        """The dry run has to describe the apply it will actually perform.
+
+        The banner announced `$LINK -> $TARGET` unconditionally, so an operator whose install
+        is already one of the three working shapes was told, two screens after being told the
+        install was fine, that the script would replace it with a symlink into itself — the
+        destruction this script does not do, promised in writing."""
+        link = self.hermes / "plugins" / "memories"
+        link.symlink_to(REPO)
+
+        out = self.run_script()
+
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertLine(out, "UNCHANGED: it already loads")
+        self.assertNoLine(out, f"{link} -> {REPO / 'hosts' / 'hermes'}")
+
     def test_it_names_the_provider_it_replaces_and_says_the_data_stays(self):
         """Asserted against the sentences that carry the PROVIDER NAME, not just against the
         `search-collections` string — which is printed whatever provider is being replaced,
@@ -786,6 +802,42 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertLine(out, "is NOT a symlink")
         self.assertLine(out, "nothing was changed")
 
+    def test_a_RELATIVE_link_to_the_root_is_left_alone_like_an_absolute_one(self):
+        """A link is a link however it is spelled, and this decision used to disagree.
+
+        `readlink` returns the link's TEXT, so `ln -s ../../repo memories` — pointing exactly
+        where an accepted absolute link points — failed the `= "$ROOT"` compare, missed the
+        clone branch too, and reached `ln -sfn`, which silently repointed an install somebody
+        made on purpose. That is the third spelling of the one bug this block keeps having.
+
+        `-ef` compares inodes, so this passes for free; it is here because nothing else in the
+        suite creates a relative link, and a future edit back to a string compare would look
+        harmless against every other test."""
+        link = self.hermes / "plugins" / "memories"
+        relative = os.path.relpath(self.root, link.parent)
+        link.symlink_to(relative)
+        self.assertNotEqual(os.readlink(link), str(self.root), "the link was not relative")
+
+        out = self.run_script("--apply")
+
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(os.readlink(link), relative, "apply repointed a working link")
+        self.assertIn("provider: memories", self.config_yaml.read_text())
+
+    def test_an_absolute_link_to_the_root_is_left_alone(self):
+        """The shape that was only ever pinned by reading the script's source. It is
+        reachable behaviourally with the same fixtures as its neighbours, so it is asserted
+        the same way: the link still points where the operator put it, and the rest of the
+        cutover still ran."""
+        link = self.hermes / "plugins" / "memories"
+        link.symlink_to(self.root)
+
+        out = self.run_script("--apply")
+
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(os.readlink(link), str(self.root), "apply repointed a working link")
+        self.assertIn("provider: memories", self.config_yaml.read_text())
+
     def test_a_plugins_path_that_cannot_be_created_is_reported_like_every_other_step(self):
         """`mkdir -p` failing used to exit through `set -e` with no message, unlike every
         neighbouring step — the operator would see the applying banner and nothing else.
@@ -1272,33 +1324,35 @@ def _marker_check_says_ok(file_text: str) -> bool:
 
 
 class TestEitherInstallShapeIsLeftAlone(unittest.TestCase):
-    """Two symlink targets are correct, and the script has to accept both.
+    """THREE install shapes load, and the script has to leave every one of them alone.
 
     `$ROOT/hosts/hermes` is the adapter directory; `$ROOT` is the repository root, whose
-    `__init__.py` re-exports the same provider so that `hermes plugins install owner/repo` — which
-    clones the WHOLE repository into `plugins/<name>/` — works. Both load, verified against
-    hermes' own loader.
+    `__init__.py` re-exports the same provider; and `$LINK` can BE `$ROOT`, because
+    `hermes plugins install owner/repo` clones the WHOLE repository into `plugins/<name>/`
+    instead of linking. All three load, verified against hermes' own loader.
 
     THE BUG THIS HOLDS, and it was mine: the report learned to accept both and the apply did not,
     so for one run `--apply` silently repointed a root link somebody had made on purpose while the
     report called the install fine. One fact in two places, and only one of them fixed.
+
+    The behavioural cases live in `TestApplyAgainstAFakeHome` — the clone, the absolute link
+    and the relative link each run `--apply` and assert the install survived it. What stays
+    here is the one assertion that has no behavioural form: that the report and the apply
+    decide with the SAME predicate, which is what stops them drifting apart a third time.
     """
 
-    def test_the_report_accepts_a_link_at_the_repository_ROOT(self):
+    def test_the_report_and_the_APPLY_share_one_predicate(self):
         source = SCRIPT.read_text()
-        self.assertIn('[ "$current_target" = "$ROOT" ]', source,
-                      "the report would call a root link wrong")
+        predicate = '[ "$LINK" -ef "$ROOT" ] || [ "$LINK" -ef "$TARGET" ]'
+        self.assertEqual(source.count(f"if {predicate}; then"), 3,
+                         "the report, the apply and the dry-run banner must agree on one test")
 
-    def test_the_APPLY_leaves_a_root_link_alone(self):
-        """The half that was missed. The condition has to sit beside the write, not only in the
-        report, or the two can disagree again."""
+    def test_the_decision_is_not_a_string_compare(self):
+        """`readlink` text equality is what let a relative link — the same install, spelled
+        differently — fall through to the repoint. Inodes are the only spelling-proof test."""
         source = SCRIPT.read_text()
-        self.assertRegex(source, r'if \[ -L "\$LINK" \] && \[ "\$\(readlink "\$LINK"\)" = "\$ROOT" \]',
-                         "apply does not special-case a root link")
-        write_index = source.index('ln -sfn "$TARGET" "$LINK"')
-        guard_index = source.index('= "$ROOT" ]; then\n  ok "symlink left as it is')
-        self.assertLess(guard_index, write_index,
-                        "the guard must be reached BEFORE the write that repoints the link")
+        self.assertNotIn('[ "$(readlink "$LINK")" = "$ROOT" ]', source)
+        self.assertNotIn('[ "$current_target" = "$ROOT" ]', source)
 
 
 if __name__ == "__main__":
