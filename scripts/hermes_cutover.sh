@@ -741,10 +741,11 @@ fi
 if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$ROOT" ]; then
   ok "symlink left as it is: $LINK -> $ROOT (the repository root loads too)"
 elif [ ! -L "$LINK" ] && [ -e "$LINK" ] && [ "$LINK" -ef "$ROOT" ]; then
-  # The git-install shape, and the SAME lesson as the branch above it — this file has now
-  # learned it twice. `ln -sfn` below would replace a working clone with a symlink pointing
-  # into itself, which is how `hermes plugins install` gets undone by the script meant to
-  # finish it. The condition lives beside the write for that reason.
+  # The git-install shape. Without this branch the apply falls through to the `else` below
+  # and FAILS — `elif [ -L "$LINK" ] || [ ! -e "$LINK" ]` is false for a real directory, so
+  # a clone never reached the `ln -sfn` (it refused rather than clobbering; measured).
+  # The cost was a cutover that passed every check and then exited 1 on the shape the
+  # README's own install line produces, with the config rewrite and the guard left undone.
   ok "left as it is: $LINK is the git-installed clone itself"
 elif [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
   if ln -sfn "$TARGET" "$LINK"; then

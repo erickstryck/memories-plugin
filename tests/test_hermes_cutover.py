@@ -749,11 +749,14 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         `$PLUGINS/<name>/`, so `$LINK` is a real directory that IS `$ROOT`. The root
         `__init__.py` re-exports the provider, so it loads like either symlink.
 
-        Two failures in one, and the second is the dangerous one: the check refused ("move
-        it aside by hand"), and the apply — reached by any run that got past it — would
-        `ln -sfn` a symlink into the clone's own subdirectory, destroying a working install.
-        So this asserts the directory is STILL a directory afterwards, not merely that the
-        script printed something friendly.
+        Two failures in one. The check refused ("move it aside by hand"), and the apply
+        block had no branch for the shape either: a real directory fails `[ -L "$LINK" ] ||
+        [ ! -e "$LINK" ]`, so it fell to the `else` and exited 1. It refused rather than
+        clobbering — the `ln -sfn` was never reachable for a directory — but the cutover
+        still ended with the config rewrite and the read guard undone.
+
+        So this asserts the whole cutover completed, not merely that the script printed
+        something friendly, and that the clone is untouched on the way out.
         """
         script = self.fake_root(None, "fake-home", ".hermes", "plugins", "memories")
         out = self.run_script("--apply", script=script)
@@ -1294,20 +1297,6 @@ class TestEitherInstallShapeIsLeftAlone(unittest.TestCase):
                          "apply does not special-case a root link")
         write_index = source.index('ln -sfn "$TARGET" "$LINK"')
         guard_index = source.index('= "$ROOT" ]; then\n  ok "symlink left as it is')
-        self.assertLess(guard_index, write_index,
-                        "the guard must be reached BEFORE the write that repoints the link")
-
-    def test_the_APPLY_leaves_the_git_installed_CLONE_alone(self):
-        """The third shape, and the same lesson a second time: `hermes plugins install`
-        clones the repository into `$PLUGINS/<name>/`, so `$LINK` is a real directory that
-        IS `$ROOT`. `ln -sfn` would replace it with a symlink into its own subdirectory.
-
-        Pinned at source level, beside its sibling above, because the behavioural test for
-        it can only be reached once the CHECK accepts the shape — and a later edit that
-        re-tightened the check would make a behavioural-only test pass by never arriving."""
-        source = SCRIPT.read_text()
-        write_index = source.index('ln -sfn "$TARGET" "$LINK"')
-        guard_index = source.index('ok "left as it is: $LINK is the git-installed clone itself"')
         self.assertLess(guard_index, write_index,
                         "the guard must be reached BEFORE the write that repoints the link")
 
