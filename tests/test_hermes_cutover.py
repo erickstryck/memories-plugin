@@ -742,6 +742,47 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertEqual(self.config_yaml.read_text(), CONFIG_YAML)
         self.assertEqual(list(self.hermes.glob("config.yaml.bak-*")), [])
 
+    def test_the_clone_hermes_plugins_install_makes_IS_the_install_and_survives_apply(self):
+        """THE SHAPE THE README'S OWN INSTALL LINE PRODUCES, and the script used to refuse it.
+
+        `hermes plugins install owner/repo` does not symlink: it CLONES the repository into
+        `$PLUGINS/<name>/`, so `$LINK` is a real directory that IS `$ROOT`. The root
+        `__init__.py` re-exports the provider, so it loads like either symlink.
+
+        Two failures in one, and the second is the dangerous one: the check refused ("move
+        it aside by hand"), and the apply — reached by any run that got past it — would
+        `ln -sfn` a symlink into the clone's own subdirectory, destroying a working install.
+        So this asserts the directory is STILL a directory afterwards, not merely that the
+        script printed something friendly.
+        """
+        script = self.fake_root(None, "fake-home", ".hermes", "plugins", "memories")
+        out = self.run_script("--apply", script=script)
+
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertLine(out, "the git-installed clone itself")
+        self.assertNoLine(out, "is NOT a symlink")
+
+        link = self.hermes / "plugins" / "memories"
+        self.assertTrue(link.is_dir(), "the clone stopped being a directory")
+        self.assertFalse(link.is_symlink(), "apply replaced the clone with a symlink to itself")
+        self.assertTrue((link / "scripts" / SCRIPT.name).exists(),
+                        "apply clobbered the clone's own contents")
+        # The rest of the cutover still has to happen: accepting the shape is not the same
+        # as skipping the work, and an early `exit` would pass every assertion above.
+        self.assertIn("provider: memories", self.config_yaml.read_text())
+
+    def test_a_directory_that_is_NOT_this_checkout_is_still_refused(self):
+        """The other half of the same condition. Accepting the clone must not turn the check
+        into "any directory will do": a stray `plugins/memories` from some other source is
+        still something the operator has to look at, and `-ef` is what tells them apart."""
+        stray = self.hermes / "plugins" / "memories"
+        stray.mkdir()
+        (stray / "__init__.py").write_text("# some other provider\n")
+        out = self.run_script("--apply")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertLine(out, "is NOT a symlink")
+        self.assertLine(out, "nothing was changed")
+
     def test_a_plugins_path_that_cannot_be_created_is_reported_like_every_other_step(self):
         """`mkdir -p` failing used to exit through `set -e` with no message, unlike every
         neighbouring step — the operator would see the applying banner and nothing else.
@@ -1253,6 +1294,20 @@ class TestEitherInstallShapeIsLeftAlone(unittest.TestCase):
                          "apply does not special-case a root link")
         write_index = source.index('ln -sfn "$TARGET" "$LINK"')
         guard_index = source.index('= "$ROOT" ]; then\n  ok "symlink left as it is')
+        self.assertLess(guard_index, write_index,
+                        "the guard must be reached BEFORE the write that repoints the link")
+
+    def test_the_APPLY_leaves_the_git_installed_CLONE_alone(self):
+        """The third shape, and the same lesson a second time: `hermes plugins install`
+        clones the repository into `$PLUGINS/<name>/`, so `$LINK` is a real directory that
+        IS `$ROOT`. `ln -sfn` would replace it with a symlink into its own subdirectory.
+
+        Pinned at source level, beside its sibling above, because the behavioural test for
+        it can only be reached once the CHECK accepts the shape — and a later edit that
+        re-tightened the check would make a behavioural-only test pass by never arriving."""
+        source = SCRIPT.read_text()
+        write_index = source.index('ln -sfn "$TARGET" "$LINK"')
+        guard_index = source.index('ok "left as it is: $LINK is the git-installed clone itself"')
         self.assertLess(guard_index, write_index,
                         "the guard must be reached BEFORE the write that repoints the link")
 

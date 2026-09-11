@@ -320,7 +320,19 @@ if [ -L "$LINK" ]; then
     note "$LINK points at $current_target — will repoint it at $TARGET"
   fi
 elif [ -e "$LINK" ]; then
-  fail "$LINK exists and is NOT a symlink — move it aside by hand"
+  # THE THIRD SHAPE, and the one the README's own install line produces: not a symlink at
+  # all, but the repository ITSELF, because `hermes plugins install owner/repo` CLONES into
+  # `$PLUGINS/<name>/`. The root `__init__.py` re-exports the provider, so this loads
+  # exactly like the two links above — verified against hermes' own `_load_provider_from_dir`,
+  # 22 tools either way.
+  #
+  # Refusing it told every non-developer that a correct install was broken: step 2 of the
+  # README creates this shape and step 3 called it "move it aside by hand".
+  if [ "$LINK" -ef "$ROOT" ]; then
+    ok "already installed: $LINK is the git-installed clone itself"
+  else
+    fail "$LINK exists and is NOT a symlink — move it aside by hand"
+  fi
 else
   note "$LINK will be created -> $TARGET"
 fi
@@ -728,6 +740,12 @@ fi
 # two places, and only one of them was fixed; the condition now lives beside the write.
 if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$ROOT" ]; then
   ok "symlink left as it is: $LINK -> $ROOT (the repository root loads too)"
+elif [ ! -L "$LINK" ] && [ -e "$LINK" ] && [ "$LINK" -ef "$ROOT" ]; then
+  # The git-install shape, and the SAME lesson as the branch above it — this file has now
+  # learned it twice. `ln -sfn` below would replace a working clone with a symlink pointing
+  # into itself, which is how `hermes plugins install` gets undone by the script meant to
+  # finish it. The condition lives beside the write for that reason.
+  ok "left as it is: $LINK is the git-installed clone itself"
 elif [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
   if ln -sfn "$TARGET" "$LINK"; then
     ok "symlink in place"
