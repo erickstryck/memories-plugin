@@ -47,7 +47,7 @@ the CLI name is on the left, the hermes tool name on the right.
 | `repos refresh` | `repos_refresh` | reindex the files that changed on disk since indexing |
 | `repos init` | `repos_init` | detect this working copy and offer to index it |
 | `repos add-all` | *(CLI only)* | index the whole repository, in the background |
-| `repos status` | *(CLI only)* | what is indexing, and whether the daemon is up |
+| `repos status` | *(CLI only)* | what is indexing, whether the daemon is up, and what is held in quarantine |
 | `repos cancel` | *(CLI only)* | stop indexing; what is already indexed stays |
 | `repos daemon` | *(CLI only)* | start, stop, or run the background indexer |
 | `repos drop` | `repos_drop` | delete a repository archive, permanently |
@@ -69,6 +69,21 @@ skips the files that did not change.
 **It ends when you do.** Each session writes a lease with its host's pid; when the last claude or
 hermes exits (cleanly or killed) the daemon notices within a cycle and stops. Nothing is left
 running behind you.
+
+**A file that cannot be indexed is held, not retried forever.** An empty file, or one whose
+content the embedding endpoint refuses, would otherwise be queued on every cycle: the archive
+never gets a chunk for it, so the next poll sees it missing all over again. Such a file goes into
+a quarantine and `repos status` names it with the reason:
+
+```
+  my-project: 2 file(s) on record as unindexable
+      /path/to/empty.json: nothing indexable (empty file, or whitespace only)
+```
+
+**It releases itself when the file changes.** The record is keyed by the file's content, not its
+path, so editing it (or filling in a file that was empty) puts it back in the queue with no
+command to run. An outage is deliberately *not* held: an unreachable endpoint fails the whole job
+and is retried, because that is a fact about the minute, not about the file.
 
 ### Configuration and diagnostics: CLI only
 

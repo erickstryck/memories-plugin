@@ -2,6 +2,7 @@
 quality, so it is the one that most deserves tests with TEETH."""
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -163,6 +164,30 @@ class TestLineNumbersMatchAReader(unittest.TestCase):
 
     def test_an_oversized_block_falling_back_to_the_fixed_window(self):
         self._check("".join("x" * 300 + "\n" for _ in range(40)), target=1500, hard_max=2000)
+
+    def test_a_line_too_long_to_keep_whole_is_marked_as_sliced(self):
+        """The ONE case where the range cannot reproduce the text, so the promise is not made
+        at all. `_check` requires every chunk to reproduce its lines; a piece cut from inside a
+        line cannot, so it carries `sliced=True` and `repos`/`docs` store it as a snapshot.
+        Without the flag, 21 of 22 chunks claimed `lines 3-3` while holding 2,400 chars of a
+        50,000-char line, and a consumer following the locator got the wrong text."""
+        content = "def a():\n    return 1\n" + "z" * 50_000 + "\n"
+        chunks = chunk_text(content)
+        whole = [c for c in chunks if not c.sliced]
+        sliced = [c for c in chunks if c.sliced]
+        self.assertTrue(sliced, "the long line was not marked as sliced")
+        self.assertTrue(whole, "the ordinary lines were swept into the sliced set")
+
+        # Every chunk that still CLAIMS to be locatable must genuinely reproduce its lines.
+        path = os.path.join(tempfile.mkdtemp(), "doc.txt")
+        with open(path, "w", newline="") as fh:
+            fh.write(content)
+        with open(path, newline="") as fh:
+            disk = fh.readlines()
+        for c in whole:
+            expected = "".join(disk[c.start_line - 1:c.end_line]).strip("\n")
+            self.assertEqual(c.text, expected,
+                             f"lines {c.start_line}-{c.end_line} do not reproduce the chunk")
 
 
 class TestChunkText(unittest.TestCase):

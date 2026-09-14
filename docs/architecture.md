@@ -252,6 +252,7 @@ core/       the portable core, no reference to a host or an agent
   indexer.py    what the daemon runs, kept apart so the daemon never knows Qdrant
   daemon.py     the background indexer: runs the queue, watches, ends with its hosts
   jobs.py       the queue, on disk: a file a command writes and the daemon reads
+  quarantine.py files that could not be indexed, keyed by content so a repair releases them
   lease.py      who is still using the daemon; one note per host, pid and moment
   install.py    the wizard's checks, host-neutral, the same contract as setup.py
   setup.py      diagnostics and suggestions

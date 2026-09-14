@@ -43,8 +43,16 @@ def load(repo: str) -> dict:
         found = json.loads(_path(repo).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(found, dict):
+        return {}
 
-    return found if isinstance(found, dict) else {}
+    # EVERY VALUE IS VALIDATED, not just the top level. A single malformed entry used to
+    # raise AttributeError out of `held`, which runs inside the watcher — and `daemon.run`
+    # swallows a raising watcher, so indexing stopped for EVERY repository on the machine,
+    # silently and permanently. `repos status` raised on the same entry, so the one command
+    # that could have diagnosed it was the one that died. Dropping the bad entry degrades to
+    # "retry that file", which is this module's safe direction.
+    return {path: meta for path, meta in found.items() if isinstance(meta, dict)}
 
 
 def record(repo: str, path: str, reason: str) -> None:

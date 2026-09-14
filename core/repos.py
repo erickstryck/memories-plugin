@@ -30,7 +30,7 @@ from . import ports
 from .chunk import chunk_text, mode_for_suffix
 from .docs import (GONE, MTIME_TOLERANCE, _iso, _point_id, _read_source, content_digest,
                     doc_id_for, source_changed)
-from .errors import CoreError
+from .errors import CoreError, infrastructure_errors
 from .qdrant import QdrantError, _is_absent
 
 
@@ -187,6 +187,18 @@ class RepoIndex:
         for path in paths:
             try:
                 added = self._write_one(repo, path)
+            except infrastructure_errors():
+                # AN OUTAGE IS NOT A PROPERTY OF THE FILE, so it must not be reported as a
+                # per-path skip. It used to be: `except CoreError` caught EmbeddingError and
+                # QdrantError alongside "nothing indexable", so a caller that remembers skips
+                # — `indexer.work`, feeding the quarantine — recorded "the endpoint timed
+                # out" as a permanent fact about the file, keyed by an mtime a network
+                # failure does not change. Measured: three healthy files excluded forever by
+                # one blip, and on the refresh path `_write_one` deletes before it embeds, so
+                # their chunks were gone with no way back. Raising instead fails the whole
+                # job, which the daemon retries — the honest outcome when the archive or the
+                # endpoint is down.
+                raise
             except (CoreError, OSError, ValueError) as exc:
                 skipped.append((path, str(exc)))
                 continue
@@ -227,7 +239,10 @@ class RepoIndex:
                     "repo": repo,
                     "metadata": {
                         "path": path, "start_line": piece.start_line,
-                        "end_line": piece.end_line, "mode": mode,
+                        "end_line": piece.end_line,
+                        # A sliced piece cannot be re-read from its line range, so it is a
+                        # snapshot however locatable the suffix is — see `chunk.Chunk.sliced`.
+                        "mode": "snapshot" if piece.sliced else mode,
                         "chunk_ix": ix, "n_chunks": len(pieces),
                         "indexed_at": _iso(now),
                         "src_mtime": st.st_mtime, "src_size": st.st_size,

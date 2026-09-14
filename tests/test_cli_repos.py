@@ -541,8 +541,11 @@ class TestStatusShowsWhatIsQuarantined(CLICase):
         jobs.update("alpha", state=jobs.DONE)
         quarantine.record("alpha", path, "HTTP 500: input (83086 tokens) is too large")
         text = self.rendered(self.cli.cmd_repos_status)
-        self.assertIn("quarantine", text.lower())
+        self.assertIn("unindexable", text.lower())
+        self.assertIn(path, text, "the user cannot act on a count without the path")
         self.assertIn("83086", text, "the reason must reach the user, not just the count")
+        self.assertIn("content changes", text.lower(),
+                      "the user must be told how a held file comes back")
 
     def test_the_json_form_carries_the_quarantine_too(self):
         from core import jobs, quarantine
@@ -558,7 +561,8 @@ class TestStatusShowsWhatIsQuarantined(CLICase):
         from core import jobs
 
         jobs.enqueue("alpha", "index", ["/a.py"])
-        self.assertNotIn("quarantine", self.rendered(self.cli.cmd_repos_status).lower(),
+        text = self.rendered(self.cli.cmd_repos_status).lower()
+        self.assertNotIn("unindexable", text,
                          "an empty quarantine must not add noise to every status")
 
 

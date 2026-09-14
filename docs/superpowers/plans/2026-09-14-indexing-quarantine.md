@@ -1143,7 +1143,7 @@ Esperado: os mesmos jobs **não** voltam a `pending`. Antes da correção, volta
 ```bash
 python3 - <<'EOF'
 import json, time, urllib.request
-U="http://light-server-h12d-8d.dog-pirarucu.ts.net:8003/v1/embeddings"
+U="http://127.0.0.1:8003/v1/embeddings"
 worst=0
 for i in range(40):
     body=json.dumps({"model":"bge-m3","input":["sonda de latencia"]}).encode()

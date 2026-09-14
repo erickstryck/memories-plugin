@@ -1509,10 +1509,17 @@ def cmd_repos_status(args, cfg):
     # Printed even when every job reads `done`, because that is exactly the state a held file
     # produces: the job succeeded, and some of its files were skipped on purpose. Without this
     # the skip is invisible, and a file held by mistake would never be found.
+    #
+    # WORDED AS A RECORD, NOT AS A DECISION, because `load` is what it reads: the entry stays
+    # on disk until something calls `held`, so a file repaired a moment ago still appears here
+    # while the next cycle will in fact retry it. Saying "not being retried" made that gap a
+    # false statement; saying what is on record is true either way.
     for repo, entries in sorted(held.items()):
-        print(f"  {repo}: {len(entries)} file(s) in quarantine, not being retried")
+        print(f"  {repo}: {len(entries)} file(s) on record as unindexable")
         for path, meta in sorted(entries.items()):
             print(f"      {path}: {meta.get('reason', '')[:100]}")
+    if held:
+        print("  (a held file returns on its own once its content changes)")
 
 
 def cmd_repos_cancel(args, cfg):

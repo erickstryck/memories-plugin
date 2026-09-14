@@ -362,5 +362,59 @@ class TestASkippedFileIsReportedNotRaised(unittest.TestCase):
         self.assertIn("nothing indexable", entry["reason"])
 
 
+class TestAnOutageIsNotAPropertyOfTheFile(unittest.TestCase):
+    """`add_files` used to catch `CoreError`, the ROOT of the hierarchy, so an unreachable
+    embedding endpoint arrived in `skipped` in exactly the same shape as "nothing indexable".
+    Whoever remembered skips then recorded a network failure as a permanent fact about a file,
+    keyed by an mtime an outage does not change. Worse on the refresh path: `_write_one`
+    deletes before it embeds, so the file's existing chunks went too, with no way back."""
+
+    def _an_index_whose_endpoint_is_down(self):
+        from core.embedding import EmbeddingError
+
+        ix = an_index("alpha")
+
+        def refuse(texts):
+            raise EmbeddingError("network failure on http://127.0.0.1:8003/v1/embeddings")
+
+        ix.embedder.embed = refuse
+
+        return ix
+
+    def test_an_embedding_outage_raises_instead_of_reporting_a_skip(self):
+        ix = self._an_index_whose_endpoint_is_down()
+        from core.embedding import EmbeddingError
+
+        with self.assertRaises(EmbeddingError):
+            ix.add_files("alpha", [a_file("real content\n")])
+
+    def test_a_qdrant_outage_raises_too(self):
+        from core.qdrant import QdrantError
+
+        ix = an_index("alpha")
+
+        def refuse(*a, **kw):
+            raise QdrantError("could not reach the archive")
+
+        ix.q.upsert = refuse
+        with self.assertRaises(QdrantError):
+            ix.add_files("alpha", [a_file("real content\n")])
+
+    def test_a_file_level_failure_is_still_reported_as_a_skip(self):
+        """The distinction is the point: an empty file IS a property of the file, so it must
+        keep landing in `skipped` rather than failing the whole batch."""
+        ix = an_index("alpha")
+        out = ix.add_files("alpha", [a_file("")])
+        self.assertEqual(out["files"], 0)
+        self.assertIn("nothing indexable", out["skipped"][0][1])
+
+    def test_one_unreadable_file_does_not_stop_the_batch(self):
+        ix = an_index("alpha")
+        good = a_file("x = 1\n")
+        out = ix.add_files("alpha", [a_file(""), good])
+        self.assertEqual(out["files"], 1, "a per-file skip must not abort its neighbours")
+        self.assertEqual(len(out["skipped"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

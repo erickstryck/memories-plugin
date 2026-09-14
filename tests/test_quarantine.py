@@ -6,6 +6,7 @@ next poll reports it as missing all over again. The resulting load on the shared
 endpoint pushed automatic recall from 0.04 s to 1.98 s against a 2.00 s ceiling, so the user saw
 "[automatic recall — UNAVAILABLE]" with no visible connection to indexing.
 """
+import json
 import os
 import sys
 import tempfile
@@ -125,6 +126,27 @@ class TestFailureDegradesToHoldingNothing(unittest.TestCase):
         quarantine.dir().mkdir(parents=True, exist_ok=True)
         (quarantine.dir() / "alpha.json").write_text("[1, 2, 3]", encoding="utf-8")
         self.assertEqual(quarantine.load("alpha"), {})
+
+    def test_a_malformed_ENTRY_does_not_bring_the_watcher_down(self):
+        """`held` runs inside the watcher, and `daemon.run` swallows a raising watcher — so
+        one bad value used to stop indexing for EVERY repository on the machine, silently and
+        permanently, while `repos status` raised on the same entry. Validating only the top
+        level was not enough."""
+        path = a_file()
+        for bad in (None, "a string", [1, 2], 42):
+            quarantine.dir().mkdir(parents=True, exist_ok=True)
+            (quarantine.dir() / "alpha.json").write_text(json.dumps({path: bad}),
+                                                         encoding="utf-8")
+            self.assertEqual(quarantine.held("alpha"), set(), f"value {bad!r} was not dropped")
+
+    def test_a_good_entry_survives_beside_a_malformed_one(self):
+        good, bad = a_file(), a_file()
+        quarantine.record("alpha", good, "nothing indexable")
+        entry = quarantine.load("alpha")
+        entry[bad] = "not a dict at all"
+        quarantine._write("alpha", entry)
+        self.assertEqual(quarantine.held("alpha"), {good},
+                         "one bad entry must not discard the good ones")
 
     def test_an_unwritable_state_dir_does_not_raise(self):
         with mock.patch("core.quarantine._write", return_value=False):

@@ -486,5 +486,53 @@ class TestQuarantineReleasesWhenTheContentChanges(unittest.TestCase):
         self.assertIn(path, job["paths"])
 
 
+class TestBothDoorsIntoTheQueueAreShut(unittest.TestCase):
+    """The watcher has TWO sources of work: paths the archive has never seen, and paths it
+    has seen and that changed. Subtracting the quarantine from only the first left the loop
+    open through the second."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_an_INDEXED_file_that_later_breaks_stops_being_re_queued(self):
+        """The other door into the queue. A file that was indexed and then emptied keeps its
+        old chunks (`_write_one` raises before it deletes), so `changed_paths` reports it
+        forever — and the quarantine was only subtracted from NEW paths. Measured before the
+        fix: 3 refresh jobs in 6 cycles for one emptied file, with the file already held."""
+        doomed = a_file_on_disk("content\n")
+        ix = FakeIndex(changed=[doomed], fails={doomed: "nothing indexable"})
+        watch = indexer.watcher(index=ix)
+        run_job = indexer.work(index=ix)
+
+        enqueued = 0
+        for _ in range(6):
+            watch()
+            job = jobs.load("alpha")
+            if job and job.get("state") == jobs.PENDING:
+                enqueued += 1
+                run_job(job)
+                jobs.update("alpha", state=jobs.DONE)
+        self.assertEqual(enqueued, 1,
+                         f"an indexed-then-broken file was re-queued {enqueued} times")
+
+    def test_held_is_read_once_per_cycle_not_once_per_candidate(self):
+        """`held()` reads the file, stats every entry and may rewrite it. Called inside the
+        candidate comprehension it cost 110 ms for 2,000 paths, against the 16 ms this
+        module's docstring budgets for a whole cycle."""
+        root = a_git_repo()
+        for i in range(5):
+            track(root, f"f{i}.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        watch = indexer.watcher(index=ix)
+        calls = []
+        real = indexer.quarantine.held
+        try:
+            indexer.quarantine.held = lambda repo: (calls.append(repo), real(repo))[1]
+            watch()
+        finally:
+            indexer.quarantine.held = real
+        self.assertEqual(len(calls), 1, f"held() ran {len(calls)} times in one cycle")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

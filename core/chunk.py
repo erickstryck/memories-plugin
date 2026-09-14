@@ -38,6 +38,13 @@ class Chunk:
     start_line: int  # 1-based, inclusive
     end_line: int    # 1-based, inclusive
     text: str
+    #: True when the text is a SLICE of the lines it names, not the whole of them — set
+    #: only when a line longer than the ceiling had to be cut inside. Such a piece cannot be
+    #: reproduced by re-reading `start_line..end_line`, which is exactly what locator mode
+    #: promises, so `repos`/`docs` store it as a snapshot instead. Without this the chunk
+    #: claimed a line range that returns up to 107,648 chars for a 2,400-char piece, and the
+    #: consumer following the locator would silently work on the wrong text.
+    sliced: bool = False
 
 
 #: Above this share of replacement characters, the decode failed rather than succeeded.
@@ -152,9 +159,14 @@ def pack_chunks(lines: list[str], target: int = TARGET_CHARS,
             chunks.append(Chunk(start + 1, end, text))
 
             return
-        for piece in _slice_long_line(text, target):
+        # SLICED AT `hard_max`, NOT `target`. The ceiling this branch exists to enforce is
+        # `hard_max`; slicing at the smaller `target` cut text that was already legal, turned
+        # a 7,700-char paragraph into four snapshot pieces where one locatable chunk was
+        # correct, and cost 2.5x the embedding calls on the very endpoint this change exists
+        # to unsaturate. `target` is the size to AIM for when packing, not a limit to cut at.
+        for piece in _slice_long_line(text, hard_max):
             if piece.strip():
-                chunks.append(Chunk(start + 1, end, piece))
+                chunks.append(Chunk(start + 1, end, piece, sliced=True))
 
     open_start: int | None = None
     size = 0

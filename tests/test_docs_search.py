@@ -173,12 +173,24 @@ class TestSearchBehaviour(DocsBase):
 
     def test_a_hit_carries_the_location_and_the_mode(self):
         idx, _ = self._index()
-        idx.keep_file(self._doc())
+        idx.keep_file(self._file("# Title\n\n" + "\n".join("pagination of the archive"
+                                                           for _ in range(80))))
         hit = idx.search("pagination", scope="library")[0][0]
         self.assertEqual(hit.mode, "locator")
         self.assertGreater(hit.start_line, 0)
         self.assertGreaterEqual(hit.end_line, hit.start_line)
         self.assertIsNone(hit.stale, "the file has not been touched since indexing")
+
+    def test_a_chunk_cut_from_INSIDE_a_long_line_is_a_snapshot(self):
+        """`_doc()` writes each section as ONE 7,700-char line, which is past `HARD_MAX_CHARS`
+        and so must be cut inside the line. Such a piece cannot be reproduced by re-reading
+        its line range, which is the whole promise of locator mode — so it is stored as a
+        snapshot. This assertion used to read `locator`, and passed only because the chunk
+        claimed a range it did not hold."""
+        idx, _ = self._index()
+        idx.keep_file(self._doc())
+        hit = idx.search("pagination", scope="library")[0][0]
+        self.assertEqual(hit.mode, "snapshot")
 
     def test_a_changed_file_marks_every_hit_from_it(self):
         idx, _ = self._index()

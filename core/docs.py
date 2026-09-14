@@ -225,7 +225,9 @@ class DocIndex:
                     "path": path,
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
-                    "mode": mode,
+                    # A sliced piece cannot be re-read from its line range, so it is a
+                    # snapshot however locatable the suffix is — see `chunk.Chunk.sliced`.
+                    "mode": "snapshot" if chunk.sliced else mode,
                     "scope": scope,
                     # Read by nobody in this package, kept on purpose: when a search
                     # returns a chunk that looks wrong, "which slice of how many" is the

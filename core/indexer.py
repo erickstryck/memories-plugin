@@ -96,7 +96,19 @@ def watcher(cfg=None, index=None):
             # of the question ("what moved" and "what is already indexed") from a single read.
             state = target.poll(repo)
             new_paths = _new_tracked_paths(entry, state["indexed"], new_memo)
-            changed = set(state["changed"]) | new_paths
+            # SUBTRACTED HERE, over the UNION, because there are two doors into the queue and
+            # the loop only closes if both are shut. `new_paths` covers a file that was never
+            # indexed; `state["changed"]` covers one that WAS indexed and then broke — an
+            # emptied file keeps its old chunks (`_write_one` raises before it deletes), so
+            # `changed_paths` reports it forever and a `refresh` job was enqueued on every
+            # other cycle, with the file already on record as unindexable. Measured before
+            # this line: 3 refresh jobs in 6 cycles for one emptied file.
+            #
+            # Read ONCE per cycle, not per candidate: `held` reads the file, stats every
+            # entry and may rewrite it. Inside `_new_tracked_paths`'s comprehension it ran
+            # per eligible path — measured 110 ms for 2,000 paths against the 16 ms this
+            # module's own docstring budgets for a whole cycle.
+            changed = (set(state["changed"]) | new_paths) - quarantine.held(repo)
             if not changed:
                 seen.pop(repo, None)
                 continue
@@ -183,11 +195,7 @@ def _new_tracked_paths(entry: dict, indexed: set, memo: dict | None = None) -> s
         if memo is not None:
             memo[repo] = (stamps, eligible)
 
-    # Held paths are dropped here rather than at the enqueue site because this is the function
-    # that decides what COUNTS as new — a file the archive will never accept is not new, it is
-    # known-bad. Leaving the filter to the caller would put the loop back the moment a second
-    # caller appeared.
-    return {p for p in eligible if p not in indexed and p not in quarantine.held(repo)}
+    return {p for p in eligible if p not in indexed}
 
 
 def _build(cfg):
