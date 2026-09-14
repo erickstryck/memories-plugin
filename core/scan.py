@@ -102,25 +102,39 @@ def eligible(root: str, max_bytes: int = MAX_FILE_BYTES) -> dict:
 
 
 def _sniff(path: str) -> str | None:
-    """`"binary"`, `"minified"`, `"unreadable"` or None — decided from one read of the head.
+    """`"binary"`, `"minified"`, `"unreadable"` or None.
 
     A NUL byte is the same test `_read_source` uses, applied earlier so an image is not read in
-    full only to be refused. The line length is measured on the same buffer, so a minified file
-    costs no extra I/O.
+    full only to be refused — decided from the HEAD alone, because a binary file announces
+    itself immediately.
+
+    THE LINE LENGTH IS MEASURED OVER THE WHOLE FILE, and the head is not enough. Measured on a
+    generated OpenAPI client: the longest line in the first 8 KB was 722 chars while the real
+    one — 107,648 chars — started at byte 16,687, so the file passed this very guard and failed
+    at the embedding endpoint instead (HTTP 500, "input is too large to process"). The read is
+    bounded by `MAX_FILE_BYTES` (1 MB), already applied by the caller before this runs, and it
+    happens on the eligibility pass — never on the watcher's cycle, which compares mtime/size.
     """
     try:
         with open(path, "rb") as fh:
             head = fh.read(_SNIFF_BYTES)
+            if b"\0" in head:
+                return "binary"
+            longest = carry = 0
+            buffer = head
+            while buffer:
+                segments = buffer.split(b"\n")
+                # The last segment may continue into the next read, so it is CARRIED rather
+                # than measured — every other one is a complete line. Without the carry, a
+                # line straddling a read boundary is measured as two short ones.
+                for segment in segments[:-1]:
+                    longest = max(longest, carry + len(segment))
+                    carry = 0
+                carry += len(segments[-1])
+                longest = max(longest, carry)
+                buffer = fh.read(_SNIFF_BYTES)
     except OSError:
         return "unreadable"
-    if b"\0" in head:
-        return "binary"
-    # EVERY segment counts, including the last one the read cut in half. Truncation can only
-    # make a line look SHORTER, so a fragment already past the threshold proves the real line
-    # is past it — there is no false positive to avoid here. Dropping that segment is what
-    # hid the commonest minified shape of all: a license comment on line one, the whole
-    # bundle on line two.
-    longest = max(len(part) for part in head.split(b"\n"))
     if longest > MINIFIED_LINE_CHARS:
         return "minified"
 

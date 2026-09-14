@@ -166,5 +166,33 @@ class TestAGitFailureIsNotAnEmptyRepository(unittest.TestCase):
                       "git's own reason never reached the caller")
 
 
+class TestMinifiedDetectionSeesPastTheFirstBytes(unittest.TestCase):
+    """The sniff read only the first 8192 bytes, so a long line further in was invisible.
+    Measured on a generated OpenAPI client: the longest line in the first 8 KB was 722 chars,
+    while the real one — 107,648 chars — started at byte 16,687. It passed the very guard
+    written to stop it, and then failed at the embedding endpoint instead."""
+
+    def test_a_long_line_starting_after_the_first_8kb_is_detected(self):
+        padding = "".join(f"line {i} with ordinary content here\n" for i in range(600))
+        self.assertGreater(len(padding), 8192, "the padding must push the long line past 8 KB")
+        root = a_repo(**{"generated.json": padding + "x" * 107_648 + "\n"})
+        found = scan.eligible(root)
+        self.assertEqual(found["eligible"], [],
+                         "a file whose long line sits past the sniff window was let through")
+        self.assertEqual(found["skipped"]["minified"], 1)
+
+    def test_an_ordinary_file_of_the_same_size_is_still_eligible(self):
+        root = a_repo(**{"normal.py": "".join(f"x = {i}\n" for i in range(4000))})
+        self.assertEqual(len(scan.eligible(root)["eligible"]), 1,
+                         "scanning the whole file must not start refusing ordinary ones")
+
+    def test_a_long_line_split_across_two_reads_is_still_measured_whole(self):
+        """The line straddles the 8192-byte read boundary, so its length is only visible to a
+        scan that CARRIES the tail of one read into the next."""
+        head = "short\n" * 100                      # ~600 bytes, well inside the first read
+        root = a_repo(**{"straddle.txt": head + "y" * 9000 + "\n"})
+        self.assertEqual(scan.eligible(root)["skipped"]["minified"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
