@@ -10,7 +10,7 @@ index answers questions about the part it has, and re-running skips whatever did
 import os
 import subprocess
 
-from . import jobs, scan
+from . import jobs, quarantine, scan
 
 #: How many files go to `add_files` at once. Small enough that progress moves visibly and a
 #: cancel is honoured quickly; large enough not to pay the call overhead per file.
@@ -33,7 +33,14 @@ def work(cfg=None, index=None, batch: int = BATCH):
             # the watcher and then cancelled mid-run would re-embed everything that changed
             # and STILL end up marked `cancelled` afterwards, claiming a cancellation for work
             # that fully ran.
-            target.refresh(repo, should_stop=lambda: jobs.cancel_requested(repo))
+            report = target.refresh(repo, should_stop=lambda: jobs.cancel_requested(repo))
+            # A file that changed and then fails to re-embed stays in `changed` forever, so it
+            # is queued again on every cycle — the same loop the `index` path had, reached by
+            # the other door. `missing` is deliberately NOT quarantined: a file that is gone
+            # costs no embedding, and `refresh` reports it on purpose for the user to see.
+            for item in report or ():
+                if item.get("action") == "skipped":
+                    quarantine.record(repo, item["path"], item.get("reason", "unindexable"))
 
             return
         paths = list(job.get("paths") or [])
@@ -42,7 +49,18 @@ def work(cfg=None, index=None, batch: int = BATCH):
             if jobs.cancel_requested(repo):
                 return
             chunk = paths[start:start + batch]
-            target.add_files(repo, chunk)
+            # THE RETURN VALUE IS THE POINT. `add_files` has always reported which paths it
+            # skipped and why; discarding it here is what made the watcher queue the same
+            # unindexable files every ~40 s forever, saturating the embedding endpoint that
+            # automatic recall shares (measured: 0.04 s idle, 1.98 s during a batch, against a
+            # 2.00 s ceiling).
+            out = target.add_files(repo, chunk) or {}
+            skipped = dict(out.get("skipped") or ())
+            for path, why in skipped.items():
+                quarantine.record(repo, path, why)
+            # Anything that went in is released, so a file repaired between two runs stops
+            # being held without anyone having to say so.
+            quarantine.clear(repo, [p for p in chunk if p not in skipped])
             done += len(chunk)
             # Same compare-and-set as the state writes in `daemon._run_one`: progress for a
             # job that has been superseded must not be written onto its replacement.
@@ -165,7 +183,11 @@ def _new_tracked_paths(entry: dict, indexed: set, memo: dict | None = None) -> s
         if memo is not None:
             memo[repo] = (stamps, eligible)
 
-    return {p for p in eligible if p not in indexed}
+    # Held paths are dropped here rather than at the enqueue site because this is the function
+    # that decides what COUNTS as new — a file the archive will never accept is not new, it is
+    # known-bad. Leaving the filter to the caller would put the loop back the moment a second
+    # caller appeared.
+    return {p for p in eligible if p not in indexed and p not in quarantine.held(repo)}
 
 
 def _build(cfg):

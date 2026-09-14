@@ -22,7 +22,7 @@ import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import indexer, jobs  # noqa: E402
+from core import indexer, jobs, quarantine  # noqa: E402
 
 
 def a_state_dir() -> str:
@@ -40,10 +40,14 @@ class FakeIndex:
     # make `new_paths` non-empty and silently flip the enqueued job from `refresh` to `index`,
     # failing tests that have nothing to do with checkouts. `/tmp/alpha` was one `mkdir` away
     # from doing exactly that; a path under a directory that cannot exist is not.
-    def __init__(self, changed=(), checkouts=("/nonexistent/alpha",), indexed=()):
+    def __init__(self, changed=(), checkouts=("/nonexistent/alpha",), indexed=(), fails=()):
         self._changed = list(changed)
         self._checkouts = list(checkouts)
         self._indexed = set(indexed)
+        # LISKOV: a fake that only knows how to SUCCEED is not a substitute for the real
+        # index, and that gap is exactly what let the re-queue loop through review. `fails`
+        # maps a path to the reason `add_files` reports for it, the way the real one does.
+        self._fails = dict(fails)
         self.refreshed = []
         self.indexed_calls = []
         # `added` records EVERY embed, with repeats, so a test can tell "indexed once" from
@@ -70,15 +74,24 @@ class FakeIndex:
         return {"changed": self.changed_paths(repo), "indexed": self.indexed_paths(repo)}
 
     def add_files(self, repo, paths, **kwargs):
+        skipped = [(p, self._fails[p]) for p in paths if p in self._fails]
+        stored = [p for p in paths if p not in self._fails]
         self.added.extend(paths)
-        self._indexed.update(paths)
+        self._indexed.update(stored)
 
-        return {"files": len(paths), "chunks": len(paths)}
+        return {"repo": repo, "files": len(stored), "chunks": len(stored), "skipped": skipped}
 
-    def refresh(self, repo):
+    def refresh(self, repo, should_stop=None):
         self.refreshed.append(repo)
+        report = []
+        for path in self._changed:
+            if path in self._fails:
+                report.append({"path": path, "action": "skipped",
+                               "reason": self._fails[path]})
+                continue
+            report.append({"path": path, "action": "reindexed", "chunks": 1})
 
-        return []
+        return report
 
 
 def a_git_repo() -> str:
@@ -95,6 +108,16 @@ def track(root: str, name: str, text: str = "x = 1\n") -> str:
     with open(path, "w") as fh:
         fh.write(text)
     subprocess.run(["git", "-C", root, "add", name], check=True, timeout=60)
+
+    return path
+
+
+def a_file_on_disk(text: str = "content\n") -> str:
+    """A real file OUTSIDE any repository, for the `refresh` path: the quarantine records the
+    mtime and size it reads from disk, so a path that cannot be `stat`ed is never recorded."""
+    fd, path = tempfile.mkstemp()
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
 
     return path
 
@@ -366,6 +389,101 @@ class TestTheWatcherDoesNotReindexForever(unittest.TestCase):
         self.assertIn(os.path.abspath(second), ix.added,
                       "a file tracked after the first job was never indexed")
         self.assertEqual(len(ix.added), 2, f"embedded more than once each: {ix.added}")
+
+
+class TestAFileThatCannotBeIndexedIsNotRetriedForever(unittest.TestCase):
+    """Measured on 2026-09-14: the same 22 files were re-queued every ~40 s indefinitely,
+    because `work()` discarded the `skipped` report `add_files` already returns. The load that
+    put on the shared embedding endpoint pushed automatic recall from 0.04 s to 1.98 s against
+    its 2.00 s ceiling, and the user saw UNAVAILABLE blocks naming nothing about indexing."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_file_that_fails_to_index_is_not_enqueued_again(self):
+        root = a_git_repo()
+        doomed = os.path.abspath(track(root, "empty.json", text=""))
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set(),
+                       fails={doomed: "nothing indexable (empty file, or whitespace only)"})
+        watch = indexer.watcher(index=ix)
+        run_job = indexer.work(index=ix)
+
+        watch(); watch()                       # debounce: enqueued on the second sighting
+        job = jobs.load("alpha")
+        self.assertIsNotNone(job, "the new file was never enqueued in the first place")
+        run_job(job)                           # the daemon runs it; add_files reports a skip
+
+        jobs.update("alpha", state=jobs.DONE)
+        watch(); watch()
+        self.assertEqual(jobs.load("alpha")["state"], jobs.DONE,
+                         "a file that can never be indexed was queued all over again")
+
+    def test_a_file_that_succeeds_is_not_quarantined(self):
+        root = a_git_repo()
+        track(root, "fine.py")
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
+        watch = indexer.watcher(index=ix)
+        run_job = indexer.work(index=ix)
+        watch(); watch()
+        run_job(jobs.load("alpha"))
+        self.assertEqual(quarantine.held("alpha"), set())
+
+    def test_the_reason_is_kept_so_the_user_can_read_it(self):
+        root = a_git_repo()
+        doomed = os.path.abspath(track(root, "huge.json", text="x"))
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set(),
+                       fails={doomed: "HTTP 500: input (83086 tokens) is too large"})
+        watch = indexer.watcher(index=ix)
+        run_job = indexer.work(index=ix)
+        watch(); watch()
+        run_job(jobs.load("alpha"))
+        self.assertIn("83086", quarantine.load("alpha")[doomed]["reason"])
+
+    def test_a_refresh_that_skips_a_file_also_quarantines_it(self):
+        """The `refresh` path needs this as much as `index`: a file that changed and fails to
+        re-embed stays in `changed` forever, so it is queued on every cycle."""
+        doomed = a_file_on_disk("broken\n")
+        ix = FakeIndex(changed=[doomed], fails={doomed: "nothing indexable"})
+        run_job = indexer.work(index=ix)
+        run_job({"repo": "alpha", "kind": "refresh", "paths": []})
+        self.assertIn("nothing indexable", quarantine.load("alpha")[doomed]["reason"])
+
+    def test_a_refresh_does_NOT_quarantine_a_file_that_merely_vanished(self):
+        """`missing` is a different state from "cannot be indexed": it costs no embedding, and
+        `refresh` reports it on purpose for the user to see. Holding it would erase that."""
+        gone = "/nonexistent/alpha/deleted.py"
+        ix = FakeIndex(changed=[])
+        ix.refresh = lambda repo, should_stop=None: [
+            {"path": gone, "action": "missing", "reason": "gone"}]
+        run_job = indexer.work(index=ix)
+        run_job({"repo": "alpha", "kind": "refresh", "paths": []})
+        self.assertEqual(quarantine.load("alpha"), {})
+
+
+class TestQuarantineReleasesWhenTheContentChanges(unittest.TestCase):
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_quarantined_file_is_queued_again_once_it_changes(self):
+        root = a_git_repo()
+        path = os.path.abspath(track(root, "was_empty.py", text=""))
+        ix = FakeIndex(changed=[], checkouts=[root], indexed=set(),
+                       fails={path: "nothing indexable (empty file, or whitespace only)"})
+        watch = indexer.watcher(index=ix)
+        run_job = indexer.work(index=ix)
+        watch(); watch()
+        run_job(jobs.load("alpha"))
+        jobs.update("alpha", state=jobs.DONE)
+
+        with open(path, "w") as fh:            # the file gains content
+            fh.write("def real_code():\n    return 1\n")
+        ix._fails.clear()                      # and now it indexes fine
+
+        watch(); watch()
+        job = jobs.load("alpha")
+        self.assertEqual(job["state"], jobs.PENDING,
+                         "a file that gained content was never retried")
+        self.assertIn(path, job["paths"])
 
 
 if __name__ == "__main__":
