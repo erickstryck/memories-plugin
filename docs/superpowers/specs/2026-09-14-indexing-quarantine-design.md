@@ -124,6 +124,55 @@ traria de volta o custo periódico que esta spec existe para eliminar.
 **Por que sem comando de limpeza:** se o reteste é automático, limpar à mão quase nunca é
 preciso. YAGNI — cabe adicionar depois se a necessidade aparecer.
 
+## Restrições de engenharia (valem para todas as camadas)
+
+Regra permanente do usuário, dita em 2026-08-04: **KISS e S.O.L.I.D. em tudo**. Com o
+qualificador de 2026-08-19, que pesa tanto quanto a regra: **simples não pode custar completo** —
+*"não adianta ser simples se não cobrir toda a config necessária"*. As duas metades juntas, não
+em tensão.
+
+### Como aplicar aqui
+
+**Escrever a versão direta primeiro.** Estrutura só entra quando um requisito **real e presente**
+exigir, nunca por hipótese. Antes de entregar cada peça, comparar com como o código existente
+resolve o mesmo problema — *"em quantas linhas?"*. Divergência grande é sinal de invenção, não de
+rigor. Neste projeto essa regra já foi paga duas vezes: maquinário defensivo que **causou** o bug
+que se estava depurando.
+
+**O molde é `core/jobs.py` e `core/lease.py`** (237 e 160 linhas). `quarantine.py` deve ficar
+nessa ordem de grandeza. Se passar disso, é sinal de que ganhou responsabilidade que não é dele.
+
+**SOLID, aplicado ao que esta spec realmente pede:**
+
+| Princípio | O que significa concretamente aqui |
+|---|---|
+| **S** — responsabilidade única | `quarantine.py` responde uma pergunta: *este conteúdo já falhou?* Não decide política de reteste, não fala com Qdrant, não formata saída. Quem decide é `indexer`; quem exibe é o CLI. |
+| **O** — aberto/fechado | Um motivo novo de falha (formato novo, erro novo do servidor) não deve exigir mudança em `quarantine.py`: o motivo é **dado opaco**, string vinda de quem falhou, nunca um enum que a quarentena precise conhecer. |
+| **L** — substituição | `FakeIndex` nos testes tem de honrar o mesmo contrato de `RepoIndex` — incluindo **falhar** como o real falha. É exatamente a violação disso (um fake que só sabe ter sucesso) que deixou o defeito A passar. |
+| **I** — segregação de interface | `indexer` consome `held()`/`record()`/`clear()`. Não recebe o dicionário inteiro para filtrar por conta própria. |
+| **D** — inversão de dependência | `quarantine` depende de `knobs.state_dir()`, a abstração que todo o resto usa, e de mais nada. Não importa `repos`, não importa `core`. A direção da dependência é `indexer → quarantine`, nunca o contrário. |
+
+**Manutenibilidade — o padrão desta base de código, que deve ser seguido:**
+
+- **Comentar a intenção, não a mecânica.** O padrão aqui é explicar *por que*, com a medição que
+  motivou a escolha. Todo comportamento não óbvio ganha o número que o justifica, como
+  `core/indexer.py` faz com os 16 ms do polling.
+- **Falha tolerada não pode virar mentira.** `OSError` na quarentena degrada para "nada retido" —
+  o comportamento de hoje — e nunca para "está tudo indexado".
+- **Só stdlib.** Restrição real do projeto, documentada no README com o motivo: dependência
+  faltando dentro de um hook vira perda silenciosa de funcionalidade.
+- **Nomes que dizem o que a coisa é.** `held()` responde "o que está retido", não `get_paths()`.
+
+### Como a completude é provada
+
+Pelo padrão que o usuário aprovou em 2026-08-19: **não pela minha palavra de que auditei, mas por
+uma asserção mecânica**. Cortar peça é bom; deixar buraco não — toda passada de corte vem seguida
+de uma passada de cobertura.
+
+Concretamente, nesta spec: os quatro defeitos (A–D) têm teste RED nomeado na tabela de testes
+abaixo, e a verificação em produção é uma lista de quatro observações mensuráveis, não uma
+impressão de que melhorou.
+
 ## Arquitetura
 
 ### Camada 1 — quarentena (obrigatória; estanca o sangramento sozinha)
