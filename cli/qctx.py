@@ -1471,7 +1471,7 @@ def cmd_repos_add_all(args, cfg):
 
 
 def cmd_repos_status(args, cfg):
-    from core import daemon, jobs, lease
+    from core import daemon, jobs, lease, quarantine
 
     # REAPS BEFORE READING, because `status` is the ONLY reader that runs with no guarantee a
     # daemon is alive to do it for itself — `reap` otherwise runs solely from inside
@@ -1485,8 +1485,14 @@ def cmd_repos_status(args, cfg):
     jobs.reap(lambda pid: lease.process_start(pid) is not None)
     running = daemon.record()
     rows = jobs.all_jobs()
+    # Read before the early `return`, so the JSON form and the printed one carry the same
+    # facts. `load` and not `held`: the user is being shown what is on record, and re-stat'ing
+    # every path to render a status would make reading it a side effect.
+    held = {repo: entries for repo, entries in
+            ((j["repo"], quarantine.load(j["repo"])) for j in rows) if entries}
     if args.json:
-        output({"daemon": running, "jobs": rows, "leases": lease.live()}, True)
+        output({"daemon": running, "jobs": rows, "leases": lease.live(),
+                "quarantine": held}, True)
 
         return
     # Said first and plainly: every number below was written by a process that may be gone, and
@@ -1500,6 +1506,13 @@ def cmd_repos_status(args, cfg):
         pct = f"{100 * job['done'] // job['total']}%" if job.get("total") else "—"
         line = f"  {job['repo']:<24} {job['state']:<10} {job['done']}/{job['total']} {pct}"
         print(line + (f"  {job['error']}" if job.get("error") else ""))
+    # Printed even when every job reads `done`, because that is exactly the state a held file
+    # produces: the job succeeded, and some of its files were skipped on purpose. Without this
+    # the skip is invisible, and a file held by mistake would never be found.
+    for repo, entries in sorted(held.items()):
+        print(f"  {repo}: {len(entries)} file(s) in quarantine, not being retried")
+        for path, meta in sorted(entries.items()):
+            print(f"      {path}: {meta.get('reason', '')[:100]}")
 
 
 def cmd_repos_cancel(args, cfg):

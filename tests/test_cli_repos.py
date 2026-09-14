@@ -526,5 +526,41 @@ class TestStatusReapsBeforeRendering(CLICase):
         self.assertEqual(out["jobs"][0]["state"], jobs.FAILED)
 
 
+class TestStatusShowsWhatIsQuarantined(CLICase):
+    """A silent fix is one nobody can audit: a file held by mistake would never be found.
+
+    It is printed even when every job reads `done`, because that is exactly the state a held
+    file produces — the job succeeded, and some of its files were skipped on purpose."""
+
+    def test_status_reports_the_held_files_with_their_reason(self):
+        from core import jobs, quarantine
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        jobs.enqueue("alpha", "index", [path])
+        jobs.update("alpha", state=jobs.DONE)
+        quarantine.record("alpha", path, "HTTP 500: input (83086 tokens) is too large")
+        text = self.rendered(self.cli.cmd_repos_status)
+        self.assertIn("quarantine", text.lower())
+        self.assertIn("83086", text, "the reason must reach the user, not just the count")
+
+    def test_the_json_form_carries_the_quarantine_too(self):
+        from core import jobs, quarantine
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        jobs.enqueue("alpha", "index", [path])
+        quarantine.record("alpha", path, "nothing indexable")
+        payload = json.loads(self.rendered(self.cli.cmd_repos_status, json=True))
+        self.assertIn(path, payload["quarantine"]["alpha"])
+
+    def test_nothing_held_prints_no_quarantine_section(self):
+        from core import jobs
+
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        self.assertNotIn("quarantine", self.rendered(self.cli.cmd_repos_status).lower(),
+                         "an empty quarantine must not add noise to every status")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
