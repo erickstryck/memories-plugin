@@ -97,6 +97,19 @@ def split_blocks(lines: list[str]) -> list[tuple[int, int]]:
     return [(ordered[i], ordered[i + 1]) for i in range(len(ordered) - 1)]
 
 
+def _slice_long_line(line: str, target: int) -> list[str]:
+    """A single line longer than `target`, cut into pieces of at most `target` chars.
+
+    WHY THIS IS NEEDED AT ALL. `_window` accumulates whole lines, so a line longer than the
+    ceiling produced a chunk as long as the line — `HARD_MAX_CHARS` was a promise the code
+    broke. Measured on a generated OpenAPI client: a 107,648-char line became a 108,141-char
+    chunk, 18x the ceiling, and the embedding endpoint refused it with HTTP 500
+    ("input (83086 tokens) is too large to process"). Generated JSON, minified bundles and
+    wide CSV rows all reach this shape.
+    """
+    return [line[i:i + target] for i in range(0, len(line), target)]
+
+
 def _window(lines: list[str], start: int, end: int, target: int) -> list[tuple[int, int]]:
     """Fixed window with overlap, for a block that overflows the ceiling on its own."""
     windows = []
@@ -128,8 +141,20 @@ def pack_chunks(lines: list[str], target: int = TARGET_CHARS,
 
     def emit(start: int, end: int) -> None:
         text = "".join(lines[start:end]).strip("\n")
-        if text.strip():
+        if not text.strip():
+            return
+        # THE CEILING IS ENFORCED HERE BECAUSE THIS IS THE ONLY PLACE A CHUNK IS BORN. Both
+        # callers below can hand over text longer than `hard_max`: a window over lines cannot
+        # cut INSIDE a line, and a long line does not even have to sit alone in its block — it
+        # groups with whatever follows it at column zero. Guarding one caller left the other
+        # open, so the invariant lives with the constructor instead.
+        if len(text) <= hard_max:
             chunks.append(Chunk(start + 1, end, text))
+
+            return
+        for piece in _slice_long_line(text, target):
+            if piece.strip():
+                chunks.append(Chunk(start + 1, end, piece))
 
     open_start: int | None = None
     size = 0

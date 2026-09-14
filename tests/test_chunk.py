@@ -6,8 +6,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.chunk import (Chunk, chunk_text, is_probably_binary, mode_for_suffix,
-                        pack_chunks, split_blocks)
+from core.chunk import (Chunk, HARD_MAX_CHARS, chunk_text, is_probably_binary,
+                        mode_for_suffix, pack_chunks, split_blocks)
 
 
 class TestBoundaries(unittest.TestCase):
@@ -175,6 +175,34 @@ class TestChunkText(unittest.TestCase):
         self.assertGreater(len(chunks), 3)
         self.assertTrue(all(isinstance(t, Chunk) for t in chunks))
         self.assertEqual(chunks[0].start_line, 1)
+
+
+class TestTheHardMaxIsActuallyHonoured(unittest.TestCase):
+    """HARD_MAX_CHARS is documented as the ceiling that keeps a (query, chunk) pair inside the
+    reranker. `_window` accumulated whole LINES and never cut inside one, so a single long line
+    became a chunk 18x the ceiling: measured on a generated OpenAPI client, a 107,648-char line
+    produced a 108,141-char chunk, and the embedding server answered HTTP 500 —
+    "input (83086 tokens) is too large to process"."""
+
+    def test_a_single_enormous_line_is_split_to_respect_the_ceiling(self):
+        content = "x" * 107_648 + "\n"
+        chunks = chunk_text(content)
+        self.assertTrue(chunks, "an enormous line produced no chunk at all")
+        longest = max(len(c.text) for c in chunks)
+        self.assertLessEqual(longest, HARD_MAX_CHARS,
+                             f"a chunk of {longest} chars exceeds the documented ceiling")
+
+    def test_nothing_of_the_long_line_is_lost_in_the_split(self):
+        content = "y" * 20_000 + "\n"
+        rebuilt = "".join(c.text for c in chunk_text(content))
+        self.assertEqual(rebuilt.count("y"), 20_000, "the split dropped or duplicated content")
+
+    def test_a_long_line_among_normal_ones_keeps_the_normal_ones_intact(self):
+        content = "def a():\n    return 1\n" + "z" * 50_000 + "\ndef b():\n    return 2\n"
+        chunks = chunk_text(content)
+        self.assertLessEqual(max(len(c.text) for c in chunks), HARD_MAX_CHARS)
+        self.assertTrue(any("def a()" in c.text for c in chunks))
+        self.assertTrue(any("def b()" in c.text for c in chunks))
 
 
 if __name__ == "__main__":
