@@ -343,5 +343,24 @@ class TestThePollDoesNotPullTheWholeArchiveOverTheWire(unittest.TestCase):
         self.assertIn("indexed", out)
 
 
+class TestASkippedFileIsReportedNotRaised(unittest.TestCase):
+    """`add_files` reports a skip as the TUPLE `(path, reason)` — `cli/qctx.py` reads it that
+    way. `refresh` read it as a dict, so the first unindexable file raised AttributeError,
+    `daemon._run_one` marked the whole job FAILED, and every remaining changed file in that
+    refresh was never reindexed."""
+
+    def test_a_file_that_became_unindexable_is_reported_as_skipped(self):
+        ix = an_index("alpha")
+        path = a_file("real content here\n")
+        ix.add_files("alpha", [path])
+        # Emptying it makes `_write_one` raise "nothing indexable", which is the exact
+        # condition 20 of the 22 looping files on the user's machine are in.
+        rewrite(path, "")
+        report = ix.refresh("alpha")
+        entry = next(r for r in report if r["path"] == path)
+        self.assertEqual(entry["action"], "skipped")
+        self.assertIn("nothing indexable", entry["reason"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

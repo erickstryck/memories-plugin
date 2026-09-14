@@ -264,7 +264,7 @@ Esperado: PASS, suíte inteira verde.
 python3 -c "
 import sys; sys.path.insert(0,'.')
 from core.chunk import chunk_text, HARD_MAX_CHARS
-c = open('/home/erick/Documentos/Mapped/awesome-cv3/connectors/ibm-tririga-source/src/clients/ibm-tririga-source/api.json').read()
+c = open('/home/me/projects/awesome-cv3/connectors/ibm-tririga-source/src/clients/ibm-tririga-source/api.json').read()
 ch = chunk_text(c)
 print('chunks:', len(ch), '| maior:', max(len(x.text) for x in ch), '| teto:', HARD_MAX_CHARS)
 assert max(len(x.text) for x in ch) <= HARD_MAX_CHARS
@@ -397,8 +397,8 @@ Esperado: PASS, suíte inteira verde.
 python3 -c "
 import sys; sys.path.insert(0,'.')
 from core.scan import _sniff
-for p in ['/home/erick/Documentos/Mapped/awesome-cv3/connectors/ibm-tririga-source/src/clients/ibm-tririga-source/api.json',
-          '/home/erick/Documentos/Mapped/awesome-cv3/connectors/utsw-moveit-occupancy-source/src/clients/utsw-moveit-occupancy-source/api.json']:
+for p in ['/home/me/projects/awesome-cv3/connectors/ibm-tririga-source/src/clients/ibm-tririga-source/api.json',
+          '/home/me/projects/awesome-cv3/connectors/utsw-moveit-occupancy-source/src/clients/utsw-moveit-occupancy-source/api.json']:
     print(_sniff(p), p.split('/')[-3])
 "
 ```
@@ -1106,16 +1106,16 @@ que o usuário exige: observação mensurável, não impressão de melhora.
 - [ ] **Step 1: Suíte inteira verde**
 
 ```bash
-cd /home/erick/Documentos/memories-plugin && python3 -m unittest discover -s tests
+cd /home/me/memories-plugin && python3 -m unittest discover -s tests
 ```
 
 - [ ] **Step 2: Sincronizar o plugin instalado e reiniciar o daemon**
 
 ```bash
-cp -r core cli hooks hosts /home/erick/.hermes/plugins/memories/
-find /home/erick/.hermes/plugins/memories -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+cp -r core cli hooks hosts $HERMES_HOME/plugins/memories/
+find $HERMES_HOME/plugins/memories -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 python3 -c "
-import sys; sys.path.insert(0,'/home/erick/.hermes/plugins/memories')
+import sys; sys.path.insert(0,'$HERMES_HOME/plugins/memories')
 from core import daemon
 print('stopped:', daemon.stop())
 "
@@ -1124,7 +1124,7 @@ print('stopped:', daemon.stop())
 - [ ] **Step 3: Confirmar que os jobs param de rotacionar**
 
 ```bash
-cd /home/erick/.memories-plugin/state/jobs && for i in 1 2 3 4 5 6; do
+cd ~/.memories-plugin/state/jobs && for i in 1 2 3 4 5 6; do
   date +%H:%M:%S
   python3 -c "
 import json,glob
@@ -1141,7 +1141,7 @@ Esperado: os mesmos jobs **não** voltam a `pending`. Antes da correção, volta
 - [ ] **Step 4: Confirmar que o embed não tem mais picos**
 
 ```bash
-/home/erick/.hermes/hermes-agent/venv/bin/python - <<'EOF'
+python3 - <<'EOF'
 import json, time, urllib.request
 U="http://light-server-h12d-8d.dog-pirarucu.ts.net:8003/v1/embeddings"
 worst=0
@@ -1162,7 +1162,7 @@ Esperado: pior caso bem abaixo de 0,5 s. Antes: picos de 1,0-1,3 s a cada ~40 s.
 - [ ] **Step 5: Confirmar que a quarentena reteve os 22 arquivos, com motivo**
 
 ```bash
-cd /home/erick/Documentos/memories-plugin && python3 cli/qctx.py repos status
+cd /home/me/memories-plugin && python3 cli/qctx.py repos status
 ```
 
 Esperado: os arquivos vazios listados com `nothing indexable`. Os dois `api.json` **não** devem
@@ -1171,7 +1171,7 @@ aparecer — passam a ser recusados antes, como `minified` (Task 3).
 - [ ] **Step 6: Confirmar que nenhum bloco UNAVAILABLE novo aparece**
 
 ```bash
-cd /home/erick/.hermes && python3 -c "
+cd $HERMES_HOME && python3 -c "
 import sqlite3, datetime
 db = sqlite3.connect('file:state.db?mode=ro', uri=True)
 cur = db.cursor()

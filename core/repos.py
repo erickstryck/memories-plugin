@@ -415,8 +415,12 @@ class RepoIndex:
             # lands as a skip instead of ending the refresh.
             out = self.add_files(repo, [path])
             if out.get("skipped"):
-                report.append({"path": path, "action": "skipped",
-                               "reason": out["skipped"][0].get("reason", "unreadable")})
+                # `add_files` reports a skip as the TUPLE `(path, reason)` — the shape
+                # `cli/qctx.py` unpacks. Reading it as a dict raised AttributeError here, and
+                # `daemon._run_one` turns any raise into a FAILED job: one unindexable file
+                # cost every remaining changed file in the same refresh.
+                _, why = out["skipped"][0]
+                report.append({"path": path, "action": "skipped", "reason": why})
                 continue
             report.append({"path": path, "action": "reindexed", "chunks": out.get("chunks", 0),
                            "reason": reason})
