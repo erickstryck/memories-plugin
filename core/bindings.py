@@ -46,12 +46,18 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    # Through `statefile`, which owns the pid-named temporary: a fixed `.tmp` here meant two
-    # processes opening the same file, and the first `os.replace` renaming it out from under
-    # the second. Measured with six concurrent writers: 93 FileNotFoundError and 21 of 240
-    # entries surviving. The entry loss is a separate problem (read-modify-write needs a lock);
-    # the crash is this one.
-    statefile.write_json(_path(), data)
+    # Through `statefile`, which owns the atomic publish. Measured with six concurrent writers
+    # against the old hand-written version: 85 crashes and 21 of 240 entries surviving. The
+    # entry loss is a separate problem (read-modify-write needs a lock); the crash is this one.
+    #
+    # THE FAILURE IS RE-RAISED, and that is the contract these callers are built on.
+    # `repos._forget_bindings` and `cmd_repos_init` both catch OSError here, and a review
+    # measured what swallowing it costs: `repos drop` on a read-only state dir deleted the
+    # chunks and the registry entry, then reported "dropped alpha; unbound 1 checkout(s)" while
+    # the checkout stayed bound to a repo that no longer exists. `write_json` answers with a
+    # bool because most of its callers treat a failed write as a cache miss — this is not one.
+    if not statefile.write_json(_path(), data):
+        raise OSError(f"the local bindings could not be written to {_path()}")
 
 
 def get(checkout: str) -> str | None:

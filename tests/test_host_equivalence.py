@@ -2411,7 +2411,13 @@ class TestTheThreeCopiesOfTheKNOBReaderAgree(unittest.TestCase):
     """
 
     CASES = (("4", 6, 1, 4), ("abc", 6, 1, 6), ("0", 6, 1, 1), ("-1", 6, 1, 1),
-             ("", 6, 1, 6), ("   ", 6, 1, 6), (" 4 ", 6, 1, 4))
+             ("", 6, 1, 6), ("   ", 6, 1, 6), (" 4 ", 6, 1, 4),
+             # A MALFORMED VALUE STILL MEETS THE FLOOR. A review measured the early return
+             # this pair catches: `raw='abc'` with `default='0'` and `minimum=1` gave 0,
+             # while the two hand-written copies it replaced both gave 1 — the floor is
+             # named for making a below-floor result impossible, and returning the coded
+             # default before reaching it removed exactly that guarantee.
+             ("abc", 0, 1, 1), ("", 0, 1, 1), ("nonsense", -5, 1, 1))
 
     def test_every_reader_gives_the_same_answer_for_the_same_input(self):
         import hooks.checkpoint as checkpoint

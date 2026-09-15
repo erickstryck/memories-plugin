@@ -10,7 +10,6 @@ state that lies is worse than one that is absent — `status` would render stall
 activity. `reap` is what turns that into an honest "interrupted".
 """
 import json
-import os
 import time
 import uuid
 from pathlib import Path

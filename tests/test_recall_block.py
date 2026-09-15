@@ -17,12 +17,15 @@ degradation-note and populated-block logic moved into `core.blocks` (see tests/t
 for its own coverage) and lost its `hooks.recall` names in the process, so those calls go
 straight to `core.blocks` / `core.prompts` here too — same assertions, new address.
 """
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"))
 
 from core import blocks, prompts
@@ -122,6 +125,49 @@ class TestEmptyBlockClaim(unittest.TestCase):
                 self.assertNotIn(FLAT_CLAIM, out, f"note present but claim flat: {note!r}")
             else:
                 self.assertIn(FLAT_CLAIM, out, "no degradation, so the hard claim is earned")
+
+
+class TestTheProtocolSurvivesAClosedStderr(unittest.TestCase):
+    """A malformed knob must never cost the injected block.
+
+    `hooks/recall.py` writes its protocol on STDOUT, and the note about a bad knob goes to
+    stderr. With fd 2 closed by a misbehaving parent, `print(file=sys.stderr)` falls back to
+    stdout and the JSON stops parsing — the `try/except` around the print cannot catch it,
+    because writing to stdout SUCCEEDS.
+
+    The hand-written reader this hook used to carry knew that: it printed only in the FLOOR
+    branch and let the malformed branch reach the log alone. Sharing one reader across the
+    three hosts erased the distinction, and a review measured the cost with the real hook,
+    fd 2 closed and `QCTX_RECALL_MAX_CHARS=14k` — the typo the module's own docstring cites:
+
+        stdout: "recall: QCTX_RECALL_MAX_CHARS='14k' is not a number — using 14000\\n{...}"
+
+    The block was still there, after a line that made the whole payload unreadable."""
+
+    def _run(self, close_stderr: bool):
+        env = dict(os.environ)
+        env["QCTX_RECALL_MAX_CHARS"] = "14k"                  # the motivating typo
+        env["QCTX_QDRANT_URL"] = "http://127.0.0.1:1"         # unreachable: emit() runs
+        env.pop("QCTX_RECALL_OFF", None)
+        payload = json.dumps({"prompt": "how does the daemon work?", "session_id": "s1"})
+        run = subprocess.run(
+            [sys.executable, "hooks/recall.py"], input=payload, capture_output=True,
+            text=True, env=env, cwd=REPO,
+            preexec_fn=(lambda: os.close(2)) if close_stderr else None)
+
+        return run.stdout
+
+    def test_a_malformed_knob_does_not_corrupt_the_block(self):
+        out = self._run(close_stderr=True).strip()
+        self.assertTrue(out, "the hook emitted nothing at all")
+        self.assertFalse(out.startswith("recall:"),
+                         f"the note landed on stdout, ahead of the protocol: {out[:80]!r}")
+        json.loads(out)                                        # raises if corrupt
+
+    def test_the_block_is_still_emitted_when_stderr_works(self):
+        out = self._run(close_stderr=False).strip()
+        self.assertTrue(out, "the hook emitted nothing at all")
+        json.loads(out)
 
 
 class TestDegradationNote(unittest.TestCase):

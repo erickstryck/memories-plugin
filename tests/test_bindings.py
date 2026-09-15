@@ -78,6 +78,29 @@ class TestTheLocalBinding(unittest.TestCase):
                      if p.endswith(".tmp")]
         self.assertEqual(leftovers, [])
 
+    def test_a_write_that_FAILS_is_not_reported_as_success(self):
+        """`_save` going through a shared writer must not lose the raise its callers need.
+
+        `repos._forget_bindings` catches OSError here to say "the archive WAS deleted, but its
+        local bindings could not be cleared" — a partial failure the operator has to know
+        about. A review measured the version that swallowed it: on a read-only state dir,
+        `repos drop` removed the chunks and the registry entry and then answered
+        `{'unbound': ['/tmp/alpha'], 'already_gone': False}`, with the checkout still bound on
+        disk to a repo the registry no longer knows. Running it again said `already_gone: True`
+        and left the binding exactly where it was."""
+        d = a_state_dir()
+        bindings.bind("/checkout/alpha", "alpha")
+        os.chmod(d, 0o500)
+        try:
+            with self.assertRaises(OSError, msg="a failed write was reported as success"):
+                bindings.bind("/checkout/beta", "beta")
+            with self.assertRaises(OSError):
+                bindings.forget_repo("alpha")
+        finally:
+            os.chmod(d, 0o700)
+        self.assertEqual(bindings._load(), {"/checkout/alpha": "alpha"},
+                         "nothing should have reached the disk")
+
     def test_an_unbound_checkout_reads_as_None(self):
         self.assertIsNone(bindings.get("/home/me/never-seen"))
 
@@ -203,6 +226,29 @@ class TestTheChoiceOffered(unittest.TestCase):
         out = self.ix.candidates_for("/home/me/some-other/alpha", [])
         self.assertEqual(out["suggest"], "alpha")
         self.assertTrue(out["taken"], "a suggestion that already exists must be flagged")
+
+    def test_the_free_name_it_offers_is_actually_FREE(self):
+        """Every candidate must be tested before it is offered, including the last one.
+
+        Written as an assignment inside a loop that breaks on the check, the final candidate
+        escaped untested. A review measured the threshold: with 99 `alpha*` names registered,
+        the method offered `alpha-99` — which was taken — and `repos init` printed it as the
+        primary advice, so following it merged two unrelated checkouts into one entry."""
+        names = ["alpha"] + [f"alpha-{n}" for n in range(2, 100)]
+        for n in names:
+            self.ix.register(n, n, [], f"/home/them/{n}")
+        found = self.ix.candidates_for("/home/me/mine/alpha", [])
+        self.assertNotIn(found["free"], names,
+                         f"it offered {found['free']!r}, which is already registered")
+
+    def test_it_says_NOTHING_rather_than_offer_a_taken_name(self):
+        """Past the bound there is no free name, and inventing one is worse than saying so."""
+        names = ["alpha"] + [f"alpha-{n}" for n in range(2, 101)]
+        for n in names:
+            self.ix.register(n, n, [], f"/home/them/{n}")
+        found = self.ix.candidates_for("/home/me/mine/alpha", [])
+        self.assertIsNone(found["free"],
+                          "with every name in use it still claimed one was free")
 
     def test_a_taken_slug_comes_with_a_FREE_alternative(self):
         """Naming the conflict is necessary and not sufficient: the host still has to tell the

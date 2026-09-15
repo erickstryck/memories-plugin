@@ -617,14 +617,21 @@ class RepoIndex:
         # Computed once and read twice: a second copy of this expression is how `taken` would
         # come to answer about a name `suggest` no longer offers.
         suggest = bindings.slug_for(os.path.basename(os.path.realpath(root)))
-        free = suggest
+        # EVERY CANDIDATE IS TESTED BEFORE IT IS OFFERED, including the last one. Written as
+        # `free = f"{suggest}-{n}"` inside a loop that breaks on the check, the final
+        # assignment escaped untested: with 99 `alpha*` repos registered, the command offered
+        # `alpha-99` — a name that was taken — and following that advice merged two unrelated
+        # checkouts into one entry, verbatim the outcome this method exists to prevent.
+        #
         # BOUNDED, and the bound is not arbitrary: a machine with a hundred directories of the
         # same name has a naming problem this method cannot solve, and an unbounded loop here
-        # would hang the one command whose job is to answer quickly.
-        for n in range(2, 100):
-            if free not in by_name:
+        # would hang the one command whose job is to answer quickly. Past the bound there is
+        # no free name to offer, and saying so is honest where inventing one is not.
+        free = None
+        for candidate in [suggest] + [f"{suggest}-{n}" for n in range(2, 100)]:
+            if candidate not in by_name:
+                free = candidate
                 break
-            free = f"{suggest}-{n}"
 
         return {"bound": bound, "join": join, "suggest": suggest,
                 "taken": suggest in by_name, "free": free}

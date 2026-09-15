@@ -4,7 +4,11 @@ Host-neutral by contract: this module is the one the other host imports too, so 
 that named claude or hermes would be a check the other host cannot use. The host sections
 live in the CLI.
 """
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -52,7 +56,12 @@ class Plumbing(unittest.TestCase):
         copy = self.home / ".local" / "bin" / "qctx"
         copy.write_bytes((REPO / "bin" / "qctx").read_bytes())
         copy.chmod(0o755)
-        self.assertTrue(install.launcher_check(REPO, self.env()).ok)
+        # `QCTX_HOME` so the launcher can actually RESOLVE this tree. Without it the copy on
+        # PATH finds nothing, which is a genuinely broken install — the check now says so, and
+        # this test was asserting the opposite by accident: it passed through the fail-open
+        # branch, never exercising the resolution it exists to cover.
+        env = dict(self.env(), QCTX_HOME=str(REPO))
+        self.assertTrue(install.launcher_check(REPO, env).ok)
 
     def test_a_launcher_that_RESOLVES_ELSEWHERE_is_not_ok(self):
         """The spec asks this check to report `qctx` on PATH "e resolvendo para esta árvore",
@@ -124,6 +133,71 @@ class Plumbing(unittest.TestCase):
         check = install.no_shell_check(cfg_path)
         self.assertFalse(check.ok)
         self.assertIn("qdrant_url", check.detail)
+
+
+class TestTheLauncherAnswersAboutItself(unittest.TestCase):
+    """`--root` has to distinguish "I found nothing" from "I do not know that flag".
+
+    A review measured what conflating them costs: a launcher whose `resolve_root` finds no
+    tree — every `qctx` command on that machine exits 1 with "could not find the plugin tree"
+    — was reported by `launcher_check` as `ok=True`. The check was lenient exactly where it
+    had to be strict, and the byte comparison could not catch it because the file was a
+    correct copy; what was missing was a tree for it to run.
+
+    These tests are the seam between `bin/qctx`'s exit code and `install.NO_TREE_EXIT`."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = self.tmp / "home"
+        self.bindir = self.home / ".local" / "bin"
+        self.bindir.mkdir(parents=True)
+        self.launcher = self.bindir / "qctx"
+        shutil.copy(REPO / "bin" / "qctx", self.launcher)
+        os.chmod(self.launcher, 0o755)
+        self.env = {"HOME": str(self.home), "PATH": f"{self.bindir}:/usr/bin:/bin"}
+
+    def _tree(self, name):
+        tree = self.tmp / name
+        (tree / "bin").mkdir(parents=True)
+        (tree / "cli").mkdir()
+        (tree / "cli" / "qctx.py").write_text("")
+        shutil.copy(REPO / "bin" / "qctx", tree / "bin" / "qctx")
+        os.chmod(tree / "bin" / "qctx", 0o755)
+
+        return tree
+
+    def test_it_exits_NO_TREE_EXIT_when_there_is_nothing_to_run(self):
+        done = subprocess.run([str(self.launcher), "--root"], capture_output=True,
+                              text=True, env=self.env)
+        self.assertEqual(done.returncode, install.NO_TREE_EXIT,
+                         "the launcher and core/install.py disagree about this code")
+        self.assertFalse(done.stdout.strip(), "it printed a tree it did not find")
+
+    def test_a_launcher_with_no_tree_is_a_BLOCKER(self):
+        check = install.launcher_check(self._tree("tree"), self.env)
+        self.assertFalse(check.ok, "a launcher that can run nothing was reported as correct")
+        self.assertFalse(check.warning, "this one is a blocker, not a degradation")
+
+    def test_a_launcher_resolving_ANOTHER_INSTALLED_TREE_only_warns(self):
+        """The other direction, and the one a scripted `--check` depends on.
+
+        A copy on PATH legitimately resolves to whichever tree is INSTALLED, so running
+        `--check` from a clone found a mismatch and reported a blocker whose fix hint named
+        `QCTX_HOME` — a variable that was not set. `--check` is documented as answering in its
+        exit code, and returning 1 for an ordinary install made that answer useless."""
+        installed = self.home / ".hermes" / "plugins" / "memories"
+        (installed / "bin").mkdir(parents=True)
+        (installed / "cli").mkdir()
+        (installed / "cli" / "qctx.py").write_text("")
+        shutil.copy(REPO / "bin" / "qctx", installed / "bin" / "qctx")
+        os.chmod(installed / "bin" / "qctx", 0o755)
+        env = dict(self.env, HERMES_HOME=str(self.home / ".hermes"))
+        check = install.launcher_check(self._tree("clone"), env)
+        self.assertTrue(check.warning,
+                        "an ordinary install was reported as a hard failure")
+        self.assertNotIn("QCTX_HOME", check.fix_hint or "",
+                         "the hint names a variable that is not set")
 
 
 class FieldCoverage(unittest.TestCase):

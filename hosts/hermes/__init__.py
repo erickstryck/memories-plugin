@@ -82,9 +82,10 @@ def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     copy the three readers had already drifted on the floor: with `minimum=1`, `0` gave 1 here
     and 0 in the checkpoint hook.
     """
-    return knobs.clamped_num(
-        name, legacy, default, kind, minimum,
-        note=lambda line: print(f"memories: {line}", file=sys.stderr))
+    def report(line: str, malformed: bool = False) -> None:
+        print(f"memories: {line}", file=sys.stderr)
+
+    return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
 
 
 

@@ -930,7 +930,13 @@ SCHEMAS = [
                         "that share a remote with it — the SAME repository, checked out "
                         "elsewhere, to offer joining rather than duplicating; 'taken' says "
                         "the suggested name already belongs to something unrelated; "
-                        "'suggest' is the name to propose. Outside a git working copy it "
+                        "'suggest' is the name to propose, and 'free' is the nearest name "
+                        "that is ACTUALLY available (null when every candidate is in use) — "
+                        "offer 'free' when 'taken' is set, never 'suggest', because "
+                        "registering under a taken name merges two unrelated projects into "
+                        "one entry. A non-empty 'join' OUTRANKS 'taken': that is the same "
+                        "repository checked out twice, so offer its name. "
+                        "Outside a git working copy it "
                         "refuses by naming that, rather than guessing a repository."),
         "parameters": {
             "type": "object",

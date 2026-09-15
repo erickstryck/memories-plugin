@@ -1420,6 +1420,20 @@ def cmd_repos_init(args, cfg):
     if found["join"]:
         names = ", ".join(sorted(r["repo"] for r in found["join"]))
         print(f"this working copy shares a remote with: {names}")
+        # SHARING A REMOTE OUTRANKS A NAME COLLISION, and this order is the whole point.
+        # `join` means "this IS that repository" — the core's own word — while `taken` only
+        # means a name is in use. When both are true, which is the ordinary case of cloning
+        # one project twice into same-named directories, offering a fresh name first told the
+        # user to SPLIT one upstream project into two registry entries: the same content
+        # embedded and stored twice, and each name's search blind to the other's chunks.
+        # Measured with two real clones of one bare upstream: 1 chunk became 2.
+        first = sorted(r["repo"] for r in found["join"])[0]
+        print(f"index this working copy as:  qctx repos add-all {first}")
+        if found["taken"] and found["free"]:
+            print(f"or, if it is a DIFFERENT project that happens to share a remote:"
+                  f"  qctx repos add-all {found['free']}")
+
+        return
     if found["taken"]:
         # NAMED AND THEN NOT OFFERED. Two unrelated working copies with the same directory
         # name are not the same repository, and deciding otherwise by an accident of naming is
@@ -1433,7 +1447,12 @@ def cmd_repos_init(args, cfg):
         # forges. The core proposes a free name; this prints it, and says joining on purpose
         # is still available for the user who meant it.
         print(f"the name {found['suggest']!r} already belongs to another repository")
-        print(f"index this working copy as:  qctx repos add-all {found['free']}")
+        if found["free"]:
+            print(f"index this working copy as:  qctx repos add-all {found['free']}")
+        else:
+            # No free name inside the bound. Saying so beats inventing one that is taken.
+            print(f"every name from {found['suggest']!r} to {found['suggest']}-99 is in use — "
+                  f"pick one yourself:  qctx repos add-all <name>")
         print(f"or, if it IS that repository: qctx repos add-all {found['suggest']}")
 
         return

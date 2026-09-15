@@ -23,6 +23,13 @@ from .setup import COMMAND_PREFIX, Check
 #: The command every skill and every page of documentation cites.
 LAUNCHER_NAME = "qctx"
 
+#: What `bin/qctx --root` exits when it ran and found no plugin tree.
+#:
+#: Distinct from 1 on purpose: 1 is "this launcher does not understand --root" (an older copy),
+#: and the two demand opposite verdicts. Kept in step with `bin/qctx` by
+#: `tests/test_install_core.py::TestTheLauncherAnswersAboutItself`.
+NO_TREE_EXIT = 3
+
 #: What a shell-less process needs to find in the FILE. The two keys are absent on
 #: purpose: `save()` refuses them, so a config file is complete without them.
 NO_SHELL_FIELDS = ("qdrant_url", "memory_collection")
@@ -217,20 +224,38 @@ def launcher_check(root: Path, env: dict) -> Check:
     # written to answer exactly this ("what the wizard's own check reports", in its own
     # comment) and had no caller.
     #
-    # A LAUNCHER THAT CANNOT ANSWER IS NOT A FAILURE. An older copy without `--root`, or a
-    # shell that refuses to run it, leaves the byte comparison as the verdict — reporting a
-    # blocker because a diagnostic could not run would make `--check` fail for a reason the
-    # user cannot act on.
-    resolved = _launcher_root(found, env)
+    # A LAUNCHER THAT CANNOT ANSWER IS NOT A FAILURE — but a launcher that answers "nothing"
+    # IS one, and the two were conflated. `_launcher_root` returned "" for both, so a launcher
+    # whose `resolve_root` finds no tree (every `qctx` command on that machine exits 1 with
+    # "could not find the plugin tree") was reported as fine.
+    #
+    # AND RESOLVING ELSEWHERE IS NOT A BLOCKER EITHER. A copy on PATH legitimately resolves to
+    # whichever tree is INSTALLED, so running `--check` from a clone reported a failure whose
+    # fix hint named a variable that was not set. It is worth saying, and it is not worth
+    # failing a scripted check over: `--check` answers in its exit code.
+    resolved, answered = _launcher_root(found, env)
+    if answered and not resolved:
+        return Check("launcher", False,
+                     f"{found} cannot find a plugin tree to run — every qctx command fails",
+                     f"reinstall, or set QCTX_HOME to this checkout: {root}")
     if resolved and Path(resolved).resolve() != Path(root).resolve():
-        return Check("launcher", False, f"{found} resolves to {resolved}, not {root}",
-                     f"unset QCTX_HOME, or run {resolved}/bin/{LAUNCHER_NAME} instead")
+        return Check("launcher", False,
+                     f"{found} resolves to {resolved}, not {root}",
+                     fix_hint=f"intentional when {resolved} is the installed copy; "
+                              f"run {root}/bin/{LAUNCHER_NAME} to use this tree",
+                     warning=True)
 
     return Check("launcher", True, str(found))
 
 
-def _launcher_root(launcher: str, env: dict) -> str:
-    """Which tree `launcher` would run, or "" when it cannot say.
+def _launcher_root(launcher: str, env: dict) -> tuple[str, bool]:
+    """Which tree `launcher` would run, and whether it managed to answer at all.
+
+    THE PAIR EXISTS BECAUSE "" MEANS TWO THINGS. `bin/qctx --root` exits 3 when it ran and
+    found no tree, which is a BROKEN launcher whose every command fails, while a launcher too
+    old to know `--root` exits 1 or 2, which is merely an unanswered question. Reading both as
+    "" let the broken one pass as healthy — the check was lenient exactly where it had to be
+    strict.
 
     Never raises: this is a diagnostic inside a diagnostic, and a launcher that hangs or
     refuses must cost the check its extra answer, not its whole report.
@@ -238,10 +263,14 @@ def _launcher_root(launcher: str, env: dict) -> str:
     try:
         done = subprocess.run([launcher, "--root"], capture_output=True, text=True,
                               env=env, timeout=10)
-
-        return done.stdout.strip() if done.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return "", False
+    if done.returncode == 0:
+        return done.stdout.strip(), True
+    if done.returncode == NO_TREE_EXIT:
+        return "", True          # it answered, and the answer is "nothing"
+
+    return "", False
 
 
 def path_check(env: dict) -> Check:

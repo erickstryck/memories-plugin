@@ -40,9 +40,11 @@ def env_num(name: str, legacy: str, default: str, kind=int, minimum=None):
     gave 1, 1 and -1 — the same typo degrading one surface and silencing another. The
     knob-name guards could not see it: identical names were never the question.
     """
-    return knobs.clamped_num(
-        name, legacy, default, kind, minimum,
-        note=lambda line: print(f"checkpoint: {line}", file=sys.stderr))
+    def report(line: str, malformed: bool = False) -> None:
+        # This hook writes no protocol on stdout, so stderr is safe in both branches.
+        print(f"checkpoint: {line}", file=sys.stderr)
+
+    return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
 
 
 INTERVAL = env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)

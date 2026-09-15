@@ -83,6 +83,24 @@ class TestTheAdviceWhenTheNameIsTaken(unittest.TestCase):
 
         return buf.getvalue()
 
+    def test_sharing_a_remote_OUTRANKS_a_name_collision(self):
+        """When both are true, `join` is the answer and `taken` is a footnote.
+
+        Cloning one project twice into same-named directories makes both true, and it is the
+        ordinary case. A review measured what offering the fresh name first costs: following
+        the printed advice split one upstream project into two registry entries, the same
+        content embedded and stored twice, each name's search blind to the other's chunks —
+        1 chunk in the archive became 2. `join` means "this IS that repository"; a name
+        collision only means a name is in use."""
+        out = self._advice({"bound": None, "join": [{"repo": "alpha"}], "suggest": "alpha",
+                            "taken": True, "free": "alpha-2"})
+        lines = [ln for ln in out.splitlines() if "add-all" in ln]
+        self.assertTrue(lines, "it offered no command at all")
+        self.assertIn("add-all alpha", lines[0],
+                      f"the first command offered was {lines[0]!r}, not the shared repo")
+        self.assertNotIn("add-all alpha-2", lines[0],
+                         "it told the user to duplicate a repository they already have")
+
     def test_it_does_NOT_offer_the_taken_name(self):
         out = self._advice({"bound": None, "join": [], "suggest": "alpha",
                             "taken": True, "free": "alpha-2"})

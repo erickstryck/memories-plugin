@@ -88,13 +88,29 @@ resolve_root() {
   return 1
 }
 
-root="$(resolve_root)"
+root="$(resolve_root || true)"
 
 # Prints what it resolved and exits — the one thing a person debugging a stale copy needs,
 # and what the wizard's own check reports.
+#
+# `|| true` so this branch is REACHED when nothing resolved. Under `set -e` the assignment
+# above aborts the script on a failed `resolve_root`, which made `--root` answer with exit 1
+# and an empty line — indistinguishable, to a caller, from a launcher too old to know the
+# flag. A diagnostic that cannot tell "I found nothing" from "I do not understand the
+# question" let a launcher whose every command fails be reported as healthy.
+
 if [ "${1:-}" = "--root" ]; then
+  if [ -z "$root" ]; then
+    printf 'qctx: could not find the plugin tree. Set QCTX_HOME to the checkout.\n' >&2
+    exit 3        # distinct from 1: "I ran, and there is nothing here"
+  fi
   printf '%s\n' "$root"
   exit 0
+fi
+
+if [ -z "$root" ]; then
+  printf 'qctx: could not find the plugin tree. Set QCTX_HOME to the checkout.\n' >&2
+  exit 1
 fi
 
 exec python3 "$root/cli/qctx.py" "$@"

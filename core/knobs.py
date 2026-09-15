@@ -104,13 +104,17 @@ def clamped_num(name: str, legacy: str, default: str, kind=int, minimum=None, *,
     try:
         value = kind(raw)
     except (TypeError, ValueError):
+        # FALLS THROUGH TO THE FLOOR, never returns here. Returning the coded default early
+        # would let a malformed value produce a below-floor result — exactly what the floor
+        # exists to make impossible. Measured with `raw='abc', default='0', minimum=1`: the
+        # early return gave 0, the two copies this replaced both gave 1.
         if note:
-            note(f"{name}={raw!r} is not a number — using {default}")
-
-        return kind(default)
+            note(f"{name}={raw!r} is not a number — using {default}", malformed=True)
+        value = kind(default)
     if minimum is not None and value < minimum:
         if note:
-            note(f"{name}={raw!r} would leave nothing to return — using {minimum}")
+            note(f"{name}={raw!r} would leave nothing to return — using {minimum}",
+                 malformed=False)
 
         return kind(minimum)
 
