@@ -597,6 +597,39 @@ class TestStatusShowsWhatIsQuarantined(CLICase):
         self.assertIn(path, text)
 
 
+class TestTheJSONFlagWorksInBothPositions(unittest.TestCase):
+    """`--json` is documented at the top level (`qctx --help`, and the memory skill) and is
+    also accepted after the subcommand because that is where people type it. Both promises
+    have to hold, and only one did: every subparser declared its own `--json` with a False
+    default, and argparse writes subparser defaults over the namespace the top-level parser
+    already filled — so `qctx --json repos status` silently printed human text."""
+
+    def _parsed(self, *argv):
+        import cli.qctx as qctx
+
+        args = qctx.build_parser().parse_args(list(argv))
+        if not hasattr(args, "json"):
+            args.json = False          # what `main` does
+
+        return args
+
+    def test_the_flag_before_the_subcommand_is_honoured(self):
+        self.assertTrue(self._parsed("--json", "repos", "status").json)
+
+    def test_the_flag_after_the_subcommand_is_honoured(self):
+        self.assertTrue(self._parsed("repos", "status", "--json").json)
+
+    def test_no_flag_means_human_output(self):
+        """The guard must not turn JSON on by accident: every command's default is prose."""
+        self.assertFalse(self._parsed("repos", "status").json)
+
+    def test_it_holds_for_a_DEEP_subcommand_too(self):
+        """`repos quarantine clear` is three levels down; the propagation is recursive and
+        the top-level value has to survive every level."""
+        self.assertTrue(self._parsed("--json", "repos", "quarantine", "clear", "r").json)
+        self.assertTrue(self._parsed("repos", "quarantine", "clear", "r", "--json").json)
+
+
 class TestReleasingAHeldFileByHand(CLICase):
     """`held` releases a file whose CONTENT changed. The reason that goes away on its own —
     a raised server limit, a swapped model — leaves the content untouched, so without a

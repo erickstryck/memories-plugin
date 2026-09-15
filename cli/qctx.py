@@ -188,11 +188,21 @@ def cmd_config_set(args, cfg):
 def cmd_config_detect(args, cfg):
     """Finds the model's real dimension instead of trusting the number that was typed."""
     dim = core.build_embedder(cfg).detect_dimension()
-    if dim == cfg.vector_size:
+    changed = dim != cfg.vector_size
+    path = core.save({"vector_size": dim}) if changed else None
+    if args.json:
+        # HONOURED, because `core/setup.py` prints this command as the fix hint for a wrong
+        # dimension — so a script following the diagnostic's own advice was handed prose.
+        output({"model": cfg.embed_model, "dimensions": dim, "was": cfg.vector_size,
+                "changed": changed, "path": str(path) if path else None}, True)
+
+        return
+
+    if not changed:
         print(f"{cfg.embed_model} returns {dim} dimensions — the config is already correct")
 
         return
-    path = core.save({"vector_size": dim})
+
     print(f"{cfg.embed_model} returns {dim} dimensions (the config said {cfg.vector_size})")
     print(f"  vector_size updated in {path}")
     print("  check with `qctx collections list` which collections are still compatible")
@@ -1628,11 +1638,20 @@ def _propagate_json(parser: argparse.ArgumentParser) -> None:
     failed with "unrecognized arguments". Walking the subparsers after they are built
     solves it in one place; repeating the definition across twenty `add_parser` calls
     would be the same duplication this project spent an afternoon removing.
+
+    `argparse.SUPPRESS` AS THE DEFAULT, not False and not None, so the flag works in BOTH
+    positions. A subparser writes its defaults over the namespace the top-level parser already
+    filled, so a `store_true` defaulting to False silently reset `qctx --json repos status`
+    back to human text while `qctx repos status --json` worked — and the top-level flag is in
+    `--help` and in the skill documentation. SUPPRESS writes nothing when the flag is absent,
+    which leaves the top-level value standing; `main` fills in False when neither position
+    used it, so handlers still just read `args.json`.
     """
     for action in parser._subparsers._group_actions if parser._subparsers else []:
         for sub in getattr(action, "choices", {}).values():
             if not any(o == "--json" for a in sub._actions for o in a.option_strings):
-                sub.add_argument("--json", action="store_true", help="JSON output")
+                sub.add_argument("--json", action="store_true",
+                                 default=argparse.SUPPRESS, help="JSON output")
             _propagate_json(sub)
 
 
@@ -1838,6 +1857,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    # `--json` is accepted before OR after the subcommand, and the subparser copy is declared
+    # with SUPPRESS so an absent flag leaves the top-level value alone. Neither position used
+    # it means the attribute may not exist at all, so it is filled in once here rather than
+    # every handler having to reach for `getattr`.
+    if not hasattr(args, "json"):
+        args.json = False
     try:
         # THE HANDLER'S RETURN IS THE EXIT CODE, when it gives one. Almost every command
         # answers by printing and returns None, which is 0 — but `--check` exists to be

@@ -125,6 +125,16 @@ qctx install --yes        # answers yes to every group; the script case
 qctx install --config-only  # the configuration pass only; touches no host
 ```
 
+`--check` answers in its **exit code** as well as in words: `0` when the install is ready,
+`1` when something blocks it. That is what makes it usable in a script:
+`qctx install --check || echo "not ready"`. `qctx setup --check` behaves the same way.
+Without `--check`, both commands are diagnostics you read, and they exit `0`.
+
+State lives under `~/.memories-plugin/state` by default, and `QCTX_STATE_DIR` moves ALL of
+it: the job queue, the leases, the quarantine, the window cache and the recall state of both
+hosts. It is one directory on purpose. The circuit breaker that backs off from a saturated
+re-ranker is a file, so what one session learns the other does not have to rediscover.
+
 ## Local models
 
 The fastest local setup for the three endpoints, step by step. If your models are
