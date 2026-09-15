@@ -54,15 +54,16 @@ def enqueue(repo: str, kind: str, paths: list[str], total: int | None = None) ->
            "total": len(paths) if total is None else int(total),
            "done": 0, "current": "", "state": PENDING, "error": "",
            "daemon_pid": 0, "queued_at": time.time(), "id": uuid.uuid4().hex}
-    
-    if not _write(repo, job):
-        raise JobError(f"could not queue job for {repo}: state directory is unavailable")
-    
-    # Clear any stale cancel from a previous job. The job's contract is that it exists AND
-    # starts clean. A cancel file that survives would kill it on arrival. Raise rather than
-    # silently produce a dead job.
+
+    # CLEARED BEFORE THE JOB IS WRITTEN, not after. A cancel file surviving from a previous
+    # job kills this one on arrival, and raising AFTER the write left exactly the dead job
+    # this raise exists to prevent: the caller was told the queue failed while a PENDING job
+    # sat on disk, and the next daemon cycle marked it CANCELLED having run nothing.
     if not _remove_cancel_file(repo):
         raise JobError(f"could not clear stale cancellation for {repo}: see {_cancel_path(repo)}")
+
+    if not _write(repo, job):
+        raise JobError(f"could not queue job for {repo}: state directory is unavailable")
 
     return job
 

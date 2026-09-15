@@ -11,7 +11,31 @@ import os
 import subprocess
 
 from . import jobs, quarantine, scan
-from .errors import CoreError
+from .breaker import Breaker
+from .errors import CoreError, infrastructure_errors
+from .knobs import state_dir
+
+#: How long the watcher leaves a repository alone after its job died on infrastructure. The
+#: outage this exists for lasts minutes (a shared embedding endpoint, a restarting Qdrant),
+#: and the cost of not backing off is paid on the endpoint automatic recall shares: measured
+#: 10 hits in 30 cycles against a refused connection, one every 15 s for the whole outage.
+BREAKER_COOLDOWN_S = 60.0
+
+
+def index_breaker() -> Breaker:
+    """The backoff shared by every indexing path, on disk so it survives the process.
+
+    A FILE AND NOT MEMORY, for the reason `core/breaker.py` gives: the daemon is one process
+    but the CLI and both hosts spawn their own, and an endpoint that is down is down for all
+    of them. `state_dir()` may be unwritable, which `Breaker` already treats as "no breaker
+    this round" rather than an error — losing the backoff must never cost the indexing.
+    """
+    try:
+        path = state_dir() / "index-breaker"
+    except Exception:                                  # noqa: BLE001 — see the docstring
+        path = None
+
+    return Breaker(path, BREAKER_COOLDOWN_S)
 
 #: How many files go to `add_files` at once. Small enough that progress moves visibly and a
 #: cancel is honoured quickly; large enough not to pay the call overhead per file.
@@ -27,6 +51,21 @@ def work(cfg=None, index=None, batch: int = BATCH):
     def run_job(job: dict) -> None:
         target = index if index is not None else _build(cfg)
         repo = job["repo"]
+        breaker = index_breaker()
+        try:
+            _run(target, job, repo)
+        except infrastructure_errors():
+            # ARMED, NOT SWALLOWED. The raise still reaches `daemon._run_one`, which marks the
+            # job FAILED — an outage must stay visible. The breaker only stops the WATCHER from
+            # queueing the same work again on the next cycle, which it otherwise did because
+            # FAILED is neither PENDING nor RUNNING.
+            breaker.arm()
+            raise
+        # A run that got through means the dependency is back; a stale breaker would keep the
+        # repository idle for the rest of the cooldown for no reason.
+        breaker.clear()
+
+    def _run(target, job: dict, repo: str) -> None:
         if job.get("kind") == "refresh":
             # `should_stop` gives `refresh` the SAME per-item cancel boundary the "index" path
             # already gets from its batch loop below. Without it, `refresh` walks the whole
@@ -92,12 +131,21 @@ def watcher(cfg=None, index=None):
 
     def watch() -> None:
         target = index if index is not None else _build(cfg)
+        # Read once per cycle, not per repository: it is one file read, and every repo in this
+        # loop is behind the same endpoint.
+        breaker = index_breaker()
         for entry in target.list_repos():
             repo = entry["repo"]
             job = jobs.load(repo)
             if job and job.get("state") in (jobs.PENDING, jobs.RUNNING):
                 # Already queued or running: a second job would only stack behind the first and
                 # describe a disk that has moved on by the time it ran.
+                continue
+            # BACKED OFF AFTER AN INFRASTRUCTURE FAILURE. A job that died because the endpoint
+            # was down lands FAILED, which is neither PENDING nor RUNNING — so the guard above
+            # let the same work be queued again every cycle. Measured: 10 hits on a refused
+            # connection in 30 cycles, on the endpoint automatic recall shares.
+            if breaker.is_open() is not None:
                 continue
             # ONE archive fetch per repository per cycle, not two: `poll` answers both halves
             # of the question ("what moved" and "what is already indexed") from a single read.
@@ -197,6 +245,15 @@ def _new_tracked_paths(entry: dict, indexed: set, memo: dict | None = None) -> s
     initial `add-all` job runs, so a file the watcher decides to index and a file `add-all`
     would have indexed are the SAME decision, made by one function — not two that could drift
     on a binary, a lockfile or the size ceiling.
+
+    THE EXPENSIVE HALF IS PAID ONLY FOR FILES THE ARCHIVE DOES NOT HAVE. `scan.eligible` opens
+    and reads every tracked file to judge it (measured: 50.8 ms per 2,000 files against 3.0 ms
+    to `stat` them, and 207 ms for a 10,380-file checkout — 13x the 16 ms this module budgets
+    for a whole cycle). Nearly all of that is spent re-judging files that are already indexed
+    and whose verdict is then thrown away on the last line. Subtracting `indexed` from the
+    candidate list FIRST leaves the content judgement for the handful of genuinely new paths,
+    which is what `core/scan.py` means when it says the sniff happens on the eligibility pass
+    and never on the watcher's cycle.
     """
     repo = entry["repo"]
     roots = list(entry.get("checkouts") or [])
@@ -208,7 +265,7 @@ def _new_tracked_paths(entry: dict, indexed: set, memo: dict | None = None) -> s
         eligible = set()
         for root in roots:
             try:
-                eligible.update(scan.eligible(root)["eligible"])
+                eligible.update(scan.eligible(root, judge=lambda p: p not in indexed)["eligible"])
             except Exception:                         # noqa: BLE001 — one bad checkout root
                 continue                              # must not blind the watcher to the rest
         if memo is not None:

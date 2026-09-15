@@ -712,14 +712,18 @@ class RepoIndex:
         """
         counted = self._chunks_per_repo()
         seen = set(counted)
-        # LIVE CHUNK COUNTS, WHEN THE FACET GAVE THEM. The registry's own `chunks`/`files` are
-        # "as of the last `add_files` that wrote something" — and the daemon calls that in
-        # batches of 8, so a 20-file `add-all` leaves the registry saying 4 and a later
-        # single-file `refresh` leaves it saying 1. The number was never a size, but the
-        # listing printed it where a size belongs. The facet counts the archive server-side and
-        # is already being asked; `live_chunks` is None only when the facet was unavailable and
-        # the fallback scroll had to be used, and the caller must then say so rather than
-        # substitute the stale figure.
+        # LIVE CHUNK COUNTS. The registry's own `chunks`/`files` are "as of the last
+        # `add_files` that wrote something" — and the daemon calls that in batches of 8, so a
+        # 20-file `add-all` leaves the registry saying 4 and a later single-file `refresh`
+        # leaves it saying 1. The number was never a size, but the listing printed it where a
+        # size belongs, so the archive is asked instead.
+        #
+        # ALWAYS A NUMBER, NEVER None. Both paths in `_chunks_per_repo` establish a count —
+        # the facet is asked for one and the fallback scroll tallies as it goes — and a repo
+        # absent from the mapping holds no chunks, which is 0 and not "unknown". An earlier
+        # version of this comment promised None when the facet was unavailable and the CLI
+        # carried an "(facet unavailable)" branch for it; neither could ever be reached, and
+        # an unreachable honesty branch reads like a guarantee that is not there.
         repos = self.list_repos()
         for r in repos:
             r["live_chunks"] = counted.get(r["repo"], 0)
@@ -896,8 +900,11 @@ class RepoIndex:
         the listing cannot even name; that one reports what the listing names wrongly.
         """
         known = {r["repo"] for r in self.list_repos()}
-        counted = self._chunks_per_repo()
-        seen = set(counted) if seen is None else seen
+        # COMPUTED ONLY WHEN IT IS NEEDED. `seen` exists precisely so `list_request` pays for
+        # one archive scroll and feeds both divergence reads; computing it anyway and then
+        # discarding it made that parameter cosmetic — measured 3 scrolls per list_request
+        # where the docstring promises 1.
+        seen = set(self._chunks_per_repo()) if seen is None else seen
 
         return sorted(r for r in seen if r and r not in known)
 
@@ -921,8 +928,9 @@ class RepoIndex:
         honestly. "Claims 50, has 7" is not reported, and must not be: reindexing a subset is
         the ordinary path.
         """
-        counted = self._chunks_per_repo()
-        seen = set(counted) if seen is None else seen
+        # Same as `divergent_repos`: the scroll is paid only when the caller did not already
+        # pay it. `list_request` passes `seen` so one read feeds both directions.
+        seen = set(self._chunks_per_repo()) if seen is None else seen
 
         return sorted(r["repo"] for r in self.list_repos()
                       if (r.get("chunks") or 0) > 0 and r["repo"] not in seen)

@@ -23,6 +23,7 @@ import unittest.mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import indexer, jobs, quarantine  # noqa: E402
+from core.embedding import EmbeddingError  # noqa: E402
 
 
 def a_state_dir() -> str:
@@ -48,6 +49,8 @@ class FakeIndex:
         # index, and that gap is exactly what let the re-queue loop through review. `fails`
         # maps a path to the reason `add_files` reports for it, the way the real one does.
         self._fails = dict(fails)
+        #: Set by a test to make `refresh` raise the way the real one does on an outage.
+        self.refresh_raises: Exception | None = None
         self.refreshed = []
         self.indexed_calls = []
         # `added` records EVERY embed, with repeats, so a test can tell "indexed once" from
@@ -83,6 +86,11 @@ class FakeIndex:
 
     def refresh(self, repo, should_stop=None):
         self.refreshed.append(repo)
+        # LISKOV: the real one raises on an infrastructure failure rather than reporting it
+        # per file — an endpoint that is down is a fact about the minute, not about a file.
+        # A fake that could only succeed or skip could not exercise the backoff at all.
+        if self.refresh_raises is not None:
+            raise self.refresh_raises
         report = []
         for path in self._changed:
             if path in self._fails:
@@ -488,6 +496,89 @@ class TestQuarantineReleasesWhenTheContentChanges(unittest.TestCase):
         self.assertEqual(job["state"], jobs.PENDING,
                          "a file that gained content was never retried")
         self.assertIn(path, job["paths"])
+
+
+class TestTheWatcherDoesNotREADEveryTrackedFile(unittest.TestCase):
+    """Deciding whether a file is eligible means opening and reading it — which is why
+    `core/scan.py` says that judgement belongs to the eligibility pass and never to the
+    watcher's cycle. It landed on the cycle anyway: measured 207 ms for a 10,380-file checkout
+    against the 16 ms this module budgets, re-paid on every `git add`, checkout or commit,
+    because those invalidate the memo. Nearly all of it was re-judging files already indexed
+    only to discard the verdict on the last line."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_file_the_archive_already_holds_is_never_opened(self):
+        root = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", root], check=True)
+        paths = []
+        for name in ("a.py", "b.py", "c.py"):
+            path = os.path.join(root, name)
+            with open(path, "w") as fh:
+                fh.write("x = 1\n")
+            paths.append(os.path.abspath(path))
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+
+        sniffed = []
+        real_sniff = indexer.scan._sniff
+        try:
+            indexer.scan._sniff = lambda p: sniffed.append(p) or real_sniff(p)
+            # Two of the three are already indexed; only the third is a candidate.
+            found = indexer._new_tracked_paths({"repo": "alpha", "checkouts": [root]},
+                                               set(paths[:2]), {})
+        finally:
+            indexer.scan._sniff = real_sniff
+
+        self.assertEqual(found, {paths[2]}, "the new file must still be found")
+        self.assertEqual([os.path.abspath(p) for p in sniffed], [paths[2]],
+                         f"it read files the archive already has: {sniffed}")
+
+
+class TestAnOutageBacksOffInsteadOfHammering(unittest.TestCase):
+    """An infrastructure error propagates by design — an endpoint that is down is a fact about
+    the minute, not about the file, so nothing is quarantined and the job lands FAILED. But
+    FAILED is neither PENDING nor RUNNING, so the watcher's guard does not skip the repo and
+    the same work is queued again on the next cycle. Measured before the breaker: 10 hits on a
+    down endpoint in 30 cycles — on the very endpoint automatic recall shares, during the
+    outage when recall needs it most."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_repo_whose_job_failed_on_infrastructure_is_not_re_queued_at_once(self):
+        path = a_file_on_disk("x = 1\n")
+        ix = FakeIndex(changed=[path], indexed=[path])
+        watch = indexer.watcher(index=ix)
+        run_job = indexer.work(index=ix)
+
+        attempts = 0
+        for _ in range(12):
+            watch()
+            job = jobs.load("alpha")
+            if job and job.get("state") == jobs.PENDING:
+                attempts += 1
+                ix.refresh_raises = EmbeddingError("connection refused")
+                try:
+                    run_job(job)
+                except EmbeddingError:
+                    jobs.update("alpha", state=jobs.FAILED, error="connection refused")
+
+        self.assertLessEqual(attempts, 2,
+                             f"a down endpoint was hit {attempts} times in 12 cycles")
+
+    def test_the_backoff_expires_so_the_repo_is_retried(self):
+        """A breaker that never reopens is an outage that never ends."""
+        path = a_file_on_disk("x = 1\n")
+        ix = FakeIndex(changed=[path], indexed=[path])
+        indexer.index_breaker().arm()
+        self.assertIsNotNone(indexer.index_breaker().is_open(), "precondition: armed")
+
+        indexer.index_breaker().clear()
+        watch = indexer.watcher(index=ix)
+        watch()
+        watch()
+        self.assertTrue(jobs.load("alpha"), "a cleared breaker must let work through")
 
 
 class TestAnUnknownJobKindIsNotASilentSuccess(unittest.TestCase):

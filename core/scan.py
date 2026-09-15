@@ -66,7 +66,7 @@ def tracked_files(root: str) -> list[str]:
     return [name for name in out.stdout.decode("utf-8", "replace").split("\0") if name]
 
 
-def eligible(root: str, max_bytes: int = MAX_FILE_BYTES) -> dict:
+def eligible(root: str, max_bytes: int = MAX_FILE_BYTES, judge=None) -> dict:
     """`{"tracked": int, "eligible": [absolute paths], "skipped": {reason: count}}`.
 
     Paths come back ABSOLUTE: `RepoIndex.add_files` takes paths and the daemon runs from a
@@ -75,12 +75,23 @@ def eligible(root: str, max_bytes: int = MAX_FILE_BYTES) -> dict:
 
     Every discard reason is present even at zero, so no consumer has to guess whether a key
     exists.
+
+    `judge` NARROWS WHAT IS INSPECTED, for a caller that already knows most of the answer.
+    Deciding a file requires opening and reading it (see `_sniff`), which is why this belongs
+    to the eligibility pass and not to a polling loop — measured 50.8 ms per 2,000 files
+    against 3.0 ms to `stat` them. The watcher only wants paths the archive does not already
+    hold, and re-reading the rest to throw the verdict away put its cycle 13x over budget. A
+    path `judge` rejects is not inspected, not kept and not counted as skipped: it was never a
+    candidate, so calling it "discarded for being binary" would be an invented fact. `tracked`
+    still counts everything git reports, because that is the funnel's denominator.
     """
     names = tracked_files(root)
     skipped = {"binary": 0, "minified": 0, "lockfile": 0, "too_big": 0, "unreadable": 0}
     keep = []
     for name in names:
         path = os.path.join(root, name)
+        if judge is not None and not judge(os.path.abspath(path)):
+            continue
         if os.path.basename(name) in LOCKFILES:
             skipped["lockfile"] += 1
             continue
@@ -132,6 +143,14 @@ def _sniff(path: str) -> str | None:
                     carry = 0
                 carry += len(segments[-1])
                 longest = max(longest, carry)
+                # STOPS AT THE ANSWER, NOT AT THE END OF THE FILE. The verdict is a threshold
+                # test, so once a line has passed it no further read can change it. Scanning
+                # the whole file regardless is what put this pass 13x over the watcher's 16 ms
+                # cycle budget on a 10,000-file checkout (measured 207 ms), and it is re-paid
+                # on every `git add`, checkout, merge or commit, which is what invalidates the
+                # memo above it.
+                if longest > MINIFIED_LINE_CHARS:
+                    return "minified"
                 buffer = fh.read(_SNIFF_BYTES)
     except OSError:
         return "unreadable"

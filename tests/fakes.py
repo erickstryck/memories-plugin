@@ -91,6 +91,26 @@ class FakeVectorStore:
         for pid in [p for p, v in points.items() if _matches_filter(v.get("payload", {}), filter_)]:
             points.pop(pid)
 
+    def facet(self, name: str, key: str, limit: int, exact: bool = True) -> list[dict]:
+        """Distinct values of `key` with counts, like the real server.
+
+        LISKOV: IT REFUSES WHAT THE REAL ONE REFUSES. Qdrant answers 400 when the key has no
+        payload index, so a fake that always succeeded would let a caller forget the index and
+        still pass — the same shape as the fake index that only knew how to succeed. It also
+        truncates at `limit` exactly as the server does, silently, which is why callers throw
+        a full-limit answer away rather than trust it.
+        """
+        self.calls.append(("facet", name, key))
+        if key not in self.indexes.get(name, set()):
+            raise ValueError(f"No appropriate index for faceting on {key!r}")
+        counts: dict = {}
+        for p in self.collections.get(name, {}).get("points", {}).values():
+            value = (p.get("payload") or {}).get(key)
+            if value is not None:
+                counts[value] = counts.get(value, 0) + 1
+
+        return [{"value": v, "count": c} for v, c in sorted(counts.items())][:limit]
+
     def search(self, name: str, vector: list[float], limit: int,
                filter_: dict | None = None, with_payload: bool = True) -> list[dict]:
         self.calls.append(("search", name, limit))

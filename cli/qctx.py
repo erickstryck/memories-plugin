@@ -1254,15 +1254,15 @@ def cmd_repos_list(args, cfg):
         # "as of the last `add_files` that wrote something", and the daemon calls that in
         # batches — so a 20-file `add-all` left this line printing "4 file(s)" and a later
         # one-file `refresh` left it printing 1, for a repository holding 20. The count was
-        # never a size; this line was the one presenting it as one. `live_chunks` comes from the
-        # facet the listing already asks for, and is None only when the facet was unavailable
-        # and the fallback scroll ran — in which case say so rather than print a stale number.
-        live = r.get("live_chunks")
-        size = f"{live} chunk(s)" if live is not None else "size unknown (facet unavailable)"
+        # never a size; this line was the one presenting it as one. `live_chunks` comes from
+        # the listing's own archive read, which always establishes a count (the facet is asked
+        # for one, the fallback scroll tallies as it goes), so it is always a number — the
+        # "(facet unavailable)" branch that used to sit here could never be reached.
+        #
         # "never indexed" and not a bare `?`: registering is not indexing, and the empty
         # stamp is a fact about this repo rather than a missing field.
         print(f"{r['repo']:<24} {r.get('label', ''):<24} "
-              f"{len(r.get('checkouts') or [])} checkout(s)  {size}  "
+              f"{len(r.get('checkouts') or [])} checkout(s)  {r.get('live_chunks', 0)} chunk(s)  "
               f"{r.get('indexed_at') or 'never indexed'}")
     for name in out["divergent"]:
         # Named out loud: it cannot be listed, so it cannot be dropped by name either.

@@ -326,6 +326,14 @@ def _write_record(entry: dict) -> bool:
         return False
 
 
+#: Spawned children whose exit status has not been collected yet. A `Popen` nobody waits on
+#: leaves a zombie in the process table until its parent exits — harmless for liveness
+#: (`lease.process_start` reads Z as gone, by design) but this is spawned from the hermes
+#: provider's `initialize()`, which lives for the whole session, so they accumulate there.
+#: Measured: one Z per spawn.
+_spawned: list = []
+
+
 def _spawn(argv: list[str]) -> int:
     """Launches `argv` fully detached, so it survives the terminal that started it.
 
@@ -334,11 +342,17 @@ def _spawn(argv: list[str]) -> int:
     but this is spawned from a hook, from the hermes provider and from the CLI, each with a
     different cwd, and a detached process should not depend on the one it happened to inherit.
     """
+    # Reaped opportunistically, never waited on: `poll()` collects a child that has already
+    # exited and returns None for one still running, so this costs nothing and never blocks
+    # the caller on a daemon that is doing its job.
+    _spawned[:] = [p for p in _spawned if p.poll() is None]
+
     env = dict(os.environ)
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = f"{_root()}{os.pathsep}{existing}" if existing else _root()
     out = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+    _spawned.append(out)
 
     return out.pid
 

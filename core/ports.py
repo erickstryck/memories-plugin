@@ -55,6 +55,19 @@ class VectorStore(Protocol):
     def ensure_payload_index(self, name: str, field: str, schema: str) -> None:
         ...
 
+    def facet(self, name: str, key: str, limit: int, exact: bool = ...) -> list[dict]:
+        """Distinct values of one payload key, counted by the server: `[{"value", "count"}]`.
+
+        DECLARED HERE BECAUSE PRODUCTION CALLS IT. `RepoIndex._chunks_per_repo` asks for it on
+        every `repos list`, and leaving it out of this Protocol meant a store without it still
+        satisfied the declared dependency — so the offline suite exercised only the fallback
+        scroll, which is exactly the Liskov gap a fake that could only succeed once hid.
+
+        It needs a payload index on `key`; without one the server answers 400, so a caller
+        must be ready for the store's error rather than assume availability.
+        """
+        ...
+
     def collection_info(self, name: str) -> dict | None:
         ...
 
