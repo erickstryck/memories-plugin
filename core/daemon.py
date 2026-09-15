@@ -259,7 +259,7 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
     while cycles is None or seen < cycles:
         if not lease.live():
             return "no live lease"
-        jobs.reap(lambda pid: lease.process_start(pid) is not None)
+        jobs.reap(lambda pid: lease.process_start(pid) is not None, lease.process_start)
         job = jobs.next_pending()
         if job is not None:
             _run_one(job, work)
@@ -296,7 +296,10 @@ def _run_one(job: dict, work) -> None:
         jobs.update(repo, only_if=jid, state=jobs.CANCELLED)
 
         return
-    jobs.update(repo, only_if=jid, state=jobs.RUNNING, daemon_pid=os.getpid(), error="")
+    # THE PAIR, not just the number: `jobs.reap` compares both, because a recycled pid
+    # answering "alive" left a dead job RUNNING forever. Same test `lease.alive` applies.
+    jobs.update(repo, only_if=jid, state=jobs.RUNNING, daemon_pid=os.getpid(),
+                daemon_start=lease.process_start(os.getpid()), error="")
     try:
         work(job)
     except Exception as exc:                        # noqa: BLE001 — see the docstring of `run`

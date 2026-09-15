@@ -3,6 +3,8 @@
 `candidates_for` has existed in the core since sub-project A and no host ever called it: it
 was dead code. This is the consumer that was missing, on both hosts.
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -10,6 +12,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -44,6 +48,64 @@ def run_cli(*args, cwd=None, **overrides):
 
     return subprocess.run([sys.executable, str(QCTX), *args], capture_output=True, text=True,
                           cwd=cwd, env=env, timeout=180)
+
+
+class TestTheAdviceWhenTheNameIsTaken(unittest.TestCase):
+    """The command NAMED the conflict and then, on the very next line, printed the command
+    that causes it: "the name 'alpha' already belongs to another repository" followed by
+    "index this working copy as: qctx repos add-all alpha".
+
+    Following that advice calls `register(alpha, …)`, which ACCUMULATES this checkout and its
+    remote into the other repository's entry. Measured: an `alpha` holding
+    `/somewhere/else` and `/tmp/…/alpha` as checkouts, and remotes from two different forges.
+    That is the merge by accident of naming that the declared-identity decision exists to
+    refuse — arrived at by following the tool's own instruction.
+    """
+
+    def _advice(self, found):
+        """The lines `cmd_repos_init` prints for a given answer from the core."""
+        import cli.qctx as qctx
+
+        class Stub:
+            def candidates_for(self, root, remotes):
+                return dict(found)
+
+        buf = io.StringIO()
+        args = SimpleNamespace(path=os.getcwd(), json=False)
+        with mock.patch.object(qctx.core, "build_repos", return_value=Stub()), \
+             mock.patch.object(qctx, "_git_root_or_die", create=True,
+                               side_effect=lambda p: p), \
+             contextlib.redirect_stdout(buf):
+            try:
+                qctx.cmd_repos_init(args, None)
+            except SystemExit:
+                pass
+
+        return buf.getvalue()
+
+    def test_it_does_NOT_offer_the_taken_name(self):
+        out = self._advice({"bound": None, "join": [], "suggest": "alpha",
+                            "taken": True, "free": "alpha-2"})
+        lines = [ln for ln in out.splitlines() if "index this working copy as" in ln]
+
+        self.assertIn("already belongs", out, "precondition: the conflict is named")
+        self.assertTrue(lines, "nothing was offered at all")
+        self.assertNotIn("add-all alpha\n", lines[0] + "\n",
+                         "the advice line tells the user to merge two unrelated repositories")
+
+    def test_it_offers_the_FREE_name_instead(self):
+        out = self._advice({"bound": None, "join": [], "suggest": "alpha",
+                            "taken": True, "free": "alpha-2"})
+
+        self.assertIn("alpha-2", out, "no usable name was offered at all")
+
+    def test_an_UNTAKEN_name_is_still_offered_directly(self):
+        """The common case must not grow a suffix or an extra question."""
+        out = self._advice({"bound": None, "join": [], "suggest": "brand-new",
+                            "taken": False, "free": "brand-new"})
+
+        self.assertIn("add-all brand-new", out)
+        self.assertNotIn("already belongs", out)
 
 
 class TestInitOffersAndDoesNotWrite(unittest.TestCase):

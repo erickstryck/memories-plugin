@@ -586,6 +586,15 @@ class RepoIndex:
         identity by an accident of naming, which is exactly what the declared-identity
         decision exists to reject — so the conflict is NAMED and the host asks, rather than
         merged. Deciding what to do about it is the host's; reporting it is this method's.
+
+        `free` is a name the host can actually offer, and it exists because naming the
+        conflict turned out not to be enough. The CLI printed the conflict and then, on the
+        next line, the command to index under the TAKEN name, because that was the only name
+        it had: following it accumulated this checkout and its remote into the other
+        repository's entry. Measured: one `alpha` ending up with checkouts from two unrelated
+        projects and remotes from two forges. Only this class knows which names are free, so
+        proposing one belongs here and not in a host that would have to re-read the registry
+        to do it.
         """
         from . import bindings
 
@@ -600,9 +609,17 @@ class RepoIndex:
         # Computed once and read twice: a second copy of this expression is how `taken` would
         # come to answer about a name `suggest` no longer offers.
         suggest = bindings.slug_for(os.path.basename(os.path.realpath(root)))
+        free = suggest
+        # BOUNDED, and the bound is not arbitrary: a machine with a hundred directories of the
+        # same name has a naming problem this method cannot solve, and an unbounded loop here
+        # would hang the one command whose job is to answer quickly.
+        for n in range(2, 100):
+            if free not in by_name:
+                break
+            free = f"{suggest}-{n}"
 
         return {"bound": bound, "join": join, "suggest": suggest,
-                "taken": suggest in by_name}
+                "taken": suggest in by_name, "free": free}
 
     # ---- searching ---------------------------------------------------------
 

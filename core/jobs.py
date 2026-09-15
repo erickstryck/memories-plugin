@@ -159,16 +159,35 @@ def next_pending() -> dict | None:
     return min(pending, key=lambda j: j.get("queued_at", 0)) if pending else None
 
 
-def reap(pid_alive) -> list[str]:
+def reap(pid_alive, process_start=None) -> list[str]:
     """Marks as interrupted every RUNNING job whose daemon is gone. Returns the repos touched.
 
-    `pid_alive` is injected so a test can decide without spawning anything.
+    THE PAIR `(pid, starttime)`, NOT THE PID ALONE, which is the test `lease.alive` already
+    applies and the one the daemon spec names for this detection. Pids are recycled — Linux
+    wraps them at `/proc/sys/kernel/pid_max` — so a number that answers "alive" may belong to
+    a process that has nothing to do with the job. Comparing only the number left such a job
+    RUNNING forever: a state that lies, which the spec calls worse than a state that is
+    absent.
+
+    BOTH PREDICATES ARE INJECTED, and for the same reason the first one already was: this
+    module writes state files and must not reach into process inspection, which belongs to
+    `core/lease.py`. Passing them in keeps `jobs` a data module and lets a test decide without
+    spawning anything — the dependency points at the caller, not at a sibling.
+
+    A JOB WITH NO RECORDED STARTTIME FALLS BACK TO THE PID. Those are jobs written before this
+    existed; reaping them on sight would mark every one of them interrupted the first time
+    the new code runs, which is a lie in the other direction.
     """
     touched = []
     for job in all_jobs():
         if job.get("state") != RUNNING:
             continue
-        if pid_alive(job.get("daemon_pid") or 0):
+        pid = job.get("daemon_pid") or 0
+        recorded = job.get("daemon_start")
+        if recorded and process_start is not None:
+            if process_start(pid) == recorded:
+                continue
+        elif pid_alive(pid):
             continue
         update(job["repo"], state=FAILED,
                error="interrupted: the daemon running this job is gone")

@@ -29,8 +29,14 @@ def main() -> None:
         from core import daemon, lease
 
         found = lease.find_host_pid(names=("claude",))
+        # APPROXIMATE WHEN THE WALK DID NOT FIND THE HOST. `os.getppid()` is the per-hook bash
+        # (the measured tree is `python3 → bash → claude`), and it exits the moment this hook
+        # returns — so without the flag the lease named a dead process, was swept on the next
+        # cycle, and the daemon stopped while the session was still going. `lease.alive` reads
+        # the flag and errs the way the spec requires instead.
         pid = found[0] if found else os.getppid()
-        lease.write(str(payload.get("session_id") or "default"), "claude", pid=pid)
+        lease.write(str(payload.get("session_id") or "default"), "claude", pid=pid,
+                    approximate=found is None)
         # The lease alone only records that a host is alive; without this call nothing ever
         # STARTS the daemon outside of someone typing a `repos` command by hand, so watching
         # would only ever last for the session where that happened. `daemon.start()` is

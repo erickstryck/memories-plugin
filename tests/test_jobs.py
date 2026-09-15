@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import jobs  # noqa: E402
+from core import jobs, lease  # noqa: E402
 
 
 def a_state_dir() -> str:
@@ -202,6 +202,46 @@ class TestAJobThatOUTLIVEDItsDaemon(unittest.TestCase):
     def setUp(self):
         a_state_dir()
 
+    def test_a_RECYCLED_pid_does_not_keep_a_dead_job_running_forever(self):
+        """The spec's own words for this detection: "O comando seguinte detecta isso pelo mesmo
+        teste de (pid, starttime)" — the same test `lease.alive` already applies, and for the
+        same reason. Pids are reused; on Linux they wrap at `/proc/sys/kernel/pid_max`.
+
+        The job recorded only `daemon_pid`, so the comparison the spec names was structurally
+        impossible — there was no starttime on disk to compare against. A pid that has since
+        been handed to an unrelated process answers "alive", and the job stays RUNNING for
+        good: the state that lies, which the same paragraph of the spec says is worse than a
+        state that is absent. Measured: a job whose daemon is long gone surviving `reap`
+        because some other process now holds its number."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, daemon_pid=os.getpid(),
+                    daemon_start="000-a-boot-ago")
+
+        # `process_start` is what decides now; the old pid-only predicate still says alive.
+        reaped = jobs.reap(lambda pid: True, lease.process_start)
+
+        self.assertEqual(reaped, ["alpha"], "a recycled pid kept a dead job RUNNING")
+        self.assertEqual(jobs.load("alpha")["state"], jobs.FAILED)
+
+    def test_the_SAME_process_still_owns_its_job(self):
+        """The other direction: the running daemon must not reap its own work."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, daemon_pid=os.getpid(),
+                    daemon_start=lease.process_start(os.getpid()))
+
+        self.assertEqual(jobs.reap(lambda pid: True, lease.process_start), [])
+        self.assertEqual(jobs.load("alpha")["state"], jobs.RUNNING)
+
+    def test_a_job_written_BEFORE_the_starttime_existed_still_reaps_by_pid(self):
+        """Old jobs on disk carry no starttime. They must keep the previous behaviour rather
+        than be reaped in a batch the first time the new code runs."""
+        jobs.enqueue("alpha", "index", ["/a.py"])
+        jobs.update("alpha", state=jobs.RUNNING, daemon_pid=4_000_000)
+
+        self.assertEqual(jobs.reap(lambda pid: True, lease.process_start), [],
+                         "an old job was reaped on sight")
+        self.assertEqual(jobs.reap(lambda pid: False, lease.process_start), ["alpha"])
+
     def test_reap_marks_a_running_job_of_a_dead_daemon_as_interrupted(self):
         jobs.enqueue("alpha", "index", ["/a.py"])
         jobs.update("alpha", state=jobs.RUNNING, daemon_pid=4_000_000, done=1)
@@ -215,7 +255,7 @@ class TestAJobThatOUTLIVEDItsDaemon(unittest.TestCase):
     def test_reap_leaves_a_job_of_a_LIVING_daemon_alone(self):
         jobs.enqueue("alpha", "index", ["/a.py"])
         jobs.update("alpha", state=jobs.RUNNING, daemon_pid=os.getpid())
-        self.assertEqual(jobs.reap(lambda pid: True), [])
+        self.assertEqual(jobs.reap(lambda pid: True, lease.process_start), [])
         self.assertEqual(jobs.load("alpha")["state"], jobs.RUNNING)
 
     def test_reap_leaves_a_PENDING_job_alone(self):

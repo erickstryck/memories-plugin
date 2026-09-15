@@ -25,7 +25,14 @@ class Plumbing(unittest.TestCase):
 
     def env(self, on_path=True):
         bindir = self.home / ".local" / "bin"
-        return {"HOME": str(self.home), "PATH": str(bindir) if on_path else "/usr/bin"}
+        # `/usr/bin` stays on PATH in both shapes because the launcher is a bash script and
+        # `launcher_check` now RUNS it to ask which tree it resolves to. A PATH without an
+        # interpreter makes that probe fail for a reason no user would ever hit, and the check
+        # would fall back to the byte comparison — passing the very test that exists to prove
+        # the byte comparison is not enough.
+        path = f"{bindir}:/usr/bin:/bin" if on_path else "/usr/bin:/bin"
+
+        return {"HOME": str(self.home), "PATH": path}
 
     def test_launcher_missing_is_a_blocker_and_names_where_it_goes(self):
         check = install.launcher_check(REPO, self.env())
@@ -46,6 +53,43 @@ class Plumbing(unittest.TestCase):
         copy.write_bytes((REPO / "bin" / "qctx").read_bytes())
         copy.chmod(0o755)
         self.assertTrue(install.launcher_check(REPO, self.env()).ok)
+
+    def test_a_launcher_that_RESOLVES_ELSEWHERE_is_not_ok(self):
+        """The spec asks this check to report `qctx` on PATH "e resolvendo para esta árvore",
+        and comparing bytes cannot answer the second half: the launcher resolves its tree at
+        RUNTIME, so the same file is byte-identical in every checkout. `QCTX_HOME` is first in
+        its precedence order, so an exported variable silently sends every command to another
+        tree while this check reports `ok`.
+
+        `bin/qctx --root` exists precisely to answer it — its own comment says it is "what the
+        wizard's own check reports" — and nothing called it (`grep -rn -- '--root' core cli`
+        returned 0)."""
+        copy = self.home / ".local" / "bin" / "qctx"
+        copy.write_bytes((REPO / "bin" / "qctx").read_bytes())
+        copy.chmod(0o755)
+        other = Path(self.tmp.name) / "other-checkout"
+        (other / "cli").mkdir(parents=True)
+        (other / "cli" / "qctx.py").write_text("print('other tree')\n")
+
+        env = self.env()
+        env["QCTX_HOME"] = str(other)
+        check = install.launcher_check(REPO, env)
+
+        self.assertFalse(check.ok, "a launcher running another tree was reported as correct")
+        self.assertIn(str(other), (check.detail or "") + (check.fix_hint or ""),
+                      "the report does not name the tree it actually resolves to")
+
+    def test_a_launcher_that_resolves_HERE_is_ok(self):
+        """The other direction, so the check cannot be "always fail": the ordinary install
+        must still pass, and must not need QCTX_HOME to do it."""
+        copy = self.home / ".local" / "bin" / "qctx"
+        copy.write_bytes((REPO / "bin" / "qctx").read_bytes())
+        copy.chmod(0o755)
+
+        env = self.env()
+        env["QCTX_HOME"] = str(REPO)
+
+        self.assertTrue(install.launcher_check(REPO, env).ok)
 
     def test_launcher_stale_copy_is_reported(self):
         copy = self.home / ".local" / "bin" / "qctx"

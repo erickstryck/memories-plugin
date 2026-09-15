@@ -11,6 +11,7 @@ is where the two host names already appear in this repository.
 import filecmp
 import os
 import re
+import subprocess
 import shutil
 import tempfile
 from pathlib import Path
@@ -208,8 +209,39 @@ def launcher_check(root: Path, env: dict) -> Check:
     if not filecmp.cmp(found, source, shallow=False):
         return Check("launcher", False, f"{found} differs from {source}",
                      f"{COMMAND_PREFIX} install refreshes the copy")
+    # AND THE BYTES ARE NOT THE WHOLE QUESTION. The spec asks for `qctx` on PATH "and
+    # resolving to THIS tree", and the launcher resolves its tree at runtime — so the same
+    # file is byte-identical in every checkout and this comparison cannot tell them apart.
+    # `QCTX_HOME` sits first in that precedence order, so one exported variable sends every
+    # command to another tree while the check above reports `ok`. `bin/qctx --root` was
+    # written to answer exactly this ("what the wizard's own check reports", in its own
+    # comment) and had no caller.
+    #
+    # A LAUNCHER THAT CANNOT ANSWER IS NOT A FAILURE. An older copy without `--root`, or a
+    # shell that refuses to run it, leaves the byte comparison as the verdict — reporting a
+    # blocker because a diagnostic could not run would make `--check` fail for a reason the
+    # user cannot act on.
+    resolved = _launcher_root(found, env)
+    if resolved and Path(resolved).resolve() != Path(root).resolve():
+        return Check("launcher", False, f"{found} resolves to {resolved}, not {root}",
+                     f"unset QCTX_HOME, or run {resolved}/bin/{LAUNCHER_NAME} instead")
 
     return Check("launcher", True, str(found))
+
+
+def _launcher_root(launcher: str, env: dict) -> str:
+    """Which tree `launcher` would run, or "" when it cannot say.
+
+    Never raises: this is a diagnostic inside a diagnostic, and a launcher that hangs or
+    refuses must cost the check its extra answer, not its whole report.
+    """
+    try:
+        done = subprocess.run([launcher, "--root"], capture_output=True, text=True,
+                              env=env, timeout=10)
+
+        return done.stdout.strip() if done.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def path_check(env: dict) -> Check:

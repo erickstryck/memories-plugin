@@ -157,6 +157,44 @@ class TestTheChoiceOffered(unittest.TestCase):
         self.assertEqual(out["suggest"], "alpha")
         self.assertTrue(out["taken"], "a suggestion that already exists must be flagged")
 
+    def test_a_taken_slug_comes_with_a_FREE_alternative(self):
+        """Naming the conflict is necessary and not sufficient: the host still has to tell the
+        user what to type. Without an alternative the only name on offer is the taken one, and
+        the CLI printed exactly that — "the name 'alpha' already belongs to another
+        repository" followed by "index this working copy as: qctx repos add-all alpha",
+        which accumulates this checkout and its remote into the OTHER repository's entry.
+
+        Measured before this: an `alpha` with remote github.com/other/alpha ended up holding
+        checkouts from two unrelated projects and remotes from two different forges — the
+        merge by accident of naming that the declared-identity decision exists to refuse."""
+        self.ix.register("alpha", "Alpha", ["git@host:me/alpha.git"], "/home/me/alpha")
+
+        out = self.ix.candidates_for("/home/me/some-other/alpha", [])
+
+        self.assertTrue(out["taken"], "precondition: the name is taken")
+        self.assertTrue(out["free"], "no alternative name was offered")
+        self.assertNotEqual(out["free"], out["suggest"], "the alternative is the taken name")
+        self.assertNotIn(out["free"], {r["repo"] for r in self.ix.list_repos()},
+                         "the alternative is itself taken")
+
+    def test_the_alternative_keeps_looking_until_it_finds_a_free_one(self):
+        """One suffix is not enough: a machine with `alpha`, `alpha-2` and `alpha-3` must
+        still get a name it can use."""
+        for name in ("alpha", "alpha-2", "alpha-3"):
+            self.ix.register(name, name, [], f"/home/me/{name}")
+
+        out = self.ix.candidates_for("/home/me/other/alpha", [])
+
+        self.assertNotIn(out["free"], {"alpha", "alpha-2", "alpha-3"})
+
+    def test_a_FREE_slug_offers_itself_as_the_alternative(self):
+        """When nothing is taken there is nothing to work around, and the host must not invent
+        a suffix for a brand-new repository."""
+        out = self.ix.candidates_for("/home/me/brand-new", [])
+
+        self.assertFalse(out["taken"])
+        self.assertEqual(out["free"], "brand-new")
+
     def test_a_free_slug_is_NOT_flagged(self):
         """The other direction, or `taken` could be hard-coded true and still pass above —
         and the host would then report a conflict for every brand-new repository."""

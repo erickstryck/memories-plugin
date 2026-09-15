@@ -1421,10 +1421,22 @@ def cmd_repos_init(args, cfg):
         names = ", ".join(sorted(r["repo"] for r in found["join"]))
         print(f"this working copy shares a remote with: {names}")
     if found["taken"]:
-        # Named rather than merged: two unrelated checkouts with the same directory name are not
-        # the same repository, and deciding otherwise by an accident of naming is what the
-        # declared-identity rule exists to refuse.
+        # NAMED AND THEN NOT OFFERED. Two unrelated working copies with the same directory
+        # name are not the same repository, and deciding otherwise by an accident of naming is
+        # what the declared-identity rule exists to refuse.
+        #
+        # AND THE ADVICE HAS TO CHANGE WITH IT. Printing the conflict and then the `add-all`
+        # for the SAME taken name told the user to do exactly what the sentence above says
+        # must not happen: `add-all` registers, and `register` accumulates this checkout and
+        # its remote into the other repository's entry. Measured by following the line as
+        # printed: one `alpha` left holding two unrelated checkouts and remotes from two
+        # forges. The core proposes a free name; this prints it, and says joining on purpose
+        # is still available for the user who meant it.
         print(f"the name {found['suggest']!r} already belongs to another repository")
+        print(f"index this working copy as:  qctx repos add-all {found['free']}")
+        print(f"or, if it IS that repository: qctx repos add-all {found['suggest']}")
+
+        return
     print(f"index this working copy as:  qctx repos add-all {found['suggest']}")
 
 
@@ -1526,7 +1538,7 @@ def cmd_repos_status(args, cfg):
     # liveness, not a comparison against the CURRENT daemon record, so a job whose daemon is
     # genuinely still running is never reaped out from under it just because some OTHER
     # process currently holds the daemon claim.
-    jobs.reap(lambda pid: lease.process_start(pid) is not None)
+    jobs.reap(lambda pid: lease.process_start(pid) is not None, lease.process_start)
     running = daemon.record()
     rows = jobs.all_jobs()
     # Read before the early `return`, so the JSON form and the printed one carry the same

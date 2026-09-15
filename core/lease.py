@@ -26,6 +26,17 @@ from pathlib import Path
 from .knobs import state_dir
 from .names import safe
 
+#: How long a lease whose host could not be RESOLVED is trusted, in seconds.
+#:
+#: An approximate lease names a pid the walk up the process tree never confirmed, so it cannot
+#: be judged by `(pid, starttime)` like the others — the pid it holds on claude-code is the
+#: per-hook bash, already gone by the time anyone reads it. The spec says which way to be
+#: wrong here ("o pior caso é o daemon sobreviver ao host, NUNCA O CONTRÁRIO"), so the guess is
+#: trusted rather than swept. This bounds that trust: 12 hours is longer than a working day at
+#: the keyboard and far shorter than a machine's uptime, so a reboot that leaves state behind
+#: does not keep a daemon alive on a lease nobody can vouch for.
+APPROXIMATE_TTL_S = 12 * 60 * 60
+
 
 def dir() -> Path:                                  # noqa: A001 — the name says what it holds
     return state_dir() / "leases"
@@ -85,15 +96,26 @@ def find_host_pid(names: tuple = ("claude", "hermes")) -> tuple[int, str] | None
     return None
 
 
-def write(session_id: str, host: str, pid: int | None = None) -> dict:
+def write(session_id: str, host: str, pid: int | None = None,
+          approximate: bool = False) -> dict:
     """Records that `session_id` on `host` is alive. Returns the entry it wrote.
 
     `pid` defaults to this process, which is right for hermes — the provider IS the host. On
     claude-code the caller resolves the host with `find_host_pid` first.
+
+    `approximate` says the walk up the tree did NOT find the host and this pid is a guess. The
+    spec requires recording it, and `alive` requires it to decide which way to be wrong: on
+    claude-code the fallback is `os.getppid()`, which is the per-hook bash, and that bash exits
+    the moment the hook returns — so an unmarked guess meant a lease born naming a dead
+    process, swept on the next cycle, stopping the daemon while the host was still running.
     """
     pid = os.getpid() if pid is None else int(pid)
     entry = {"session_id": session_id, "host": host, "pid": pid,
              "starttime": process_start(pid) or "", "written_at": _now()}
+    if approximate:
+        # Written only when true, so an ordinary lease keeps the shape it always had and an
+        # older reader sees nothing new.
+        entry["approximate"] = True
     try:
         dir().mkdir(parents=True, exist_ok=True)
         path = dir() / f"{safe(session_id)}.json"
@@ -109,9 +131,26 @@ def write(session_id: str, host: str, pid: int | None = None) -> dict:
 
 
 def alive(entry: dict) -> bool:
-    """Whether the process this lease names is still the process it named."""
+    """Whether the process this lease names is still the process it named.
+
+    AN APPROXIMATE LEASE IS GIVEN THE BENEFIT OF THE DOUBT, because it is a guess about WHICH
+    process is the host, not a claim that the host is alive. Reading a wrong guess as "the host
+    is gone" stops background indexing silently while the user is still working, and the spec
+    names that direction as the one never to take: the acceptable error is a daemon that
+    outlives its host and is reaped by the next `status`.
+
+    BUT NOT FOREVER, or the tolerance becomes the leak. `APPROXIMATE_TTL_S` bounds it: the
+    guess is trusted for one working session's worth of time and then judged like any other
+    lease, so a machine that reboots without cleaning state does not keep a daemon alive on
+    the strength of a lease nobody can vouch for.
+    """
     if not isinstance(entry, dict):
         return False
+    if entry.get("approximate"):
+        try:
+            return (_now() - float(entry.get("written_at") or 0)) < APPROXIMATE_TTL_S
+        except (TypeError, ValueError):
+            return False
     try:
         pid = int(entry.get("pid"))
     except (TypeError, ValueError):

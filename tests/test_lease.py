@@ -105,6 +105,68 @@ class TestSweeping(unittest.TestCase):
             os.chmod(path, 0o600)
 
 
+class TestAnAPPROXIMATEResolutionSaysSo(unittest.TestCase):
+    """The spec's rule for when the walk up the process tree does not find the host: "o lease
+    grava o pid que achou e REGISTRA QUE A RESOLUÇÃO FOI APROXIMADA; o pior caso é o daemon
+    sobreviver ao host e ser encerrado no `status` seguinte, NUNCA O CONTRÁRIO."
+
+    Both halves were missing. Nothing recorded the approximation, and the fallback
+    (`os.getppid()`) points at the per-hook bash on claude-code — the spec's own measurement
+    is `python3 → bash → claude`, and that bash exits the moment the hook returns. So the
+    lease was born naming a process already dead, `live()` swept it on the next cycle, and the
+    daemon stopped with the host still running: exactly the direction the spec forbids.
+    """
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_an_approximate_lease_is_MARKED(self):
+        entry = lease.write("s1", "claude", pid=os.getpid(), approximate=True)
+
+        self.assertTrue(entry.get("approximate"),
+                        "nothing on disk says the host was never actually found")
+
+    def test_an_exact_lease_is_not_marked(self):
+        """The other direction, or every lease could carry the flag and mean nothing."""
+        self.assertFalse(lease.write("s2", "hermes").get("approximate"))
+
+    def test_an_approximate_lease_of_a_DEAD_process_stays_alive(self):
+        """The rule the spec states as "never the other way round". An approximate resolution
+        is a guess about WHICH process is the host; a guess that turns out to name a dead
+        process must not be read as "the host is gone", because the cost of being wrong that
+        way is the background indexing stopping silently while the user is still working.
+
+        A daemon that outlives its host is the cheap error: the next `status` reaps it."""
+        dead = {"session_id": "s3", "host": "claude", "pid": 4_000_000,
+                "starttime": "never", "approximate": True, "written_at": time.time()}
+
+        self.assertTrue(lease.alive(dead),
+                        "an approximate lease was swept, stopping the daemon under a live host")
+
+    def test_an_EXACT_lease_of_a_dead_process_is_still_dead(self):
+        """And the tolerance must not leak into the normal case: an exact lease whose process
+        is gone is the ordinary end of a session, and the daemon should stop."""
+        dead = {"session_id": "s4", "host": "hermes", "pid": 4_000_000, "starttime": "never"}
+
+        self.assertFalse(lease.alive(dead))
+
+    def test_an_approximate_lease_EXPIRES(self):
+        """The tolerance is bounded, or it becomes the leak it was meant to avoid: a reboot
+        that leaves state behind must not keep a daemon alive on a lease nobody can vouch
+        for."""
+        stale = {"session_id": "s5", "host": "claude", "pid": 4_000_000, "starttime": "never",
+                 "approximate": True,
+                 "written_at": time.time() - lease.APPROXIMATE_TTL_S - 1}
+
+        self.assertFalse(lease.alive(stale), "an approximate lease was trusted forever")
+
+    def test_a_FRESH_approximate_lease_is_still_trusted(self):
+        fresh = {"session_id": "s6", "host": "claude", "pid": 4_000_000, "starttime": "never",
+                 "approximate": True, "written_at": time.time()}
+
+        self.assertTrue(lease.alive(fresh))
+
+
 class TestFindingTheHOST(unittest.TestCase):
     def test_it_walks_up_and_finds_a_named_ancestor(self):
         """On claude-code the hook is a subprocess: python3 -> bash -> claude. Measured on this
