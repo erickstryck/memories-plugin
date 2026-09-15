@@ -75,37 +75,16 @@ def _env(name: str, legacy: str, default: str) -> str:
 
 
 def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
-    """Read a number from the environment without letting a typo kill the provider.
+    """This host's channel for the shared clamped read in `core/knobs.py`.
 
-    Same tolerance the claude-code hook needed and for the same reason: this runs at import
-    time, before any guard, so `QCTX_RECALL_MAX_CHARS=14k` would otherwise take the whole
-    provider down instead of falling back.
-
-    `minimum` CLAMPS, and it does not refuse. A knob whose value would leave nothing to
-    return is worse than a knob that ignores an absurd value: `retrieval` applies
-    `max_memories` as a slice, so measured against three stored memories that all match,
-    `QCTX_RECALL_MAX_MEMORIES=6` gave 3 hits, `=1` gave 1, and `=0` gave 0 — an empty block
-    reading "There is no recorded precedent on this subject", on every prompt, from an
-    archive that answered. `=-1` silently dropped the lowest hit, and `QCTX_RECALL_TOP_K=0`
-    asked Qdrant for nothing at all. Since `0` meaning "unlimited" is a common deployer
-    convention, that lie was one plausible typo away. Refusing to start would trade a silent
-    false claim for a loud dead host; clamping keeps the archive answering and says so.
-
-    The note goes to stderr because that is the one channel neither host reads as data:
-    stdout carries the hook protocol on claude-code and the block itself here.
+    The DECISION (what a malformed or too-small value becomes) has one copy in the core; this
+    keeps hermes' own reporting line, which is prefixed and goes to stderr. Before the shared
+    copy the three readers had already drifted on the floor: with `minimum=1`, `0` gave 1 here
+    and 0 in the checkpoint hook.
     """
-    raw = _env(name, legacy, default)
-    try:
-        value = kind(raw)
-    except (TypeError, ValueError):
-        value = kind(default)
-    if minimum is not None and value < minimum:
-        print(f"memories: {name}={raw!r} would leave nothing to return — using {minimum}",
-              file=sys.stderr)
-
-        return kind(minimum)
-
-    return value
+    return knobs.clamped_num(
+        name, legacy, default, kind, minimum,
+        note=lambda line: print(f"memories: {line}", file=sys.stderr))
 
 
 

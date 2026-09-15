@@ -45,7 +45,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
-from core import names  # noqa: E402
+from core import knobs, names  # noqa: E402
 from core import query  # noqa: E402
 from core import session_state as st  # noqa: E402
 from core.blocks import Budget, empty_block, recall_block, split_by_budget, unavailable_block  # noqa: E402
@@ -57,51 +57,29 @@ def env(name: str, legacy: str, default: str) -> str:
 
 
 def env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
-    """Reads a number from the environment WITHOUT killing the process if it is malformed.
+    """This host's channel for the shared clamped read in `core/knobs.py`.
 
-    This is read at module load, i.e. BEFORE `main`'s catch-all — a
-    `QCTX_RECALL_MAX_CHARS=14k` blew up before any of our code ran, and the user lost
-    recall while getting a traceback instead of the unavailability warning. An invalid
-    value falls back to the default and is recorded in the log.
+    THE DECISION MOVED, THE REPORTING DID NOT. What to do with a malformed or too-small value
+    is one rule and now has one copy; where the user reads about it is per host, and this one
+    is particular: the note goes to the LOG, beside the other config notes where this hook's
+    history is read after the fact, AND one line to stderr so it is visible the first time.
 
-    `minimum` CLAMPS, and it does not refuse. A value that leaves nothing to return makes
-    this hook LIE: `core.retrieval` applies `max_memories` as a slice, so measured against
-    three stored memories that all match, `QCTX_RECALL_MAX_MEMORIES=6` injected 3, `=1`
-    injected 1, and `=0` produced an empty block reading "There is no recorded precedent on
-    this subject" — on every prompt, about an archive that answered. `=-1` silently dropped
-    the lowest hit, and `QCTX_RECALL_TOP_K=0` asked Qdrant for nothing at all. `0` meaning
-    "unlimited" is a common deployer convention, so the lie was one typo away. Ignoring an
-    absurd value is strictly better than asserting absence on the strength of it.
-
-    The clamp is announced TWICE on purpose: in the log, beside the other config notes,
-    which is where this hook's history is read after the fact; and one line on stderr, so
-    it is visible the first time it happens. Never on stdout — that carries the hook
-    protocol, and a stray line there costs the whole injection.
+    NEVER STDOUT — that carries the hook protocol, and a stray line there costs the whole
+    injection. The stderr write is guarded because this runs at IMPORT, above `main`'s
+    catch-all: measured with the read end of the stderr pipe closed, an unguarded print exited
+    the hook 120 with no output at all, so the model was told neither that memory exists nor
+    that the search failed. With fd 2 closed, `print(file=None)` falls back to stdout and
+    corrupts the protocol. Neither state occurs under a normal spawn; both are one misbehaving
+    parent away, and a note must never cost the block it accompanies.
     """
-    raw = env(name, legacy, default)
-    try:
-        value = kind(raw)
-    except (TypeError, ValueError):
-        _pending_notes.append(f"{name}={raw!r} is not a number — using {default}")
-        value = kind(default)
-    if minimum is not None and value < minimum:
-        note = f"{name}={raw!r} would leave nothing to return — using {minimum}"
-        _pending_notes.append(note)
-        # Guarded, because this runs at IMPORT — above main()'s catch-all, where a raise is
-        # not a degraded block but NO block at all. Measured with the read end of the stderr
-        # pipe closed: unguarded, the hook exited 120 and emitted nothing, so the model was
-        # told neither that memory exists nor that the search failed. With fd 2 closed,
-        # `print(file=None)` falls back to STDOUT and corrupts the hook's JSON protocol.
-        # Neither state occurs under a normal spawn — both are one misbehaving parent away,
-        # and the note is a convenience that must never cost the injection it accompanies.
+    def report(line: str) -> None:
+        _pending_notes.append(line)
         try:
-            print(f"recall: {note}", file=sys.stderr)
+            print(f"recall: {line}", file=sys.stderr)
         except Exception:      # noqa: BLE001 — a lost note is cheaper than a lost block
             pass
 
-        return kind(minimum)
-
-    return value
+    return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
 
 
 #: Warnings collected before the log exists (the log depends on STATE_DIR, which

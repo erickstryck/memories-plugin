@@ -76,3 +76,42 @@ def env_num(name: str, legacy: str, default: str, kind=float):
     0 makes a hook claim an empty archive.
     """
     return as_num(env(name, legacy, default), default, kind)
+
+
+def clamped_num(name: str, legacy: str, default: str, kind=int, minimum=None, *, note=None):
+    """`env_num` with a floor, for the knobs where too small is a LIE rather than a setting.
+
+    ONE COPY, THREE HOSTS. This lived three times — `hooks/recall.py`, `hooks/checkpoint.py`
+    and `hosts/hermes/__init__.py` — and the copies had already drifted: measured with
+    `minimum=1`, a value of `0` gave 1 in recall and hermes and 0 in checkpoint, and `-1` gave
+    1, 1 and -1. So the same typo silenced one surface and degraded another, which is the
+    class of divergence `tests/test_host_equivalence.py` exists to prevent. The guards that
+    existed derived the knob NAMES from all three sources and could not see this, because
+    identical names were never the question.
+
+    WHY A FLOOR AND NOT A REFUSAL. `core/retrieval` applies `max_memories` as a slice, so
+    measured against three stored memories that all match, `=6` injected 3, `=1` injected 1,
+    and `=0` produced "There is no recorded precedent on this subject" on every prompt, about
+    an archive that answered. `0` meaning "unlimited" is a common deployer convention, so that
+    lie was one typo away. Ignoring an absurd value beats asserting absence on its strength.
+
+    `note` IS THE HOST'S CHANNEL, not this function's. Each surface reports differently and
+    must keep doing so: the claude-code hook queues the line for its log AND prints to stderr
+    (never stdout, which carries the hook protocol), while hermes prints a prefixed line. What
+    belongs here is the DECISION; where the user reads it belongs to the host.
+    """
+    raw = env(name, legacy, default)
+    try:
+        value = kind(raw)
+    except (TypeError, ValueError):
+        if note:
+            note(f"{name}={raw!r} is not a number — using {default}")
+
+        return kind(default)
+    if minimum is not None and value < minimum:
+        if note:
+            note(f"{name}={raw!r} would leave nothing to return — using {minimum}")
+
+        return kind(minimum)
+
+    return value

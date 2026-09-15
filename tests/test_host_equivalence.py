@@ -2398,6 +2398,44 @@ class TestTheINDICATORCannotDescribeAnEarlierTurn(unittest.TestCase):
                              "the indicator still carried the previous turn's count")
 
 
+class TestTheThreeCopiesOfTheKNOBReaderAgree(unittest.TestCase):
+    """The tolerant numeric read exists three times: `hooks/recall.py::env_num`,
+    `hooks/checkpoint.py::env_num` and `hosts/hermes/__init__.py::_env_num`. The existing
+    guards derive the knob NAMES from the source of all three, which catches a knob spelled
+    differently — but nothing compares what the three DO with the same input.
+
+    That is the half that matters for a user: the same `QCTX_RECALL_MAX_MEMORIES=0` must reach
+    the same number on both hosts, or the same typo degrades one and silences the other. And
+    `core/knobs.py`'s own docstring says the clamping variant "is its own task", which is a
+    debt recorded and not paid.
+    """
+
+    CASES = (("4", 6, 1, 4), ("abc", 6, 1, 6), ("0", 6, 1, 1), ("-1", 6, 1, 1),
+             ("", 6, 1, 6), ("   ", 6, 1, 6), (" 4 ", 6, 1, 4))
+
+    def test_every_reader_gives_the_same_answer_for_the_same_input(self):
+        import hooks.checkpoint as checkpoint
+        import hooks.recall as recall
+        import hosts.hermes as hermes
+
+        readers = {"recall": recall.env_num, "checkpoint": checkpoint.env_num,
+                   "hermes": hermes._env_num}
+        for raw, default, minimum, expected in self.CASES:
+            with mock.patch.dict(os.environ, {"QCTX_AGREE_PROBE": raw}, clear=False):
+                answers = {}
+                for label, reader in readers.items():
+                    try:
+                        answers[label] = reader("QCTX_AGREE_PROBE", "LEGACY_PROBE",
+                                                str(default), int, minimum)
+                    except TypeError:
+                        # checkpoint's copy may not carry `minimum`; that IS a divergence.
+                        answers[label] = reader("QCTX_AGREE_PROBE", "LEGACY_PROBE",
+                                                str(default), int)
+                with self.subTest(raw=raw):
+                    self.assertEqual(set(answers.values()), {expected},
+                                     f"the three readers disagree on {raw!r}: {answers}")
+
+
 class TestTheBREAKERIsSharedEvenWithoutTheKnob(unittest.TestCase):
     """The shared-breaker fix closed only half the case, and the docstring that argues for it
     proves the other half: "there is only one GPU", so what one host learned about a saturated

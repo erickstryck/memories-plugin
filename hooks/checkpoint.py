@@ -23,34 +23,26 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import names  # noqa: E402
+from core import knobs, names  # noqa: E402
 from core import session_state as st  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE as PROCEDURE  # noqa: E402
 
 
-def env_num(name: str, legacy: str, default: str, kind=int):
-    """Read at module load, i.e. BEFORE main's guard — so it must not be able to raise.
+def env_num(name: str, legacy: str, default: str, kind=int, minimum=None):
+    """This host's channel for the shared clamped read in `core/knobs.py`.
 
-    Its sibling `recall.py` learned this the hard way and wrote it down: a malformed
-    number in the environment blew up before any of our code ran, and the user got a
-    traceback instead of the feature. This file had neither the tolerant read nor a
-    top-level guard, so `QCTX_CHECKPOINT_INTERVAL=5x` produced a traceback and a non-zero
+    Read at module load, ABOVE `main`'s catch-all: this file had neither the tolerant read nor
+    a top-level guard, so `QCTX_CHECKPOINT_INTERVAL=5x` produced a traceback and a non-zero
     exit on EVERY interaction of every session.
 
-    Shaped like `recall.py`'s `env_num` and `hosts/hermes/__init__.py`'s `_env_num` — the
-    same call, the same argument order — because the tolerance test DERIVES the knob list
-    from the source of all three files. A knob written in a shape the derivation cannot see
-    is a knob nobody checks, and that blind spot is exactly how `int(env(...))` survived in
-    `recall.py` through three reviews.
+    THE SHARED COPY ALSO FIXED A DIVERGENCE. This one carried no `minimum` and the other two
+    did, so with a floor of 1 a value of `0` gave 1 in recall and hermes and 0 here, and `-1`
+    gave 1, 1 and -1 — the same typo degrading one surface and silencing another. The
+    knob-name guards could not see it: identical names were never the question.
     """
-    raw = os.environ.get(name) or os.environ.get(legacy) or default
-    try:
-        return kind(raw)
-    except (TypeError, ValueError):
-        print(f"checkpoint: {name}={raw!r} is not a number — using {default}",
-              file=sys.stderr)
-
-        return kind(default)
+    return knobs.clamped_num(
+        name, legacy, default, kind, minimum,
+        note=lambda line: print(f"checkpoint: {line}", file=sys.stderr))
 
 
 INTERVAL = env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)
