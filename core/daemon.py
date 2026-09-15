@@ -19,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import jobs, lease
+from . import jobs, lease, statefile
 from .errors import CoreError
 from .knobs import state_dir
 
@@ -318,15 +318,7 @@ def _write_record(entry: dict) -> bool:
     """Writes the daemon record. Returns True on success, False on failure — checked by
     `start()`, which cannot afford to treat "wrote" and "did not" the same way `jobs._write`
     can, because the process behind a failed write is still running."""
-    try:
-        path().parent.mkdir(parents=True, exist_ok=True)
-        tmp = path().with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(entry, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path())
-
-        return True
-    except OSError:
-        return False
+    return statefile.write_json(path(), entry)
 
 
 #: Spawned children whose exit status has not been collected yet. A `Popen` nobody waits on

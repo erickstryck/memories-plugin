@@ -25,7 +25,7 @@ import os
 import time
 from pathlib import Path
 
-from . import names
+from . import names, statefile
 from .knobs import state_dir
 
 
@@ -277,11 +277,7 @@ def _write(repo: str, entry: dict) -> bool:
             path.unlink(missing_ok=True)
 
             return True
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({_REPO_KEY: repo, **entry}, indent=1, sort_keys=True),
-                       encoding="utf-8")
-        os.replace(tmp, path)
 
-        return True
+        return statefile.write_json(path, {_REPO_KEY: repo, **entry})
     except OSError:
         return False

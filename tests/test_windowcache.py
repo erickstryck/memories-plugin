@@ -120,7 +120,10 @@ class TestTheTempFileIsNamedPerProcess(unittest.TestCase):
 
         with unittest.mock.patch("os.replace", spy_replace):
             windowcache.put("http://x/v1", "m", 12345)
-        self.assertIn(f".{os.getpid()}.tmp", captured.get("src", ""),
+        # `str()` because the write goes through `core/statefile.py` now, which works in
+        # `Path`. What is under test is unchanged: the temp name carries this pid, so two
+        # processes never open the same one.
+        self.assertIn(f".{os.getpid()}.tmp", str(captured.get("src", "")),
                      "the temp file name does not carry this process's pid")
 
 

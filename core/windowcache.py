@@ -17,6 +17,7 @@ import json
 import os
 import time
 
+from . import statefile
 from .knobs import state_dir
 
 FILENAME = "model-windows.json"
@@ -105,19 +106,16 @@ def put(endpoint: str, model: str, window: int, ttl: float = TTL_SECONDS) -> Non
         return
     data = _load()
     data[_key(endpoint, model)] = {"window": window, "expires_at": time.time() + ttl}
+    # Through `statefile`, which owns the pid-named temporary. Two hermes sessions refreshing
+    # at once used to open the same fixed `.tmp`, and after the first `os.replace` the loser's
+    # still-open descriptor wrote into the inode the first had just published. The note that
+    # used to sit here — that `core/bindings.py` had the same fixed-name pattern and was "not
+    # touched" — is what a rule re-typed in six places looks like; there is one copy now.
+    # `_path()` INSIDE the try: it creates the directory, and a state dir that cannot be made
+    # (a file where the directory should be) raises from there, before `write_json` is ever
+    # called. The module promises a cache that cannot be written is a miss, never an error the
+    # caller sees, and `get` already degrades that way.
     try:
-        # `os.getpid()` in the temp name: two hermes sessions refreshing at once both open
-        # a FIXED `.tmp` name, and after the first `os.replace` the loser's still-open
-        # descriptor writes into the inode the first one just published. `_load` catches
-        # `ValueError` and readers never see a torn file — `os.replace` is atomic — so this
-        # already self-heals to a cache miss rather than a corruption anyone observes. Naming
-        # the temp file per-process removes the race outright instead of just tolerating it.
-        # `core/bindings.py` writes its own state through the same fixed-name pattern; it is
-        # not touched here.
-        tmp = f"{_path()}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=1, sort_keys=True)
-        os.replace(tmp, _path())
+        statefile.write_json(_path(), data)
     except OSError:
-        # A cache that cannot be written is a cache miss, never an error the caller sees.
         return

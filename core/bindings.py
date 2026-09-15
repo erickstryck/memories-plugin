@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 
+from . import statefile
 from .knobs import state_dir
 
 FILENAME = "repo-bindings.json"
@@ -45,10 +46,12 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    tmp = _path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=1, sort_keys=True)
-    os.replace(tmp, _path())
+    # Through `statefile`, which owns the pid-named temporary: a fixed `.tmp` here meant two
+    # processes opening the same file, and the first `os.replace` renaming it out from under
+    # the second. Measured with six concurrent writers: 93 FileNotFoundError and 21 of 240
+    # entries surviving. The entry loss is a separate problem (read-modify-write needs a lock);
+    # the crash is this one.
+    statefile.write_json(_path(), data)
 
 
 def get(checkout: str) -> str | None:

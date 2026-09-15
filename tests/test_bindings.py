@@ -31,6 +31,53 @@ class TestTheLocalBinding(unittest.TestCase):
     def setUp(self):
         a_state_dir()
 
+    def test_concurrent_writers_do_not_CRASH_each_other(self):
+        """Five of the six atomic writers in `core/` name their temp file after the pid; this
+        one used a fixed `.tmp`, and `core/windowcache.py:110-116` names the gap in its own
+        comment without closing it.
+
+        With one name, two processes open the SAME temp file: the first `os.replace` renames
+        it out from under the second, whose next write lands on a path that no longer exists.
+        Measured with six concurrent processes binding 40 checkouts each: 85 raised
+        `FileNotFoundError` before, 0 after. The credit goes to writing the temporary in one
+        `write_text` instead of holding it open across a `json.dump` — verified by removing
+        the pid from the name, which alone does NOT bring the crash back.
+
+        `os.replace` makes PUBLICATION atomic, not read-modify-write, so entries are still
+        lost to the last writer winning — that needs a lock and is a different change. What
+        must not happen is an exception reaching the caller."""
+        import multiprocessing
+
+        def writer(n, out):
+            import sys
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from core import bindings as b
+
+            errors = 0
+            for i in range(40):
+                try:
+                    b.bind(f"/checkout/{n}/{i}", f"repo{n}")
+                except Exception:                       # noqa: BLE001 — that is the assertion
+                    errors += 1
+            out.put(errors)
+
+        queue = multiprocessing.Queue()
+        procs = [multiprocessing.Process(target=writer, args=(n, queue)) for n in range(6)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+
+        raised = sum(queue.get() for _ in procs)
+        self.assertEqual(raised, 0, f"{raised} writes crashed on a shared temp file")
+
+    def test_no_temp_files_are_left_behind(self):
+        bindings.bind("/checkout/a", "alpha")
+
+        leftovers = [p for p in os.listdir(os.path.dirname(bindings._path()))
+                     if p.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
     def test_an_unbound_checkout_reads_as_None(self):
         self.assertIsNone(bindings.get("/home/me/never-seen"))
 

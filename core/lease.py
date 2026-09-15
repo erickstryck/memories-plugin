@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 
+from . import statefile
 from .knobs import state_dir
 from .names import safe
 
@@ -116,16 +117,10 @@ def write(session_id: str, host: str, pid: int | None = None,
         # Written only when true, so an ordinary lease keeps the shape it always had and an
         # older reader sees nothing new.
         entry["approximate"] = True
-    try:
-        dir().mkdir(parents=True, exist_ok=True)
-        path = dir() / f"{safe(session_id)}.json"
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(entry, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        # A lease that cannot be written must not break a session start. The cost is a daemon
-        # that exits sooner than it needed to, which is the safe direction.
-        pass
+    # A lease that cannot be written must not break a session start, so the outcome is
+    # deliberately not checked here. The cost is a daemon that exits sooner than it needed to,
+    # which is the safe direction.
+    statefile.write_json(dir() / f"{safe(session_id)}.json", entry)
 
     return entry
 

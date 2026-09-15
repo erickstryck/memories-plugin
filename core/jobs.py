@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import names
+from . import names, statefile
 from .errors import CoreError
 from .knobs import state_dir
 
@@ -212,15 +212,7 @@ def _write(repo: str, job: dict) -> bool:
     write failure as an error condition, because a queued job that was not written is worse than
     a missing job.
     """
-    try:
-        dir().mkdir(parents=True, exist_ok=True)
-        path = _path(repo)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(job, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
+    return statefile.write_json(_path(repo), job)
 
 
 def _create_cancel_file(repo: str) -> bool:
