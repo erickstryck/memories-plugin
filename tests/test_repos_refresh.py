@@ -20,6 +20,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.embedding import EmbeddingError  # noqa: E402
 from core.repos import RepoIndex  # noqa: E402
 from tests.fakes import FakeEmbedder, FakeVectorStore  # noqa: E402
 
@@ -47,6 +48,51 @@ def rewrite(path: str, text: str) -> None:
     detected even when mtime and size happen to match."""
     with open(path, "w") as fh:
         fh.write(text)
+
+
+class TestAnOutageDoesNotDESTROYWhatWasIndexed(unittest.TestCase):
+    """`_write_one` deleted the old chunks BEFORE embedding the new ones, so an embedding
+    outage in between left the file with no chunks at all — and nothing brought them back.
+
+    The file's own comment already named this consequence; the fix that let infrastructure
+    errors propagate changed only WHO is blamed, not the ordering that loses the data."""
+
+    def test_a_failed_embed_leaves_the_previous_chunks_in_place(self):
+        ix = an_index("alpha")
+        path = a_file("def a():\n    return 1\n")
+        ix.add_files("alpha", [path])
+        before = len(ix.q.collections[CHUNKS]["points"])
+        self.assertTrue(before, "precondition: the file was indexed")
+
+        rewrite(path, "def a():\n    return 2\n")
+
+        def refused(texts):
+            raise EmbeddingError("connection refused")
+
+        ix.embedder.embed = refused
+        with self.assertRaises(EmbeddingError):
+            ix.refresh("alpha")
+
+        self.assertEqual(len(ix.q.collections[CHUNKS]["points"]), before,
+                         "an outage deleted the chunks of a file that is fine on disk")
+
+    def test_the_file_is_still_reachable_after_the_outage(self):
+        """The half that makes it unrecoverable: with the chunks gone, `poll` reports the
+        file as neither indexed nor changed, so no later cycle ever re-indexes it."""
+        ix = an_index("alpha")
+        path = a_file("def a():\n    return 1\n")
+        ix.add_files("alpha", [path])
+        rewrite(path, "def a():\n    return 2\n")
+
+        def refused(texts):
+            raise EmbeddingError("connection refused")
+
+        ix.embedder.embed = refused
+        with self.assertRaises(EmbeddingError):
+            ix.refresh("alpha")
+
+        self.assertIn(path, ix.poll("alpha")["indexed"],
+                      "the archive forgot a file that is on disk, with no way back")
 
 
 class TestItReindexesOnlyWhatCHANGED(unittest.TestCase):

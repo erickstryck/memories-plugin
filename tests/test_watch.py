@@ -196,7 +196,9 @@ class TestWatching(unittest.TestCase):
 
     def test_a_stable_change_becomes_a_refresh_job_on_the_SECOND_sighting(self):
         """First sighting: noted. Second sighting, still changed: enqueued."""
-        ix = FakeIndex(changed=["/nonexistent/alpha/a.py"])
+        # A REAL file on disk: the watcher drops a changed path it cannot stat, because a
+        # deleted file reports as changed forever and queued a refresh every other cycle.
+        ix = FakeIndex(changed=[a_file_on_disk("x = 1\n")])
         watch = indexer.watcher(index=ix)
         watch()
         self.assertIsNone(jobs.load("alpha"), "enqueued on the first sighting, with no debounce")
@@ -211,11 +213,13 @@ class TestWatching(unittest.TestCase):
 
     def test_it_does_not_queue_a_second_job_while_one_is_running(self):
         """Without this, every cycle would stack a refresh on top of the previous one."""
-        ix = FakeIndex(changed=["/nonexistent/alpha/a.py"])
+        ix = FakeIndex(changed=[a_file_on_disk("x = 1\n")])
         watch = indexer.watcher(index=ix)
-        watch(); watch()
+        watch()
+        watch()
         jobs.update("alpha", state=jobs.RUNNING)
-        watch(); watch()
+        watch()
+        watch()
         self.assertEqual(jobs.load("alpha")["state"], jobs.RUNNING)
 
 
@@ -486,6 +490,74 @@ class TestQuarantineReleasesWhenTheContentChanges(unittest.TestCase):
         self.assertIn(path, job["paths"])
 
 
+class TestAnUnknownJobKindIsNotASilentSuccess(unittest.TestCase):
+    """The `index` path is the fall-through, so a kind nobody implemented iterates an empty
+    `paths`, does nothing, and gets stamped `done`. The one axis the spec calls open/closed is
+    where a future job kind would fail silently — and tolerated failure must not become a lie.
+    """
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_kind_the_worker_does_not_know_raises_instead_of_reporting_done(self):
+        ix = FakeIndex()
+        run_job = indexer.work(index=ix)
+        with self.assertRaises(Exception) as caught:
+            run_job({"repo": "alpha", "kind": "reindex-all", "paths": []})
+        self.assertIn("reindex-all", str(caught.exception),
+                      "the message must name the kind nobody handled")
+
+    def test_the_two_known_kinds_still_run(self):
+        """The guard must key on the kind being UNKNOWN, not on `paths` being empty: a
+        refresh job legitimately carries none."""
+        path = a_file_on_disk("x = 1\n")
+        ix = FakeIndex(changed=[path], indexed=[path])
+        run_job = indexer.work(index=ix)
+        run_job({"repo": "alpha", "kind": "refresh", "paths": []})
+        run_job({"repo": "alpha", "kind": "index", "paths": [path]})
+        self.assertTrue(ix.refreshed, "the refresh path did not run")
+        self.assertTrue(ix.added, "the index path did not run")
+
+
+class TestAVanishedFileDoesNotLoopForever(unittest.TestCase):
+    """A deleted file stays in `changed_paths` forever — correctly, because `refresh` reports
+    it as missing rather than deleting its chunks, which is a deliberate decision. But the
+    WATCHER kept acting on that report: a refresh job every other cycle, and a refresh is not
+    free (it read-and-SHAs every indexed path). The quarantine deliberately does not hold
+    `missing`, so nothing stopped it."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_deleted_file_stops_producing_refresh_jobs(self):
+        gone = a_file_on_disk("content\n")
+        os.unlink(gone)
+        ix = FakeIndex(changed=[gone], indexed=[gone])
+        watch = indexer.watcher(index=ix)
+
+        enqueued = 0
+        for _ in range(10):
+            watch()
+            job = jobs.load("alpha")
+            if job and job.get("state") == jobs.PENDING:
+                enqueued += 1
+                jobs.update("alpha", state=jobs.DONE)
+
+        self.assertEqual(enqueued, 0,
+                         f"a file that no longer exists queued {enqueued} refresh jobs")
+
+    def test_a_file_that_still_exists_is_untouched_by_that_filter(self):
+        """The guard must key on the file being GONE, not on it being in `changed`."""
+        here = a_file_on_disk("def a():\n    return 1\n")
+        ix = FakeIndex(changed=[here], indexed=[here])
+        watch = indexer.watcher(index=ix)
+        watch()
+        watch()
+        job = jobs.load("alpha")
+        self.assertTrue(job and job.get("state") == jobs.PENDING,
+                        "a real changed file must still be refreshed")
+
+
 class TestBothDoorsIntoTheQueueAreShut(unittest.TestCase):
     """The watcher has TWO sources of work: paths the archive has never seen, and paths it
     has seen and that changed. Subtracting the quarantine from only the first left the loop
@@ -514,6 +586,37 @@ class TestBothDoorsIntoTheQueueAreShut(unittest.TestCase):
                 jobs.update("alpha", state=jobs.DONE)
         self.assertEqual(enqueued, 1,
                          f"an indexed-then-broken file was re-queued {enqueued} times")
+
+    def test_a_held_file_does_not_keep_a_HEALTHY_file_out_of_the_queue(self):
+        """The leak the other tests cannot see, because each uses a repo whose ONLY candidate
+        is the doomed file — so `changed` empties and nothing is enqueued either way.
+
+        With a second, healthy candidate the two halves show up. `new_paths` is read RAW at
+        the branch and at the payload, so the held file is re-queued forever AND, worse, it
+        keeps `new_paths` non-empty so the `refresh` branch is never reached: the genuinely
+        changed file is never repaired. The comment promising it is picked up "on a LATER
+        cycle, once new_paths is empty again" is unreachable for a permanently held file."""
+        doomed = a_file_on_disk("")
+        healthy = a_file_on_disk("def a():\n    return 1\n")
+        quarantine.record("alpha", doomed, "nothing indexable")
+
+        ix = FakeIndex(changed=[healthy], indexed=[healthy],
+                       fails={doomed: "nothing indexable"})
+        with unittest.mock.patch.object(indexer, "_new_tracked_paths",
+                               lambda entry, indexed, memo: {doomed}):
+            watch = indexer.watcher(index=ix)
+            queued = []
+            for _ in range(6):
+                watch()
+                job = jobs.load("alpha")
+                if job and job.get("state") == jobs.PENDING:
+                    queued.append((job["kind"], list(job.get("paths") or [])))
+                    jobs.update("alpha", state=jobs.DONE)
+
+        self.assertFalse([k for k, paths in queued if doomed in paths],
+                         f"the held file was queued again: {queued}")
+        self.assertTrue([k for k, _ in queued if k == "refresh"],
+                        f"the healthy file was never refreshed: {queued}")
 
     def test_held_is_read_once_per_cycle_not_once_per_candidate(self):
         """`held()` reads the file, stats every entry and may rewrite it. Called inside the

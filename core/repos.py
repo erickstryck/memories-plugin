@@ -221,12 +221,21 @@ class RepoIndex:
         mode = mode_for_suffix(os.path.splitext(path)[1])
         now = time.time()
 
+        # EMBED FIRST, DELETE AFTER. The delete used to come first, and an embedding outage
+        # between the two left the file with NO chunks — a file that is fine on disk, absent
+        # from the archive, with nothing to bring it back: `poll` then reports it as neither
+        # indexed nor changed, so no later cycle re-indexes it. Measured: 1 chunk -> 0, and
+        # `poll()["indexed"]` empty afterwards. Embedding is the step that fails (a shared
+        # endpoint, a size limit, a timeout); a failure here now costs a retry, not the index.
+        vectors = self.embedder.embed([p.text for p in pieces])
+
         # Reindexing REPLACES: without this the old version and the new one coexist and one
-        # search mixes chunks from two states of the same file.
+        # search mixes chunks from two states of the same file. Point ids are deterministic
+        # (`_point_id(doc_id, ix)`), so the upsert below overwrites chunk-for-chunk — this
+        # delete is what removes the TAIL when the new version has fewer chunks than the old.
         self.q.delete_by_filter(self.chunks_name,
                                 {"must": [{"key": "doc_id", "match": {"value": doc_id}}]})
 
-        vectors = self.embedder.embed([p.text for p in pieces])
         points = []
         for ix, (piece, vector) in enumerate(zip(pieces, vectors)):
             points.append({

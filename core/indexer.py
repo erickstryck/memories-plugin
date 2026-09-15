@@ -11,6 +11,7 @@ import os
 import subprocess
 
 from . import jobs, quarantine, scan
+from .errors import CoreError
 
 #: How many files go to `add_files` at once. Small enough that progress moves visibly and a
 #: cancel is honoured quickly; large enough not to pay the call overhead per file.
@@ -43,6 +44,12 @@ def work(cfg=None, index=None, batch: int = BATCH):
                     quarantine.record(repo, item["path"], item.get("reason", "unindexable"))
 
             return
+        # AN UNKNOWN KIND IS AN ERROR, NOT AN EMPTY BATCH. `index` used to be the fall-through,
+        # so a job kind nobody implemented iterated an empty `paths`, did nothing, and was
+        # stamped `done` with 0/0 — a silent success for work that never ran. `daemon._run_one`
+        # turns this raise into a FAILED job the user can see, which is the honest report.
+        if job.get("kind") not in ("index", None):
+            raise CoreError(f"unknown job kind {job.get('kind')!r}")
         paths = list(job.get("paths") or [])
         done = 0
         for start in range(0, len(paths), batch):
@@ -96,19 +103,31 @@ def watcher(cfg=None, index=None):
             # of the question ("what moved" and "what is already indexed") from a single read.
             state = target.poll(repo)
             new_paths = _new_tracked_paths(entry, state["indexed"], new_memo)
-            # SUBTRACTED HERE, over the UNION, because there are two doors into the queue and
-            # the loop only closes if both are shut. `new_paths` covers a file that was never
-            # indexed; `state["changed"]` covers one that WAS indexed and then broke — an
-            # emptied file keeps its old chunks (`_write_one` raises before it deletes), so
-            # `changed_paths` reports it forever and a `refresh` job was enqueued on every
-            # other cycle, with the file already on record as unindexable. Measured before
-            # this line: 3 refresh jobs in 6 cycles for one emptied file.
-            #
             # Read ONCE per cycle, not per candidate: `held` reads the file, stats every
             # entry and may rewrite it. Inside `_new_tracked_paths`'s comprehension it ran
             # per eligible path — measured 110 ms for 2,000 paths against the 16 ms this
             # module's own docstring budgets for a whole cycle.
-            changed = (set(state["changed"]) | new_paths) - quarantine.held(repo)
+            held = quarantine.held(repo)
+            # SUBTRACTED FROM `new_paths` ITSELF, not only from the union, because the two
+            # lines below read `new_paths` RAW — once to pick the branch, once as the payload.
+            # Filtering only the union left a held file queued forever AND, worse, kept
+            # `new_paths` non-empty so the `refresh` branch was never reached: the genuinely
+            # changed file was never repaired. Measured before this line, with one held file
+            # beside one healthy one: 3 index jobs for the held file in 6 cycles, 0 refreshes.
+            new_paths -= held
+            # The union still needs the subtraction for the OTHER door: a file that WAS
+            # indexed and then broke keeps its old chunks (`_write_one` raises before it
+            # deletes), so `changed_paths` reports it forever. Measured: 3 refresh jobs in 6
+            # cycles for one emptied file already on record.
+            changed = (set(state["changed"]) | new_paths) - held
+            # A VANISHED FILE IS NOT WORK FOR THE WATCHER. `changed_paths` reports a path it
+            # cannot `stat` (correctly — `refresh` is where a missing file gets REPORTED, and
+            # it deliberately keeps the chunks rather than deleting an archive nobody asked to
+            # delete). But the report never changes, so acting on it queued a refresh every
+            # other cycle forever, and a refresh read-and-SHAs every indexed path in the repo.
+            # Measured before this line: 5 refresh jobs in 10 cycles for one deleted file.
+            # The quarantine cannot cover this — `missing` is deliberately not held.
+            changed = {path for path in changed if os.path.exists(path)}
             if not changed:
                 seen.pop(repo, None)
                 continue
