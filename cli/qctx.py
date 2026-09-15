@@ -139,12 +139,32 @@ def cmd_config_show(args, cfg):
 
 def cmd_config_set(args, cfg):
     key = args.key.replace("-", "_")
-    value = int(args.value) if key == "vector_size" else args.value
+    # REFUSED HERE, NOT TOLERATED LATER. `core.load` now falls back to the default for a field
+    # that does not hold a number, so a typo no longer takes the plugin down — but writing it
+    # and reporting success would mean the user reads back a setting the loader silently
+    # ignores. The numeric fields are derived from the dataclass, so one added later is caught
+    # without editing this line. Both of them used to reach the file: only `vector_size` was
+    # coerced, and `context_window` — the field the setup diagnostic tells people to set — was
+    # written verbatim.
+    if key in core.config.numeric_fields():
+        try:
+            value = int(args.value)
+        except (TypeError, ValueError):
+            raise core.ConfigError(f"{args.key} must be a whole number, not {args.value!r}")
+    else:
+        value = args.value
     path = core.save({key: value})
     if args.json:
+        # RETURNS, so stdout holds ONE document. The dimension warning below is prose, and
+        # printing it after the object made the output unparseable — `json.load` raised
+        # "Extra data" on the machine-readable form of a command whose siblings all return
+        # here. The warning is not lost: it is a fact about the collection, and the same
+        # `collections` command reports it.
         output({"key": key, "value": value, "path": str(path)}, True)
-    else:
-        print(f"{key} = {value}  (written to {path})")
+
+        return
+
+    print(f"{key} = {value}  (written to {path})")
     # A warning, not an error: the collection may be created later. But an incompatible
     # dimension is a silent trap, so it is worth shouting at the moment of choice.
     if key in ("memory_collection", "docs_collection", "library_collection",
@@ -194,10 +214,17 @@ def cmd_setup(args, cfg):
     missing, and exits.
     """
     rel = core.setup.diagnose(cfg)
+    # `--check` ANSWERS BY EXIT CODE. It is the mode a script calls — `scripts/cutover.sh`
+    # tests exactly this — and returning 0 with blockers made it print `ok "qctx answers"` on
+    # a machine where Qdrant, the embedding endpoint and the memory collection were all
+    # unconfigured. The human form already said so in words; the exit code was the one channel
+    # that did not. Without `--check` the exit stays 0: a diagnostic someone runs to READ is
+    # not a failure, and the interactive path below fixes what it finds.
+    blocked = 1 if (args.check and not rel["ready"]) else 0
     if args.json:
         output(rel, True)
 
-        return
+        return blocked
 
     print("diagnostics:\n")
     for c in rel["checks"]:
@@ -218,7 +245,7 @@ def cmd_setup(args, cfg):
         if not sys.stdin.isatty():
             print("\n(no interactive terminal — nothing was changed)")
 
-        return
+        return blocked
 
     print("\n--- configure (Enter keeps the current value) ---")
     options = [s_["collection"] for s_ in rel["memory_suggestions"]]
@@ -424,7 +451,10 @@ def hermes_install_path(env: dict) -> Path | None:
     verifies — and a second reader of that state is a second thing to keep in agreement
     with it.
     """
-    home = Path(env.get("HERMES_HOME") or Path(env["HOME"]) / ".hermes")
+    # `HOME` unset is a shell-less process (systemd, cron, a container entry point) — the very
+    # case `no_shell_check` diagnoses, so resolving it must not raise before the diagnosis.
+    default_home = Path(env.get("HOME") or os.path.expanduser("~")) / ".hermes"
+    home = Path(env.get("HERMES_HOME") or default_home)
     candidate = home / "plugins" / "memories"
 
     return candidate if candidate.exists() else None
@@ -909,11 +939,15 @@ def cmd_install(args, cfg):
     report = core.setup.diagnose(cfg)
     plumbing = _plumbing(root)
     hosts = _host_sections(root) if report_hosts(args) else []
+    # Same contract as `setup --check`: the mode a script branches on answers in the channel
+    # a script reads. `scripts/install.sh --check` returned 0 with blockers too.
+    merged = merged_report(report, plumbing)
+    blocked = 1 if (args.check and not merged.get("ready")) else 0
 
     if args.json:
-        output({**merged_report(report, plumbing), "hosts": hosts}, True)
+        output({**merged, "hosts": hosts}, True)
 
-        return
+        return blocked
 
     print("plumbing:\n")
     for c in plumbing:
@@ -926,7 +960,7 @@ def cmd_install(args, cfg):
         print(section["text"].rstrip())
 
     if args.check:
-        return
+        return blocked
     if not _interactive(args) and not args.yes:
         print("\n(no interactive terminal — nothing was changed)")
 
@@ -1805,7 +1839,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     try:
-        args.fn(args, core.load())
+        # THE HANDLER'S RETURN IS THE EXIT CODE, when it gives one. Almost every command
+        # answers by printing and returns None, which is 0 — but `--check` exists to be
+        # branched on by a script, so it has to be able to say "not ready" in the one channel
+        # a script reads. A handler that returns nothing keeps the old behaviour exactly.
+        raise SystemExit(args.fn(args, core.load()) or 0)
     except core.CoreError as exc:
         # The root of the hierarchy: a new core error is caught here the day it is born.
         print(f"error: {exc}", file=sys.stderr)

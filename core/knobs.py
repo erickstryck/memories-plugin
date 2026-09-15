@@ -52,6 +52,22 @@ def env(name: str, legacy: str, default: str) -> str:
     return default
 
 
+def as_num(value, default, kind=float):
+    """`value` as a number, falling back to `default` when it is not one.
+
+    The same tolerance `env_num` gives the environment, for a value that has already been
+    resolved from somewhere else — a config FILE, in practice. Bare `int()` on a field a user
+    can type is how a single typo took the whole plugin down: every command died on the
+    exception, including the one that repairs the file, and in the hermes host the ValueError
+    is not a CoreError so the loader swallowed it and the memory provider vanished with one
+    debug line. Nothing here decides policy; the caller still chooses the default.
+    """
+    try:
+        return kind(value)
+    except (TypeError, ValueError):
+        return kind(default)
+
+
 def env_num(name: str, legacy: str, default: str, kind=float):
     """The number, or the coded default when the environment holds something that is not one.
 
@@ -59,8 +75,4 @@ def env_num(name: str, legacy: str, default: str, kind=float):
     which is a coherent thing for a deployer to ask for — unlike the recall ceilings, where a
     0 makes a hook claim an empty archive.
     """
-    raw = env(name, legacy, default)
-    try:
-        return kind(raw)
-    except (TypeError, ValueError):
-        return kind(default)
+    return as_num(env(name, legacy, default), default, kind)

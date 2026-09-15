@@ -323,16 +323,27 @@ class MemoryStore:
 
     def find(self, query: str, limit: int = 5) -> list[dict]:
         """Pure dense search, no re-ranking. Cheap; use it when the order among the
-        relevant results does not matter (for example to dedupe before writing)."""
+        relevant results does not matter (for example to dedupe before writing).
+
+        A RECORD WITH NO USABLE TEXT IS SKIPPED, the same rule `_to_hit` applies on the recall
+        path. This reads a collection the plugin did not necessarily write — the setup wizard
+        offers the most populated collections as memory candidates, and a collection filled by
+        another tool keeps its text under another key. Handing `None` through as a document
+        made the caller crash on it (the CLI slices it for the preview) after printing part of
+        the answer, and a vector with no text is nothing a caller can show anyone.
+        """
         self.require_existing()
         vector = self.embedder.embed_one(query)
         output = []
         for hit in self.q.search(self.collection, vector, limit):
             p = hit.get("payload", {})
+            document = p.get("document")
+            if not isinstance(document, str) or not document.strip():
+                continue
             output.append({
                 "id": hit.get("id"),
                 "score": round(hit.get("score", 0.0), 4),
-                "document": p.get("document"),
+                "document": document,
                 "metadata": p.get("metadata", {}),
                 "updated_at": p.get("updated_at"),
             })

@@ -15,6 +15,7 @@ the portable core and the world.
 import json
 import os
 
+from . import knobs
 from .errors import CoreError
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
@@ -185,6 +186,24 @@ class Config:
         return value
 
 
+#: The fields that must hold a number, read off the dataclass instead of listed by hand so a
+#: numeric field added later inherits the tolerant coercion in `load` without anyone having to
+#: remember. A hand-kept copy of this list is exactly the shape that once left one knob using
+#: bare `int()` six lines below the tolerant helper its nine siblings used.
+_NUMERIC_FIELDS = tuple(f.name for f in fields(Config) if f.type in (int, "int"))
+
+
+def numeric_fields() -> tuple:
+    """The config fields that must hold a whole number.
+
+    Public because the CLI has to REFUSE a non-number at the moment it is typed: `load` falls
+    back to the default so a bad file cannot take the plugin down, and a `config set` that
+    wrote the value anyway would leave the user reading back a setting the loader ignores.
+    Two places needing the same list is exactly how they drift, so there is one.
+    """
+    return _NUMERIC_FIELDS
+
+
 def read_file(path: Path | None = None) -> dict:
     p = path or DEFAULT_CONFIG_PATH
     try:
@@ -208,8 +227,15 @@ def load(path: Path | None = None, env: dict | None = None) -> Config:
         if value is None:
             value = from_file.get(field, DEFAULTS[field])
         values[field] = value
-    values["vector_size"] = int(values["vector_size"])
-    values["context_window"] = int(values["context_window"])
+    # TOLERANT, AND DERIVED FROM THE DATACLASS. These are values a person types, in a file or
+    # in the environment, so a typo is ordinary — and bare `int()` here made one typo fatal to
+    # everything: every command raised on load, including the one that repairs the file, and
+    # the hermes loader swallowed the ValueError (not a CoreError) so the memory provider
+    # disappeared with a single debug line. Reading the field list off `Config` rather than
+    # naming the two by hand is the same lesson this project already paid for once, when nine
+    # knobs read through a tolerant helper and one did not: the odd one out is invisible.
+    for numeric in _NUMERIC_FIELDS:
+        values[numeric] = knobs.as_num(values[numeric], DEFAULTS[numeric], int)
 
     return Config(**values)
 

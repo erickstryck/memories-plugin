@@ -182,8 +182,14 @@ def credentials_check(env: dict, files=()) -> list[Check]:
 
 
 def target_dir(env: dict) -> Path:
-    """Where the launcher goes. One location, so the fix hint can name it."""
-    return Path(env["HOME"]) / ".local" / "bin"
+    """Where the launcher goes. One location, so the fix hint can name it.
+
+    `HOME` UNSET IS NOT A CRASH. A process with no shell — systemd, cron, a container entry
+    point — is exactly the case `no_shell_check` exists to diagnose, and this raised `KeyError`
+    before that diagnosis could be printed. `expanduser` answers from the password database
+    when the variable is missing, which is the same fallback the CLI's own sibling uses.
+    """
+    return Path(env.get("HOME") or os.path.expanduser("~")) / ".local" / "bin"
 
 
 def launcher_check(root: Path, env: dict) -> Check:

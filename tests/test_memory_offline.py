@@ -235,6 +235,34 @@ class TestReadsNeverCreate(unittest.TestCase):
         self.assertIn("does_not_exist", q.list_collections(), "a write creates, a read does not")
 
 
+class TestFindSurvivesAForeignRecord(unittest.TestCase):
+    """`find` reads collections this plugin did not necessarily write: the setup wizard OFFERS
+    the most populated collections as memory candidates, and a collection written by another
+    tool stores its text under another key. The recall path already drops a record with no
+    usable document (`_to_hit`); `find` handed `None` straight to its caller, and the CLI
+    sliced it — `TypeError: 'NoneType' object is not subscriptable`, after printing part of
+    the answer. Measured on a real collection: 200 of 200 sampled points had document: None."""
+
+    def test_a_record_with_no_document_is_skipped_rather_than_returned(self):
+        s, q, _ = store()
+        s.store("a record this plugin wrote", {"type": "reference"})
+        # A point the way a foreign tool leaves it: text under its own key, no `document`.
+        q.upsert(s.collection, [{"id": 99, "vector": s.embedder.embed_one("foreign"),
+                                 "payload": {"text": "written by another tool"}}])
+
+        for hit in s.find("record", limit=10):
+            self.assertIsInstance(hit["document"], str,
+                                  f"a document-less record reached the caller: {hit}")
+
+    def test_the_records_that_DO_have_text_are_still_returned(self):
+        """The guard must skip the unusable record, not the search."""
+        s, q, _ = store()
+        s.store("poll pagination truncates at 100 items", {"type": "reference"})
+        q.upsert(s.collection, [{"id": 99, "vector": s.embedder.embed_one("foreign"),
+                                 "payload": {"text": "no document key"}}])
+        self.assertTrue(s.find("pagination", limit=10), "the usable record was lost too")
+
+
 class TestRecall(unittest.TestCase):
     def _populate(self, reranker=None):
         s, q, _ = store(reranker)

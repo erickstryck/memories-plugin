@@ -49,7 +49,11 @@ class Bootstrap(unittest.TestCase):
         done = subprocess.run([BASH, str(SCRIPT), "--check", "--json"],
                               capture_output=True, text=True, env=self.env(),
                               timeout=300, stdin=subprocess.DEVNULL)
-        self.assertEqual(done.returncode, 0, done.stderr)
+        # rc 1, not 0: this runs against an EMPTY config, so the install is genuinely not
+        # ready, and `--check` answers that in the channel a script reads. Asserting 0 here
+        # is what let `scripts/cutover.sh` print `ok "qctx answers"` on an unconfigured box.
+        # What this test is really about is the forwarding, which the payload proves.
+        self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn('"hosts"', done.stdout)
 
     def test_it_runs_from_any_directory(self):
@@ -57,7 +61,11 @@ class Bootstrap(unittest.TestCase):
             done = subprocess.run([BASH, str(SCRIPT), "--check"], cwd=elsewhere,
                                   capture_output=True, text=True, env=self.env(),
                                   timeout=300, stdin=subprocess.DEVNULL)
-            self.assertEqual(done.returncode, 0, done.stderr)
+            # Again 1 because the config is empty; the point is that it RAN rather than
+            # failing to find itself, which a bootstrap error would show as a different code
+            # and an empty report.
+            self.assertEqual(done.returncode, 1, done.stderr)
+            self.assertIn("plumbing", done.stdout)
 
     def test_it_says_what_is_missing_when_python3_is_absent(self):
         done = subprocess.run([BASH, str(SCRIPT)], capture_output=True, text=True,

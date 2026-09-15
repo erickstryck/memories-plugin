@@ -79,11 +79,57 @@ class CheckMode(unittest.TestCase):
         for section in payload["hosts"]:
             self.assertEqual({"host", "exit_code", "text"}, set(section))
 
+    def test_check_answers_NOT_READY_in_the_exit_code(self):
+        """The mode a script branches on has to answer in the channel a script reads.
+        `scripts/cutover.sh` tests exactly this code, and a 0 with blockers made it print
+        `ok "qctx answers"` on a machine where Qdrant, embedding and the memory collection
+        were all unconfigured. The human form always said so in words."""
+        done = self.run_cli("--check", "--json")
+        payload = json.loads(done.stdout)
+        self.assertFalse(payload["ready"], "fixture precondition: this install is not ready")
+        self.assertEqual(done.returncode, 1,
+                         "an unready install reported success to its caller")
+
+    def test_check_answers_ZERO_when_nothing_blocks(self):
+        """The other half, and the one that makes the code MEAN something: a ready install
+        must not report failure. Driven through the real handler with the report faked, since
+        this fixture deliberately cannot reach a Qdrant — what is under test is the handler's
+        translation from `ready` to an exit code, not the diagnosis itself."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import cli.qctx as qctx
+
+        ready = {"ready": True, "blockers": [], "checks": [], "memory_suggestions": []}
+        args = SimpleNamespace(check=True, json=False, yes=False, config_only=False,
+                               host=None)
+        with mock.patch.object(qctx.core.setup, "diagnose", return_value=ready), \
+             mock.patch.object(qctx, "_plumbing", return_value=[]), \
+             mock.patch.object(qctx, "_host_sections", return_value=[]), \
+             mock.patch.object(qctx, "merged_report", return_value=ready), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(qctx.cmd_install(args, None) or 0, 0,
+                             "a ready install reported failure to its caller")
+
+        blocked = {"ready": False, "blockers": [{"name": "qdrant"}], "checks": [],
+                   "memory_suggestions": []}
+        with mock.patch.object(qctx.core.setup, "diagnose", return_value=blocked), \
+             mock.patch.object(qctx, "_plumbing", return_value=[]), \
+             mock.patch.object(qctx, "_host_sections", return_value=[]), \
+             mock.patch.object(qctx, "merged_report", return_value=blocked), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(qctx.cmd_install(args, None), 1,
+                             "the same handler must still report a blocked install")
+
     def test_absent_host_is_skipped_not_failed(self):
         """A machine with only one of the two hosts is the normal case."""
         done = self.run_cli("--check")
         self.assertNotIn("Traceback", done.stderr)
-        self.assertEqual(done.returncode, 0)
+        # The exit code answers "is this install ready", which this fixture's empty config
+        # makes false — so it cannot also carry "was a host missing". What this test is about
+        # is that an absent host is not reported as a FAILURE, which the report itself says.
+        self.assertNotIn("FAIL", [line[:4] for line in done.stdout.splitlines()
+                                  if "host" in line.lower()])
 
     def test_check_reports_each_key_and_every_spelling_it_accepts(self):
         """The design's own words: reporting fewer spellings than the core accepts
