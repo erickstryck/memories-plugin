@@ -79,6 +79,32 @@ class CheckMode(unittest.TestCase):
         for section in payload["hosts"]:
             self.assertEqual({"host", "exit_code", "text"}, set(section))
 
+    def test_setup_check_answers_in_the_exit_code_BOTH_WAYS(self):
+        """`scripts/cutover.sh:47` branches on `setup --check`, and README:130 promises it
+        behaves like its `install` sibling. Both directions, because a code that is always 1
+        is as useless to a script as one that is always 0. `diagnose` is faked because this
+        fixture deliberately cannot reach a Qdrant: what is under test is the handler's
+        translation from `ready` into an exit code."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import cli.qctx as qctx
+
+        args = SimpleNamespace(check=True, json=False, yes=False, config_only=False,
+                               host=None)
+        ready = {"ready": True, "blockers": [], "checks": [], "memory_suggestions": []}
+        with mock.patch.object(qctx.core.setup, "diagnose", return_value=ready), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(qctx.cmd_setup(args, None) or 0, 0,
+                             "a ready install reported failure to its caller")
+
+        blocked = {"ready": False, "blockers": [{"name": "qdrant"}], "checks": [],
+                   "memory_suggestions": []}
+        with mock.patch.object(qctx.core.setup, "diagnose", return_value=blocked), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(qctx.cmd_setup(args, None), 1,
+                             "cutover.sh prints ok on a machine with nothing configured")
+
     def test_check_answers_NOT_READY_in_the_exit_code(self):
         """The mode a script branches on has to answer in the channel a script reads.
         `scripts/cutover.sh` tests exactly this code, and a 0 with blockers made it print
@@ -123,13 +149,17 @@ class CheckMode(unittest.TestCase):
 
     def test_absent_host_is_skipped_not_failed(self):
         """A machine with only one of the two hosts is the normal case."""
-        done = self.run_cli("--check")
+        done = self.run_cli("--check", "--json")
         self.assertNotIn("Traceback", done.stderr)
-        # The exit code answers "is this install ready", which this fixture's empty config
-        # makes false — so it cannot also carry "was a host missing". What this test is about
-        # is that an absent host is not reported as a FAILURE, which the report itself says.
-        self.assertNotIn("FAIL", [line[:4] for line in done.stdout.splitlines()
-                                  if "host" in line.lower()])
+        # ASSERTED ON THE STRUCTURED FORM. The exit code answers "is this install ready",
+        # which this fixture's empty config makes false, so it cannot also carry "was a host
+        # missing" — and scanning the prose for "FAIL" asserted nothing, because the renderer
+        # indents every line, so no line ever starts with that word.
+        sections = json.loads(done.stdout)["hosts"]
+        self.assertTrue(sections, "precondition: the report named at least one host")
+        for section in sections:
+            self.assertNotEqual(section["exit_code"], 2,
+                                f"an absent host was reported as a failure: {section['host']}")
 
     def test_check_reports_each_key_and_every_spelling_it_accepts(self):
         """The design's own words: reporting fewer spellings than the core accepts

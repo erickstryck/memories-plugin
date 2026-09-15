@@ -215,6 +215,32 @@ class TestThePortAndItsImplementationsAgree(unittest.TestCase):
                     self.assertTrue(callable(getattr(impl, name, None)),
                                     f"{label} does not implement {name}")
 
+    def test_a_method_production_CALLS_cannot_leave_the_port(self):
+        """The guard above iterates the PORT, so a port that shrinks takes its own test with
+        it: deleting `facet` from `VectorStore` left the suite green while `core/repos.py`
+        went on calling it. `facet` reached production without ever being declared, which is
+        how a fake that only knew how to succeed hid a real refusal for months.
+
+        Read from the SOURCE, so the list cannot rot: any `self.q.<name>(` in `core/`."""
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "core"
+        called = set()
+        for path in root.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute)
+                        and f.value.attr == "q"):
+                    called.add(f.attr)
+
+        self.assertIn("facet", called, "guard vacuous: production stopped calling facet")
+        declared = {n for n in dir(VectorStore) if not n.startswith("_")}
+        self.assertEqual(called - declared, set(),
+                         "core/ calls a store method the port does not declare")
+
     def test_every_port_parameter_exists_on_both_implementations(self):
         """A port parameter no implementation accepts is a contract nobody honours.
 

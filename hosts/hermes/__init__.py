@@ -194,6 +194,11 @@ class MemoriesProvider(_Base):
         #: treats that as never due rather than asking `session_state.due(0, ...)`,
         #: which would say yes for any positive interval.
         self._turn = 0
+        #: The last turn on which the checkpoint nudge fired. A WATERMARK, not a counter,
+        #: because the nudge is OWED rather than exactly divisible — see `_with_checkpoint`.
+        #: Rotated by `on_session_switch`: a value left from an earlier session sits above
+        #: every turn of the next one and silences the write side for the whole process.
+        self._checkpoint_at = 0
 
     # -- availability ---------------------------------------------------------
 
@@ -501,10 +506,10 @@ class MemoriesProvider(_Base):
         Two things must never happen here:
         - A provider nobody has told a turn number about (`_turn` still 0 — true of every
           `prefetch` call driven directly in a test, and of the very first read of a real
-          session before `on_turn_start` runs first) must not be "due". `session_state.due`
-          treats 0 as divisible by anything, so without this guard a caller who never
-          calls `on_turn_start` would get a checkpoint the claude-code side never renders,
-          which is exactly what test_host_equivalence.py exists to catch.
+          session before `on_turn_start` runs first) must not be "due". `due_since` answers
+          False for turn 0 on its own, so the guard below is belt-and-braces rather than the
+          load-bearing check it was when this called `session_state.due`, which treats 0 as
+          divisible by anything.
         - Any failure in composing the nudge must cost at most the nudge, never the
           `block` already built by `_prefetch`. The checkpoint and the recall now share
           one return value; a raise here must not turn a successful search into an
@@ -521,8 +526,8 @@ class MemoriesProvider(_Base):
             # turn is not a multiple either. claude-code cannot hit this: its checkpoint is a
             # hook with its own counter, which advances once per event and cannot step over a
             # multiple. `due_since` is what makes the two hosts agree.
-            if not turn or not session_state.due_since(turn, getattr(self, "_checkpoint_at", 0),
-                                                       self.CHECKPOINT_INTERVAL):
+            if not session_state.due_since(turn, self._checkpoint_at,
+                                           self.CHECKPOINT_INTERVAL):
                 return block
             nudge = CHECKPOINT_PROCEDURE.format(count=turn, interval=self.CHECKPOINT_INTERVAL)
             self._checkpoint_at = int(turn)
@@ -763,9 +768,17 @@ class MemoriesProvider(_Base):
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "",
                           reset: bool = False, rewound: bool = False, **kwargs) -> None:
-        """No per-session cache to rotate: `_session_id` is set once in `initialize()` and
-        nothing here keys off it yet. Revisit once a later task adds cached per-session
-        state that would need to move with a `/resume`, `/branch` or compression event."""
+        """Rotate the per-session state this provider caches in memory.
+
+        `_checkpoint_at` is the watermark that makes the checkpoint OWED rather than exactly
+        divisible (see `_with_checkpoint`), and hermes restarts its turn counter on a switch
+        while this object survives for the whole process. Left standing, the old session's
+        watermark sits above every turn of the new one and the nudge never fires again — and
+        the write side going quiet reads as a model that stopped bothering to save, not as a
+        broken provider. The recall state itself needs nothing here: it is keyed by session id
+        on disk, so a new session simply reads a different file.
+        """
+        self._checkpoint_at = 0
 
     def on_pre_compress(self, messages: list) -> str:
         """No compression-time extraction. Empty string is the ABC's own default; defined

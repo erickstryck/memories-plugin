@@ -55,6 +55,39 @@ def an_index(store) -> RepoIndex:
     return RepoIndex(store, FakeEmbedder(dim=8), CHUNKS, REG, 8)
 
 
+class TestTheSHAREDFakeRefusesWhatTheRealServerRefuses(unittest.TestCase):
+    """Driven through the SHARED `FakeVectorStore`, not a local subclass that overrides
+    `facet`. Every other test in this file uses `FacetingStore`, whose override replaces the
+    refusal, so the shared fake's own "LISKOV: it refuses what the real one refuses" branch
+    was never executed by anything: replacing it with a hard crash left the whole suite green.
+    A fake that only knows how to succeed is the exact shape that caused this work."""
+
+    def test_a_facet_with_no_payload_index_is_refused_and_the_listing_still_answers(self):
+        store = FakeVectorStore()
+        ix = an_index(store)
+        store.upsert(CHUNKS, [{"id": 1, "vector": [0.0] * 8,
+                               "payload": {"repo": "alpha", "text": "x"}}])
+        self.assertNotIn("repo", store.indexes.get(CHUNKS, set()),
+                         "precondition: the collection has no payload index on `repo`")
+
+        with self.assertRaises(ValueError):
+            store.facet(CHUNKS, "repo", FACET_LIMIT)
+
+        self.assertEqual(set(ix._chunks_per_repo()), {"alpha"},
+                         "the refusal was not absorbed by the scroll fallback")
+
+    def test_the_SAME_call_succeeds_once_the_index_exists(self):
+        """The negative direction: the refusal must be about the missing index, not about the
+        fake being unable to facet at all."""
+        store = FakeVectorStore()
+        store.upsert(CHUNKS, [{"id": 1, "vector": [0.0] * 8,
+                               "payload": {"repo": "alpha", "text": "x"}}])
+        store.ensure_payload_index(CHUNKS, "repo", "keyword")
+
+        self.assertEqual([h["value"] for h in store.facet(CHUNKS, "repo", FACET_LIMIT)],
+                         ["alpha"])
+
+
 class TestTheServerAnswersInsteadOfTheWire(unittest.TestCase):
     def test_the_names_come_from_the_facet_and_the_archive_is_NOT_scrolled(self):
         store = FacetingStore(values=["alpha", "beta"])

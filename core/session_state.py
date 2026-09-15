@@ -110,15 +110,13 @@ def purge_dead(state_dir, days: float = 7.0, pattern=None) -> int:
     session idle for a week is not coming back, and if it does the cost is starting with an
     empty `seen` — the worst effect is one memory reinjected once.
 
-    `pattern` takes one glob or several; it defaults to every per-session file this plugin
-    writes (see `SESSION_FILE_PATTERNS`).
+    `pattern` defaults to every per-session file this plugin writes (`SESSION_FILE_PATTERNS`);
+    a caller may pass its own sequence of globs. There is deliberately no single-string form:
+    one caller passing `"recall-*.json"` is how the checkpoint counters went unswept for so
+    long, and a scalar that silently means "only this one" reads like a filter, not a
+    replacement of the whole set.
     """
-    if pattern is None:
-        patterns = SESSION_FILE_PATTERNS
-    elif isinstance(pattern, str):
-        patterns = (pattern,)
-    else:
-        patterns = tuple(pattern)
+    patterns = SESSION_FILE_PATTERNS if pattern is None else tuple(pattern)
 
     removed = 0
     try:
@@ -213,7 +211,8 @@ def due_since(turn, last_fired, interval) -> bool:
     if interval <= 0 or turn <= 0:
         return False
 
-    # The most recent turn on which it was due. Zero means none has come round yet.
+    # The most recent turn on which it was due. Zero means none has come round yet, which
+    # `last_fired` (never negative — it is a turn number or the initial 0) already excludes.
     latest_due = (turn // interval) * interval
 
-    return latest_due > 0 and latest_due > last_fired
+    return latest_due > last_fired

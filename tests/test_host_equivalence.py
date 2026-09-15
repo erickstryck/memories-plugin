@@ -2217,6 +2217,32 @@ class TestTheCHECKPOINTIsNotLostOnASkippedTurn(unittest.TestCase):
 
         return p
 
+    def test_the_watermark_does_not_outlive_the_session(self):
+        """`_checkpoint_at` is per-session state, and hermes resets its own turn counter on a
+        session switch while this provider object survives the whole process. A watermark left
+        above every turn of the new session silences the checkpoint for good — and the write
+        side going quiet looks exactly like a model that stopped bothering to save.
+
+        `on_session_switch`'s docstring asked for this: "revisit once a later task adds cached
+        per-session state". This was that task."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._provider(tmp)
+            interval = int(p.CHECKPOINT_INTERVAL)
+            for turn in range(1, interval + 1):
+                p.on_turn_start(turn, HITS_PROMPT)
+                p.prefetch(HITS_PROMPT, session_id="a")
+            self.assertTrue(getattr(p, "_checkpoint_at", 0),
+                            "precondition: the first session fired a checkpoint")
+
+            p.on_session_switch("session-b")
+            fired = []
+            for turn in range(1, interval + 1):
+                p.on_turn_start(turn, HITS_PROMPT)
+                if "checkpoint" in p.prefetch(HITS_PROMPT, session_id="b").lower():
+                    fired.append(turn)
+
+            self.assertTrue(fired, "the new session never gets a checkpoint again")
+
     def test_a_due_turn_that_was_skipped_fires_on_the_next_one(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._provider(tmp)
@@ -2336,16 +2362,19 @@ class TestTheINDICATORCannotDescribeAnEarlierTurn(unittest.TestCase):
             p._store = store
 
             p.prefetch(HITS_PROMPT, session_id="s")
-            status = p.recall_status()
-            self.assertTrue(status is None or status.count >= 1,
-                            "precondition: the good turn reported what it found")
+            # ASSERTED ON `_last_count` ITSELF, not on `recall_status()`. Offline there is no
+            # `agent` package to build the indicator from, so `recall_status()` answers None on
+            # EVERY path — `status is None or ...` would hold for a provider that never
+            # reports anything at all, which is the vacuous shape this whole commit exists to
+            # remove. `_last_count` is the value the indicator reads, and it is real here.
+            self.assertEqual(p._last_count, 1,
+                             "precondition: the good turn reported what it found")
 
             store.fail = True
             block = p.prefetch(HITS_PROMPT, session_id="s")
             self.assertIn("UNAVAILABLE", block, "precondition: this turn failed")
-            after = p.recall_status()
-            self.assertTrue(after is None or after.count == 0,
-                            f"the indicator claimed {after} on a turn that recalled nothing")
+            self.assertEqual(p._last_count, 0,
+                             "the indicator still carried the previous turn's count")
 
 
 class TestTheBREAKERIsSharedBetweenHosts(unittest.TestCase):

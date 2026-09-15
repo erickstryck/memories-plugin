@@ -158,7 +158,14 @@ class TestProgressAndCancellation(unittest.TestCase):
         
         try:
             with self.assertRaises(jobs.JobError):
-                jobs.enqueue("alpha", "index", ["/a.py"])
+                jobs.enqueue("alpha", "index", ["/a.py", "/b.py"])
+
+            # AND THE PREVIOUS JOB IS UNTOUCHED. The clear used to run after the write, so a
+            # raise left the NEW job PENDING on disk behind a cancel file nobody could remove:
+            # it would be picked up and killed on its first cycle. Refusing has to mean
+            # nothing changed, not "changed and then complained".
+            self.assertEqual(jobs.load("alpha")["paths"], ["/a.py"],
+                             "the refused job was written anyway, and it cannot survive")
         finally:
             # Clean up: remove the directory barrier
             cancel_path.rmdir()

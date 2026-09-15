@@ -254,6 +254,23 @@ class TestFindSurvivesAForeignRecord(unittest.TestCase):
             self.assertIsInstance(hit["document"], str,
                                   f"a document-less record reached the caller: {hit}")
 
+    def test_it_still_returns_the_full_limit_when_enough_usable_records_exist(self):
+        """Filtering AFTER the cut makes the answer silently short: the unusable records eat
+        slots that usable ones further down would have filled. `find` is the documented
+        dedupe-before-writing path, so a short answer makes the dedupe miss and write a
+        duplicate — a silent wrong answer where the old failure was at least a loud crash."""
+        s, q, _ = store()
+        for i in range(5):
+            s.store(f"a usable record about pagination number {i}", {"type": "reference"})
+        # Foreign records interleaved: the shape a collection written by another tool has.
+        for i in range(5):
+            q.upsert(s.collection, [{"id": 900 + i,
+                                     "vector": s.embedder.embed_one(f"pagination {i}"),
+                                     "payload": {"text": "no document key"}}])
+
+        self.assertEqual(len(s.find("pagination", limit=5)), 5,
+                         "usable records past the cut were dropped instead of backfilled")
+
     def test_the_records_that_DO_have_text_are_still_returned(self):
         """The guard must skip the unusable record, not the search."""
         s, q, _ = store()

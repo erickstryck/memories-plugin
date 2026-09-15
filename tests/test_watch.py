@@ -509,6 +509,36 @@ class TestTheWatcherDoesNotREADEveryTrackedFile(unittest.TestCase):
     def setUp(self):
         a_state_dir()
 
+    def test_a_file_the_ARCHIVE_LOST_is_found_again_even_with_a_warm_memo(self):
+        """The recovery this narrowing must not cancel. `_new_tracked_paths` is the only path
+        that re-queues a file the archive no longer holds — its own docstring calls it "the
+        one case `changed_paths` structurally cannot cover", because `poll` reports a file
+        with no chunks as neither indexed nor changed.
+
+        The memo is keyed on the git index, which does not move when the ARCHIVE changes. So
+        caching the already-narrowed set made a lost file invisible until someone happened to
+        run `git add`: measured 0 index jobs in 10 cycles where the unmemoized path finds it
+        at once."""
+        root = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", root], check=True)
+        paths = []
+        for name in ("a.py", "b.py"):
+            path = os.path.join(root, name)
+            with open(path, "w") as fh:
+                fh.write("x = 1\n")
+            paths.append(os.path.abspath(path))
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+
+        entry = {"repo": "alpha", "checkouts": [root]}
+        memo: dict = {}
+        self.assertEqual(indexer._new_tracked_paths(entry, set(paths), memo), set(),
+                         "precondition: everything is indexed, so nothing is new")
+
+        # The archive loses one file. Nothing touched git, so the memo is still warm.
+        found = indexer._new_tracked_paths(entry, {paths[1]}, memo)
+        self.assertEqual(found, {paths[0]},
+                         "a file the archive lost is invisible until someone runs `git add`")
+
     def test_a_file_the_archive_already_holds_is_never_opened(self):
         root = tempfile.mkdtemp()
         subprocess.run(["git", "init", "-q", root], check=True)
@@ -566,6 +596,24 @@ class TestAnOutageBacksOffInsteadOfHammering(unittest.TestCase):
 
         self.assertLessEqual(attempts, 2,
                              f"a down endpoint was hit {attempts} times in 12 cycles")
+
+    def test_a_SUCCESSFUL_job_clears_the_backoff(self):
+        """The other half of the breaker, and the one that costs silence when it is missing:
+        an endpoint that came back must not leave every repo idle for the rest of the cooldown.
+        Its sibling below expires the backoff by hand, which holds `Breaker.clear()` but not
+        the indexer's call to it."""
+        path = a_file_on_disk("x = 1\n")
+        ix = FakeIndex(changed=[path], indexed=[path])
+        run_job = indexer.work(index=ix)
+        indexer.index_breaker().arm()
+        self.assertIsNotNone(indexer.index_breaker().is_open(),
+                             "precondition: the breaker is armed")
+
+        jobs.enqueue("alpha", "refresh", [path])
+        run_job(jobs.load("alpha"))
+
+        self.assertIsNone(indexer.index_breaker().is_open(),
+                          "the endpoint answered, but every repo stays idle for the cooldown")
 
     def test_the_backoff_expires_so_the_repo_is_retried(self):
         """A breaker that never reopens is an outage that never ends."""

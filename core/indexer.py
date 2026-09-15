@@ -254,22 +254,45 @@ def _new_tracked_paths(entry: dict, indexed: set, memo: dict | None = None) -> s
     candidate list FIRST leaves the content judgement for the handful of genuinely new paths,
     which is what `core/scan.py` means when it says the sniff happens on the eligibility pass
     and never on the watcher's cycle.
+
+    BUT A NARROWED ANSWER CANNOT BE CACHED AS IF IT WERE COMPLETE. The memo is keyed on the
+    GIT index, which does not move when the ARCHIVE changes, so caching the already-narrowed
+    set made a file the archive LOST invisible until someone happened to run `git add` — and
+    that recovery is the whole reason this function exists (`poll` reports a file with no
+    chunks as neither indexed nor changed). Measured: 0 index jobs in 10 cycles where the
+    unmemoized path finds the file at once. So the memo also records WHAT IT NARROWED AGAINST,
+    and a path that has since left `indexed` is re-judged — a set difference per cycle, and a
+    read only for the handful of files that actually dropped out.
     """
     repo = entry["repo"]
     roots = list(entry.get("checkouts") or [])
     stamps = tuple(_index_stamp(r) for r in roots)
     cached = memo.get(repo) if memo is not None else None
+    eligible: set = set()
+    skipped: set = set()
     if cached is not None and cached[0] == stamps and None not in stamps:
-        eligible = cached[1]
+        eligible, narrowed_against = cached[1], cached[2]
+        # Paths the cold pass never looked at because the archive held them, and that the
+        # archive no longer holds. They are the only candidates a warm memo can be missing.
+        skipped = narrowed_against - indexed
     else:
-        eligible = set()
+        narrowed_against = set(indexed)
         for root in roots:
             try:
                 eligible.update(scan.eligible(root, judge=lambda p: p not in indexed)["eligible"])
             except Exception:                         # noqa: BLE001 — one bad checkout root
                 continue                              # must not blind the watcher to the rest
-        if memo is not None:
-            memo[repo] = (stamps, eligible)
+
+    if skipped:
+        for root in roots:
+            try:
+                eligible.update(scan.eligible(root, judge=lambda p: p in skipped)["eligible"])
+            except Exception:                         # noqa: BLE001 — as above
+                continue
+        narrowed_against = narrowed_against - skipped
+
+    if memo is not None:
+        memo[repo] = (stamps, eligible, narrowed_against)
 
     return {p for p in eligible if p not in indexed}
 

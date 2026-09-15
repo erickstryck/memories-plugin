@@ -831,15 +831,17 @@ class RepoIndex:
             ) from exc
 
     def _chunks_per_repo(self) -> dict:
-        """`{repo: chunk count}` for every repo the ARCHIVE holds a chunk under, with a count of
-        None when only the presence of the name could be established.
+        """`{repo: chunk count}` for every repo the ARCHIVE holds a chunk under.
+
+        ALWAYS A NUMBER, NEVER None: both paths below establish a count. The facet is asked
+        for one, and the fallback scroll tallies as it goes — so a repo that is named here is
+        a repo whose chunks were counted.
 
         Both divergence directions need these names, so they are taken once and handed to both
         rather than read twice for one command. The COUNTS come free with the facet — the server
         is already counting to answer it — and the listing needs them because the registry's own
         `chunks` is per-batch, not a size (see `list_all`). The fallback scroll counts as it goes,
-        since it visits every point regardless — so a count is always available in practice, and
-        the None case is reserved for a caller that could not establish one at all.
+        since it visits every point regardless.
 
         WHY IT IS A FACET AND NOT A SCROLL. The question is "which distinct values does one
         indexed key have", and the chunk collection already carries the keyword index on `repo`

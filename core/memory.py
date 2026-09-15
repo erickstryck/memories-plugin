@@ -83,6 +83,13 @@ def _refuses_to_order(exc: Exception) -> bool:
 #: them. They are conventions, not a schema — `metadata` accepts any keys.
 METADATA_FIELDS = ("type", "project", "area")
 
+#: How many records `find` reads for each one it may return. The filter that drops records
+#: with no usable text runs BEFORE the cut, so unusable rows must not eat the caller's slots;
+#: this bounds what that costs. 3x covers a collection with a minority of foreign records,
+#: which is the realistic case — one where most rows are unusable is misconfigured, and
+#: scanning it to the end would turn a dedupe lookup into a full sweep.
+_FIND_OVERFETCH = 3
+
 #: Unicode categories that print as nothing: control, format, and the three space classes.
 #: `Cf` is the one that matters and the one `str.strip()` does not touch.
 _INVISIBLE = {"Cc", "Cf", "Zs", "Zl", "Zp"}
@@ -331,11 +338,19 @@ class MemoryStore:
         another tool keeps its text under another key. Handing `None` through as a document
         made the caller crash on it (the CLI slices it for the preview) after printing part of
         the answer, and a vector with no text is nothing a caller can show anyone.
+
+        FILTERED BEFORE THE CUT, NOT AFTER, so the answer is not silently short. Dropping the
+        unusable records from a top-`limit` page lets them eat slots that usable records
+        further down would have filled: 5 usable interleaved with 5 foreign returned 1 of 5.
+        This is the dedupe-before-writing path, so a short answer makes the dedupe miss and
+        write a duplicate — a wrong answer nobody sees, where the old bug at least crashed.
+        The over-fetch is bounded (`_FIND_OVERFETCH`x) because a collection where most records
+        are unusable is misconfigured, not a case to scan to the end of.
         """
         self.require_existing()
         vector = self.embedder.embed_one(query)
         output = []
-        for hit in self.q.search(self.collection, vector, limit):
+        for hit in self.q.search(self.collection, vector, limit * _FIND_OVERFETCH):
             p = hit.get("payload", {})
             document = p.get("document")
             if not isinstance(document, str) or not document.strip():
@@ -347,6 +362,8 @@ class MemoryStore:
                 "metadata": p.get("metadata", {}),
                 "updated_at": p.get("updated_at"),
             })
+            if len(output) == limit:
+                break
 
         return output
 
