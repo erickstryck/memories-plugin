@@ -434,8 +434,17 @@ class TestTheBlockContractIsTheOneHermesHonours(unittest.TestCase):
     def test_a_blocked_read_exits_2_and_says_why_on_stdout(self):
         chars, size = SHARE_ONLY
         out, code = run_guard(a_file_of(size), a_session_using(chars))
-        self.assertEqual(code, adapter.BLOCK_EXIT_CODE,
+        # THE LITERAL, not `adapter.BLOCK_EXIT_CODE`. Reading the constant back out of the
+        # module under test makes the assertion a tautology: it holds for any value, so the
+        # guard could be switched off (`= 0`, which this host reads as "do not block") with
+        # the whole suite green. The value is pinned by the spec's own divergence table —
+        # "BLOCK_EXIT_CODE = 2 … both together, because a truncated stdout still blocks by
+        # the code" — and the redundancy is the point of that row. The claude-code sibling
+        # asserts its literal; this one did not.
+        self.assertEqual(code, 2,
                          "exit 2 is what blocks a pre_tool_call even with no stdout")
+        self.assertEqual(adapter.BLOCK_EXIT_CODE, 2,
+                         "the constant the guard exits with must be the blocking code")
         emitted = json.loads(out)
         self.assertEqual(emitted["decision"], "block")
         self.assertIn("--full", emitted["reason"], "the way out must be in the message")
