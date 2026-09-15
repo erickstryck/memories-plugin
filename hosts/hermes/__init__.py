@@ -292,6 +292,15 @@ class MemoriesProvider(_Base):
         looked. So every failure path returns the unavailability block rather than "".
         """
         try:
+            # RESET BEFORE THE ATTEMPT, so the indicator cannot describe an earlier turn.
+            # `_last_count` is written only on the two paths that reach the store, and hermes
+            # calls `recall_status()` whenever prefetch returned something non-empty — which
+            # the UNAVAILABLE block is. So a turn whose archive was DOWN showed the user
+            # "recalled 3 memories" from the turn before, while the block handed to the model
+            # said the opposite. Tolerated failure must not become a lie, and it is the same
+            # event being reported two ways in the same turn.
+            self._last_count = 0
+
             return self._prefetch(query_text, session_id or self._session_id)
         except core.CoreError as exc:
             return blocks.unavailable_block(type(exc).__name__, str(exc)[:200])
@@ -364,6 +373,12 @@ class MemoriesProvider(_Base):
         if not hits:
             session_state.prune(state)
             session_state.save(path, state)
+            # SWEPT ON THIS PATH TOO. The sweep used to sit only past this return, so a fresh
+            # install, an empty collection, or a run of prompts that match nothing never swept
+            # at all — and those are precisely the sessions that leave state behind without
+            # ever recalling anything. `_refresh_window` is here for the same reason, one line
+            # below, and its docstring makes exactly this argument about the no-hits path.
+            self._sweep_dead_state(round_no)
             self._last_count = 0
             self._refresh_window(session_id)
 
@@ -466,9 +481,13 @@ class MemoriesProvider(_Base):
         strictly less than one unswept file.
         """
         try:
-            base = getattr(self, "_state_dir", None)
-            if base is not None:
-                session_state.sweep_if_due(base, round_no)
+            # THROUGH `_state_path`, not `_state_dir`: there is one resolution of where this
+            # host's state lives (`QCTX_STATE_DIR` first, then `hermes_home`), and reading the
+            # attribute directly was a second answer to the same question — so a sweep could
+            # run against a different directory from the one the files were written to.
+            probe = self._state_path("recall-probe")
+            if probe is not None:
+                session_state.sweep_if_due(probe.parent, round_no)
         except BaseException:  # noqa: BLE001 — an unswept file beats a lost recall
             pass
 
@@ -495,9 +514,18 @@ class MemoriesProvider(_Base):
             if os.environ.get("QCTX_CHECKPOINT_DISABLED") == "1":
                 return block
             turn = getattr(self, "_turn", 0)
-            if not turn or not session_state.due(turn, self.CHECKPOINT_INTERVAL):
+            # OWED, not exactly-on-the-multiple. This nudge rides inside `prefetch`, and the
+            # host gates `prefetch` behind its own trivial-prompt filter while calling
+            # `on_turn_start` unconditionally — so a turn that was both due and trivial
+            # (`/status`, "thanks") lost the checkpoint rather than deferring it, and the next
+            # turn is not a multiple either. claude-code cannot hit this: its checkpoint is a
+            # hook with its own counter, which advances once per event and cannot step over a
+            # multiple. `due_since` is what makes the two hosts agree.
+            if not turn or not session_state.due_since(turn, getattr(self, "_checkpoint_at", 0),
+                                                       self.CHECKPOINT_INTERVAL):
                 return block
             nudge = CHECKPOINT_PROCEDURE.format(count=turn, interval=self.CHECKPOINT_INTERVAL)
+            self._checkpoint_at = int(turn)
 
             return f"{block}\n\n{nudge}" if block else nudge
         except BaseException:  # noqa: BLE001 — a skipped checkpoint beats a lost recall
@@ -516,14 +544,29 @@ class MemoriesProvider(_Base):
         return RecallStatus(provider_label="memories", count=self._last_count)
 
     def _state_path(self, name: str):
-        """State lives under HERMES_HOME when hermes gives us one, and falls back to the
-        plugin's own directory — the same one the claude-code hook uses — otherwise. The
-        `initialize` contract says to use hermes_home for profile-scoped storage instead of
-        hardcoding a path."""
-        base = getattr(self, "_state_dir", None)
+        """Where this host keeps its per-session state and its breaker.
+
+        `QCTX_STATE_DIR` WINS, exactly as it does for every other subsystem. The `initialize`
+        contract says profile-scoped storage belongs under `hermes_home`, and that is still
+        the default — but preferring it unconditionally split the plugin's state in two, and
+        the halves are not interchangeable:
+
+        - `core/breaker.py` is a FILE and not memory precisely because the dependency is
+          shared between sessions (there is only one GPU). Two hosts reading two different
+          files means a saturation claude-code has already backed off from costs hermes the
+          full rerank timeout on every prompt for the rest of the outage. Measured on a real
+          install: 29 recall files in one directory, 13 in the other.
+        - `QCTX_STATE_DIR` is the one knob an operator uses to relocate state, and it moved
+          `lease`, `jobs`, `quarantine`, `windowcache`, `daemon` and `bindings` but not this —
+          a half-working knob is worse than no knob, because it looks like it worked.
+
+        With the variable unset the behaviour is unchanged: `hermes_home` when hermes gave us
+        one, the plugin's own directory otherwise.
+        """
+        explicit = os.environ.get("QCTX_STATE_DIR")
+        base = Path(explicit) if explicit else getattr(self, "_state_dir", None)
         if base is None:
-            base = Path(os.environ.get("QCTX_STATE_DIR")
-                        or (Path.home() / ".memories-plugin" / "state"))
+            base = Path.home() / ".memories-plugin" / "state"
             self._state_dir = base
         try:
             base.mkdir(parents=True, exist_ok=True)

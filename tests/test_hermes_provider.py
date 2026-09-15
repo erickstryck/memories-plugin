@@ -579,7 +579,12 @@ class TestTheBreakerDegradesONETurnAndNotTheWholeSession(_NoRealHermesHome):
 
         p = MemoriesProvider()
         p._cfg = object()
-        p._state_dir = state_dir
+        # Steered by the ENVIRONMENT, which is what wins in production: `QCTX_STATE_DIR` is
+        # how both hosts are pointed at ONE breaker file (there is one GPU). Setting the
+        # private attribute would no longer decide where the breaker is read from, so this
+        # test would silently stop testing the breaker it names.
+        os.environ["QCTX_STATE_DIR"] = str(state_dir)
+        self.addCleanup(os.environ.pop, "QCTX_STATE_DIR", None)
         p._store = Store()
         p.TOP_K, p.TOP_K_STRICT = self.LENIENT, self.STRICT
         p.BREAKER_SECONDS = 300.0
@@ -1079,7 +1084,10 @@ class TestCheckpointFailureDoesNotCostRecall(_NoRealHermesHome):
         p._store = FakeStore()
         p.on_turn_start(1, "a real question about the archive")
 
-        with unittest.mock.patch("hosts.hermes.session_state.due",
+        # `due_since`, the cadence check this host actually calls — mocking the old `due`
+        # left the test green while exercising nothing, which is the shape of a guard that
+        # stops guarding the day the code under it moves.
+        with unittest.mock.patch("hosts.hermes.session_state.due_since",
                                  side_effect=RuntimeError("boom")):
             out = p.prefetch("a real question about the archive")
 

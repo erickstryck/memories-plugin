@@ -92,14 +92,34 @@ def prune(state: dict, reinject_after: int = REINJECT_AFTER) -> int:
     return len(stale)
 
 
-def purge_dead(state_dir, days: float = 7.0, pattern: str = "recall-*.json") -> int:
+#: Every per-session file this plugin writes, by glob. A session leaves more than one trace —
+#: the recall state one hook writes, and the checkpoint counter the other does — and a sweep
+#: that knew only about the first left the second accumulating forever, which is exactly the
+#: growth `purge_dead` exists to stop. Measured on a real install: 61 `checkpoint-*.count`
+#: against 29 `recall-*.json`, with the oldest counter three weeks older than the oldest
+#: recall file. The list lives HERE, next to the sweep, so a host that starts writing a third
+#: kind of per-session file adds it in one place rather than growing a directory in silence.
+#: It stays narrow on purpose: the log is not session state.
+SESSION_FILE_PATTERNS = ("recall-*.json", "checkpoint-*.count")
+
+
+def purge_dead(state_dir, days: float = 7.0, pattern=None) -> int:
     """Delete state files untouched for `days`.
 
     Each session creates a file and nothing removed them: the directory grew forever. A
     session idle for a week is not coming back, and if it does the cost is starting with an
-    empty `seen` — the worst effect is one memory reinjected once. The pattern is narrow on
-    purpose: the log is not session state.
+    empty `seen` — the worst effect is one memory reinjected once.
+
+    `pattern` takes one glob or several; it defaults to every per-session file this plugin
+    writes (see `SESSION_FILE_PATTERNS`).
     """
+    if pattern is None:
+        patterns = SESSION_FILE_PATTERNS
+    elif isinstance(pattern, str):
+        patterns = (pattern,)
+    else:
+        patterns = tuple(pattern)
+
     removed = 0
     try:
         # INSIDE the try, and coerced. It used to sit above it, which made this the one
@@ -110,10 +130,11 @@ def purge_dead(state_dir, days: float = 7.0, pattern: str = "recall-*.json") -> 
         # today; the contract is what callers rely on, and it has to hold without them
         # checking who calls it.
         cutoff = time.time() - float(days) * 86400
-        for path in Path(state_dir).glob(pattern):
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
+        for glob in patterns:
+            for path in Path(state_dir).glob(glob):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
     except Exception:
         pass
 
@@ -167,3 +188,32 @@ def due(turn: int, interval: int) -> bool:
         return False
 
     return turn % interval == 0
+
+
+def due_since(turn, last_fired, interval) -> bool:
+    """Whether the checkpoint is OWED on this turn: due now, or due on a turn that was missed.
+
+    WHY EXACT DIVISIBILITY IS NOT ENOUGH, on one host and not the other. The claude-code
+    checkpoint is its own hook with its own counter, which advances once per event, so it can
+    never step over a multiple. The hermes nudge rides inside `prefetch`, and the host gates
+    `prefetch` behind a trivial-prompt filter while calling `on_turn_start` unconditionally —
+    so a turn that is both due and trivial (`/status`, "thanks", "ok") lost the checkpoint
+    entirely rather than deferring it, and the next one would not be a multiple either.
+
+    Owed, not accumulated: one nudge covers every turn since the last one, because the
+    procedure is the same however many turns were skipped, and repeating it per missed turn
+    would be noise on exactly the sessions that already skipped it for being short.
+    """
+    try:
+        turn = int(turn)
+        last_fired = int(last_fired)
+        interval = int(interval)
+    except (TypeError, ValueError):
+        return False
+    if interval <= 0 or turn <= 0:
+        return False
+
+    # The most recent turn on which it was due. Zero means none has come round yet.
+    latest_due = (turn // interval) * interval
+
+    return latest_due > 0 and latest_due > last_fired

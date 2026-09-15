@@ -380,6 +380,12 @@ def _run() -> None:
         log(f"round {round_no}: 0 above the cut (best {outcome.best_dense:.3f}) "
             f"in {elapsed:.1f}s | {len(angles)} angles | {why} | {prompt[:60]!r}")
         st.save(state_path, state)
+        # SWEPT HERE TOO. The sweep used to sit only past this return, so a fresh install, an
+        # empty collection, or a run of prompts that match nothing never swept — and those are
+        # exactly the sessions that leave a state file behind without ever recalling anything.
+        dead = st.sweep_if_due(STATE_DIR, round_no)
+        if dead:
+            log(f"cleanup: {dead} dead session state(s) removed")
         emit(empty_block(outcome, len(angles)))
         return
 

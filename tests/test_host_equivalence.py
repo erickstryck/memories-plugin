@@ -808,7 +808,15 @@ _STUB_STORE = (
 )
 
 
-def drive_claude_rounds(state_dir, session: str, rounds: int = 1) -> None:
+_EMPTY_STORE = (
+    "class Stub:\n"
+    "    reranker = None\n"
+    "    def recall(self, queries, policy, top_k, suppressed=None):\n"
+    "        return [], Outcome(candidates=0, best_dense=0.0)\n"
+)
+
+
+def drive_claude_rounds(state_dir, session: str, rounds: int = 1, hits: bool = True) -> None:
     """Run `hooks/recall.py::_run()` for real, `rounds` times, against `state_dir`.
 
     A subprocess and the hook's own `_run`, not a helper shared with the hermes driver
@@ -825,7 +833,7 @@ def drive_claude_rounds(state_dir, session: str, rounds: int = 1) -> None:
         "import recall\n"
         "from core.retrieval import CE, Outcome\n"
         "from tests.test_blocks import FakeHit\n"
-        + _STUB_STORE +
+        + (_STUB_STORE if hits else _EMPTY_STORE) +
         "for _ in range(%d):\n"
         "    payload = json.dumps({'prompt': %r, 'session_id': %r})\n"
         "    with unittest.mock.patch.object(recall.core, 'build_memory',\n"
@@ -848,7 +856,11 @@ def drive_hermes_rounds(state_dir, session: str, rounds: int = 1) -> None:
     from hosts.hermes import MemoriesProvider
     p = MemoriesProvider()
     p._cfg = object()
-    p._state_dir = Path(state_dir)
+    # Through the ENVIRONMENT, not by assigning `_state_dir`: `QCTX_STATE_DIR` is the knob
+    # that wins in production (so both hosts share one breaker), and a test that steers the
+    # host by a private attribute would stop exercising the resolution it means to test.
+    previous = os.environ.get("QCTX_STATE_DIR")
+    os.environ["QCTX_STATE_DIR"] = str(state_dir)
 
     class Stub:
         reranker = None
@@ -859,8 +871,14 @@ def drive_hermes_rounds(state_dir, session: str, rounds: int = 1) -> None:
                     Outcome(candidates=2, reranked=True))
 
     p._store = Stub()
-    for _ in range(rounds):
-        p.prefetch(HITS_PROMPT, session_id=session)
+    try:
+        for _ in range(rounds):
+            p.prefetch(HITS_PROMPT, session_id=session)
+    finally:
+        if previous is None:
+            os.environ.pop("QCTX_STATE_DIR", None)
+        else:
+            os.environ["QCTX_STATE_DIR"] = previous
 
 
 #: The session id each host writes its own state under. Different strings on purpose:
@@ -2169,6 +2187,244 @@ class TestTheGuardDecidesAndDoesNotACT(unittest.TestCase):
                                  f"{path} acts on the archive; the guard decides and the "
                                  f"model acts, which is what keeps a blocked read from "
                                  f"costing an indexing run nobody asked for")
+
+
+class TestTheCHECKPOINTIsNotLostOnASkippedTurn(unittest.TestCase):
+    """The hermes nudge rides inside `prefetch`, and the host gates `prefetch` behind its own
+    trivial-prompt filter — while `on_turn_start` is called unconditionally. So a turn that is
+    BOTH due and trivial loses the checkpoint entirely: not deferred, lost. Any `/`-prefixed
+    prompt is trivial to that filter, plus `thanks`, `ok`, `done`.
+
+    claude-code does not have the problem: its checkpoint is its own hook with a file counter
+    that advances once per event, so it cannot skip a multiple. The nudge must therefore be
+    STICKY rather than exactly-on-the-multiple, which is what makes the two hosts agree."""
+
+    def _provider(self, tmp):
+        from core.retrieval import Outcome
+        from hosts.hermes import MemoriesProvider
+
+        class NoHits:
+            reranker = None
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return [], Outcome(candidates=0, best_dense=0.0)
+
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._store = NoHits()
+        os.environ["QCTX_STATE_DIR"] = str(tmp)
+        self.addCleanup(os.environ.pop, "QCTX_STATE_DIR", None)
+
+        return p
+
+    def test_a_due_turn_that_was_skipped_fires_on_the_next_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._provider(tmp)
+            interval = int(p.CHECKPOINT_INTERVAL)
+            fired = []
+            for turn in range(1, interval + 3):
+                p.on_turn_start(turn, HITS_PROMPT)
+                if turn == interval:
+                    continue           # the host skipped prefetch: trivial prompt
+                block = p.prefetch(HITS_PROMPT, session_id="s")
+                if "checkpoint" in block.lower():
+                    fired.append(turn)
+
+            self.assertTrue(fired,
+                            f"the checkpoint due at turn {interval} was lost, not deferred")
+
+    def test_it_does_not_fire_EVERY_turn_after_one_is_due(self):
+        """Sticky must not mean stuck: a nudge on every prompt is noise, and the cadence is
+        the whole point of having an interval."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._provider(tmp)
+            interval = int(p.CHECKPOINT_INTERVAL)
+            fired = []
+            for turn in range(1, interval * 2 + 2):
+                p.on_turn_start(turn, HITS_PROMPT)
+                block = p.prefetch(HITS_PROMPT, session_id="s")
+                if "checkpoint" in block.lower():
+                    fired.append(turn)
+
+            self.assertLessEqual(len(fired), 2,
+                                 f"it fired on {fired} — the cadence is gone")
+
+
+class TestTheSWEEPRunsOnARoundThatFoundNothing(unittest.TestCase):
+    """The sweep sat past the no-hits early return on BOTH hosts, so a fresh install, an empty
+    collection or a run of prompts that match nothing never swept at all — and those are
+    exactly the sessions that leave a state file behind without ever recalling anything.
+    `_refresh_window` already lives on that path for the same reason, and its docstring makes
+    this argument about the no-hits round explicitly."""
+
+    def _dir_with_an_abandoned_file(self):
+        d = Path(tempfile.mkdtemp())
+        abandoned = d / "recall-an_abandoned_session.json"
+        abandoned.write_text(json.dumps({"round": 3, "seen": {}}))
+        stamp = time.time() - 30 * 86400
+        os.utime(abandoned, (stamp, stamp))
+
+        return d, abandoned
+
+    def test_hermes_sweeps_on_a_no_hit_round(self):
+        from core.retrieval import Outcome
+        from core.session_state import PURGE_EVERY_ROUNDS
+        from hosts.hermes import MemoriesProvider
+
+        d, abandoned = self._dir_with_an_abandoned_file()
+        session = "hermes-empty"
+        (d / f"recall-{session}.json").write_text(
+            json.dumps({"round": PURGE_EVERY_ROUNDS - 1, "seen": {}}))
+
+        class NoHits:
+            reranker = None
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return [], Outcome(candidates=0, best_dense=0.0)
+
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._store = NoHits()
+        os.environ["QCTX_STATE_DIR"] = str(d)
+        self.addCleanup(os.environ.pop, "QCTX_STATE_DIR", None)
+        p.prefetch(HITS_PROMPT, session_id=session)
+
+        self.assertFalse(abandoned.exists(),
+                         "hermes never sweeps when the archive answers nothing")
+
+    def test_claude_sweeps_on_a_no_hit_round(self):
+        from core.session_state import PURGE_EVERY_ROUNDS
+
+        d, abandoned = self._dir_with_an_abandoned_file()
+        session = "claude-empty"
+        (d / f"recall-{session}.json").write_text(
+            json.dumps({"round": PURGE_EVERY_ROUNDS - 1, "seen": {}}))
+        drive_claude_rounds(d, session, hits=False)
+
+        self.assertFalse(abandoned.exists(),
+                         "claude never sweeps when the archive answers nothing")
+
+
+class TestTheINDICATORCannotDescribeAnEarlierTurn(unittest.TestCase):
+    """`recall_status()` is read by hermes whenever prefetch returned something non-empty —
+    and the UNAVAILABLE block is non-empty. `_last_count` was written only on the paths that
+    reach the store, so a turn whose archive was DOWN showed the user "recalled N memories"
+    from the turn before, while the block handed to the model said the opposite. The same
+    event, reported two ways, in the same turn."""
+
+    def test_a_failed_turn_does_not_report_the_previous_turns_count(self):
+        from core.retrieval import CE, Outcome
+        from hosts.hermes import MemoriesProvider
+
+        class Flaky:
+            reranker = None
+            fail = False
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                if self.fail:
+                    raise __import__("core").EmbeddingError("endpoint down")
+
+                return ([FakeHit(id="h1", document="fact one", origin=CE)],
+                        Outcome(candidates=1, reranked=True))
+
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["QCTX_STATE_DIR"] = d
+            self.addCleanup(os.environ.pop, "QCTX_STATE_DIR", None)
+            p = MemoriesProvider()
+            p._cfg = object()
+            store = Flaky()
+            p._store = store
+
+            p.prefetch(HITS_PROMPT, session_id="s")
+            status = p.recall_status()
+            self.assertTrue(status is None or status.count >= 1,
+                            "precondition: the good turn reported what it found")
+
+            store.fail = True
+            block = p.prefetch(HITS_PROMPT, session_id="s")
+            self.assertIn("UNAVAILABLE", block, "precondition: this turn failed")
+            after = p.recall_status()
+            self.assertTrue(after is None or after.count == 0,
+                            f"the indicator claimed {after} on a turn that recalled nothing")
+
+
+class TestTheBREAKERIsSharedBetweenHosts(unittest.TestCase):
+    """`core/breaker.py` says why it is a FILE and not memory, in its own first paragraph:
+    the dependency is shared between sessions — there is only one GPU — so what one session
+    found out holds for the others. That only works if both hosts look at the SAME file.
+
+    They did not. The claude hook reads `knobs.state_dir()`; the hermes provider resolves its
+    own directory under `hermes_home`, which `initialize()` always receives in production.
+    Measured on the real install: 29 recall files in one directory, 13 in the other. So a GPU
+    saturation claude had already backed off from cost hermes the full rerank timeout on
+    every prompt for the rest of the outage — the exact tax the breaker exists to stop.
+    """
+
+    def test_both_hosts_resolve_the_same_breaker_file(self):
+        import hosts.hermes as hermes
+        from core import knobs
+
+        with tempfile.TemporaryDirectory() as shared, tempfile.TemporaryDirectory() as home:
+            os.environ["QCTX_STATE_DIR"] = shared
+            try:
+                provider = hermes.MemoriesProvider()
+                provider.initialize("s1", hermes_home=home)
+                theirs = provider._state_path("rerank-breaker")
+                ours = knobs.state_dir() / "rerank-breaker"
+                self.assertEqual(Path(theirs).resolve(), Path(ours).resolve(),
+                                 "one host arms a breaker the other cannot see")
+            finally:
+                os.environ.pop("QCTX_STATE_DIR", None)
+
+    def test_QCTX_STATE_DIR_moves_the_hermes_host_too(self):
+        """An operator relocating state moved six subsystems and not the seventh."""
+        import hosts.hermes as hermes
+
+        with tempfile.TemporaryDirectory() as shared, tempfile.TemporaryDirectory() as home:
+            os.environ["QCTX_STATE_DIR"] = shared
+            try:
+                provider = hermes.MemoriesProvider()
+                provider.initialize("s1", hermes_home=home)
+                path = provider._state_path("recall-s1.json")
+                self.assertTrue(str(Path(path).resolve()).startswith(str(Path(shared).resolve())),
+                                f"state went to {path}, not to QCTX_STATE_DIR")
+            finally:
+                os.environ.pop("QCTX_STATE_DIR", None)
+
+
+class TestTheSweepCoversEveryPerSessionFile(unittest.TestCase):
+    """`purge_dead` exists so a state directory does not grow one file per session forever.
+    Its pattern was `recall-*.json` only, so the checkpoint counters the other hook writes
+    were never swept — measured on the real install: 61 `checkpoint-*.count` against 29
+    `recall-*.json`, the oldest counter three weeks older than the oldest recall file, which
+    is what "the recall files ARE being swept and these are not" looks like from outside."""
+
+    def test_a_dead_session_takes_its_checkpoint_counter_with_it(self):
+        from core import session_state
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            counter = base / "checkpoint-dead_session.count"
+            counter.write_text("7")
+            stamp = time.time() - 30 * 86400
+            os.utime(counter, (stamp, stamp))
+
+            session_state.purge_dead(base, days=7.0)
+            self.assertFalse(counter.exists(),
+                             "a counter for a session that ended weeks ago is still here")
+
+    def test_a_LIVE_counter_is_not_swept(self):
+        """The guard must key on age, not on the name: sweeping a live session's counter
+        would reset the checkpoint cadence of a conversation in progress."""
+        from core import session_state
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            counter = base / "checkpoint-live_session.count"
+            counter.write_text("3")
+
+            session_state.purge_dead(base, days=7.0)
+            self.assertTrue(counter.exists(), "it swept a counter that is still in use")
 
 
 if __name__ == "__main__":
