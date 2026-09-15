@@ -215,5 +215,89 @@ class TestForgettingOnPurpose(unittest.TestCase):
         self.assertIn(path, quarantine.held("alpha"))
 
 
+    def test_a_record_too_corrupt_to_read_can_still_be_thrown_away(self):
+        """`load` drops values it cannot read, so a wholly corrupt record reads as empty and
+        an early `return 0` would never touch the file. Status hides it and the one command
+        offered for manual repair would decline to perform the repair — the file would be
+        stuck for good, which is the opposite of an escape hatch."""
+        quarantine.dir().mkdir(parents=True, exist_ok=True)
+        broken = quarantine.dir() / "zrepo.json"
+        broken.write_text(json.dumps({"//repo": "zrepo", "/tmp/a": "not-a-dict"}),
+                          encoding="utf-8")
+        self.assertEqual(quarantine.load("zrepo"), {}, "precondition: it reads as empty")
+
+        self.assertEqual(quarantine.forget("zrepo"), 0, "it released no FILE, and says so")
+        self.assertFalse(broken.exists(), "but the unreadable record is gone")
+
+    def test_it_reports_ZERO_when_the_write_did_not_land(self):
+        """The count exists so the caller can say what happened. A failed write that still
+        reported "released 4" would be the exact lie this function's docstring refuses —
+        told by the function that refuses it."""
+        path = a_file()
+        quarantine.record("alpha", path, "nothing indexable")
+        with mock.patch("core.quarantine._write", return_value=False):
+            self.assertEqual(quarantine.forget("alpha"), 0)
+        self.assertIn(path, quarantine.held("alpha"),
+                      "the record is still there, so the caller must not be told otherwise")
+
+
+class TestRecordsWrittenBeforeThisVersion(unittest.TestCase):
+    """The stamp that lets a record name its own repository did not always exist. A file
+    written before it must still be nameable, or the fix it enables reaches nobody who
+    already had a quarantine — and those are exactly the users it was written for."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def _a_record_with_no_stamp(self, repo="settled"):
+        path = a_file()
+        quarantine.record(repo, path, "nothing indexable")
+        raw = json.loads((quarantine.dir() / f"{repo}.json").read_text(encoding="utf-8"))
+        raw.pop("//repo")
+        (quarantine.dir() / f"{repo}.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        return path
+
+    def test_an_unstamped_record_still_names_its_repository(self):
+        self._a_record_with_no_stamp()
+        self.assertIn("settled", quarantine.repos_on_record(),
+                      "a record written by the previous version is invisible")
+
+    def test_an_unstamped_record_is_still_read_and_held(self):
+        path = self._a_record_with_no_stamp()
+        self.assertIn(path, quarantine.load("settled"))
+        self.assertIn(path, quarantine.held("settled"))
+
+    def test_an_unstamped_record_can_still_be_released(self):
+        path = self._a_record_with_no_stamp()
+        self.assertEqual(quarantine.forget("settled", [path]), 1)
+
+
+class TestAMalformedStampDoesNotKillTheDiagnostic(unittest.TestCase):
+    """`load` validates every value it did not write, and the comment above it says why:
+    `repos status` raising on a bad entry killed the one command that could diagnose the
+    problem. A second reader of the same file has to follow the same rule."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_stamp_that_is_not_a_name_is_ignored_rather_than_returned(self):
+        quarantine.dir().mkdir(parents=True, exist_ok=True)
+        for bad in ({"not": "a name"}, ["a list"], 42, None, ""):
+            (quarantine.dir() / "r.json").write_text(
+                json.dumps({"//repo": bad, "/tmp/x": {"reason": "r", "mtime": 1, "size": 0}}),
+                encoding="utf-8")
+            found = quarantine.repos_on_record()
+            self.assertTrue(all(isinstance(n, str) and n for n in found),
+                            f"{bad!r} came back as a repository name: {found!r}")
+
+    def test_a_good_record_is_still_named_beside_a_malformed_one(self):
+        quarantine.record("fine", a_file(), "nothing indexable")
+        quarantine.dir().mkdir(parents=True, exist_ok=True)
+        (quarantine.dir() / "broken.json").write_text(json.dumps({"//repo": {"x": 1}}),
+                                                      encoding="utf-8")
+        self.assertIn("fine", quarantine.repos_on_record())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

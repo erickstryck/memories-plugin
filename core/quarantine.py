@@ -111,14 +111,20 @@ def held(repo: str) -> set:
     return still
 
 
-def clear(repo: str, paths) -> None:
-    """Forgets `paths`. Clearing something never held is not an error — the caller indexes a
-    batch and releases all of it, without having to know which members had failed before."""
-    forget(repo, paths)
+def clear(repo: str, paths) -> int:
+    """Forgets `paths`, returning how many were dropped. Clearing something never held is not
+    an error — the caller indexes a batch and releases all of it, without having to know which
+    members had failed before."""
+    return forget(repo, paths)
 
 
 def forget(repo: str, paths=None) -> int:
     """Drops records on purpose, returning HOW MANY were dropped. `paths=None` drops them all.
+
+    `None` IS THE ONLY WIPE. An empty list drops nothing, because "the caller named no paths"
+    and "the caller wants everything gone" must not be the same value on a destructive call.
+    A caller holding a possibly-empty list has to say `paths or None` deliberately, which is
+    what `cmd_repos_quarantine_clear` does at its single point of translation.
 
     WHY A DELIBERATE RELEASE EXISTS AT ALL, when `held` already releases on a content change.
     That covers the file that was repaired; it cannot cover the file that was always fine and
@@ -128,30 +134,36 @@ def forget(repo: str, paths=None) -> int:
 
     IT RETURNS A COUNT BECAUSE THE CALLER HAS TO BE ABLE TO SAY WHAT HAPPENED. A command that
     prints "released" after releasing nothing is the class of small lie this project refuses
-    everywhere else; `0` lets the caller say "there was nothing to release" instead.
+    everywhere else; `0` lets the caller say "there was nothing to release" instead. Which is
+    why the count is what LANDED, not what was intended: `_write` returns False on OSError,
+    and reporting the attempt would tell that same lie from the function written to refuse it.
 
     FORGETTING IS NOT AN EXEMPTION. It drops the record, and the next attempt decides afresh —
     a file that still cannot be indexed is simply held again. An allow-list would be a second
     policy living beside this one, and nobody asked for it.
     """
     entry = load(repo)
-    if not entry:
-        return 0
-    if paths is None:
-        released = len(entry)
-        entry = {}
+    wipe = paths is None
+    if wipe:
+        # A TOTAL DISCARD REACHES THE FILE EVEN WHEN IT READS AS EMPTY. `load` drops values it
+        # cannot parse, so a wholly corrupt record looks like `{}` here — and stopping on that
+        # would leave it on disk, hidden from `status` and refused by the only command offered
+        # to repair it. Nothing is lost: unreadable entries hold no file anyone can act on.
+        released, entry = len(entry), {}
     else:
         wanted = {str(p) for p in paths}
         kept = {path: meta for path, meta in entry.items() if path not in wanted}
-        released = len(entry) - len(kept)
-        entry = kept
-    if released:
-        _write(repo, entry)
+        released, entry = len(entry) - len(kept), kept
 
-    return released
+    # Nothing on disk and nothing to drop: say so without writing. A wipe still falls through
+    # when the file exists, so an unreadable record is thrown away rather than declined.
+    if not released and not (wipe and _path(repo).exists()):
+        return 0
+
+    return released if _write(repo, entry) else 0
 
 
-def repos_on_record() -> list:
+def repos_on_record() -> list[str]:
     """Every repository that HAS a quarantine file, by name.
 
     The caller cannot derive this itself: `names.safe` is lossy, so the filename does not
@@ -159,6 +171,21 @@ def repos_on_record() -> list:
     `repos status` show a held file for a SETTLED repository — one whose daemon has had
     nothing to do lately and therefore has no job row. That is exactly the repository whose
     files have been held longest, and it was the one place the count was invisible.
+
+    THE STAMP IS NOT ASSUMED, for two reasons that both reach real users. A record written
+    before the stamp existed has no key, and it never gains one on its own: `_write` is the
+    only stamper and `held` rewrites only when it prunes, which a settled repository never
+    does. Skipping those files would have left the very bug this function fixes in place for
+    everyone who already had a quarantine. And a record touched by an OLDER build after this
+    one drops the stamp again, so the gap reopens in a mixed-version fleet. The filename stem
+    is the honest fallback: `names.safe` is lossy, so it is the name only when the name
+    needed no escaping — but it beats naming nothing, and `load`/`held`/`forget` all work on
+    such a record already.
+
+    THE VALUE IS VALIDATED, like every value `load` did not write. `repos status` puts this
+    list into a set; a dict or a list here raised `TypeError` out of the one command that
+    could diagnose a bad record — which is the failure `load`'s own guard exists to prevent
+    (see the comment there). A stamp that is not a name is ignored, not returned.
     """
     try:
         paths = sorted(dir().glob("*.json"))
@@ -170,9 +197,12 @@ def repos_on_record() -> list:
             entry = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        name = entry.get(_REPO_KEY) if isinstance(entry, dict) else None
-        if name:
-            found.append(name)
+        if not isinstance(entry, dict) or not entry:
+            continue
+        name = entry.get(_REPO_KEY)
+        if not isinstance(name, str) or not name:
+            name = path.stem
+        found.append(name)
 
     return found
 

@@ -565,6 +565,23 @@ class TestStatusShowsWhatIsQuarantined(CLICase):
         self.assertNotIn("unindexable", text,
                          "an empty quarantine must not add noise to every status")
 
+    def test_a_record_written_before_this_version_is_still_shown(self):
+        """The stamp is new; the quarantines out there are not. A user upgrading has records
+        with no stamp, and they are precisely the settled ones this section was added for."""
+        from core import quarantine
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        quarantine.record("legacy", path, "nothing indexable")
+        record = quarantine.dir() / "legacy.json"
+        raw = json.loads(record.read_text(encoding="utf-8"))
+        raw.pop("//repo")
+        record.write_text(json.dumps(raw), encoding="utf-8")
+
+        text = self.rendered(self.cli.cmd_repos_status)
+        self.assertIn("legacy", text, "an upgraded user still sees nothing")
+        self.assertIn(path, text)
+
     def test_a_quarantine_is_visible_even_with_no_job_for_that_repo(self):
         """Job files are per-repo and replaced, so a settled repository whose daemon has had
         nothing to do for a while may have none. That is precisely the state where a held file
@@ -600,15 +617,17 @@ class TestReleasingAHeldFileByHand(CLICase):
         kept, released = self._held(), self._held()
         text = self.rendered(self.cli.cmd_repos_quarantine_clear, repo="alpha",
                              path=[released])
-        self.assertIn("1", text)
+        self.assertIn("1 file(s)", text)
         self.assertEqual(quarantine.held("alpha"), {kept})
 
     def test_releasing_the_whole_repo_says_how_many(self):
         from core import quarantine
 
-        self._held(); self._held(); self._held()
+        self._held()
+        self._held()
+        self._held()
         text = self.rendered(self.cli.cmd_repos_quarantine_clear, repo="alpha", path=[])
-        self.assertIn("3", text)
+        self.assertIn("3 file(s)", text)
         self.assertEqual(quarantine.load("alpha"), {})
 
     def test_releasing_nothing_SAYS_it_released_nothing(self):

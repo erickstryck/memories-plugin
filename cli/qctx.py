@@ -1549,7 +1549,11 @@ def cmd_repos_quarantine_clear(args, cfg):
     """
     from core import quarantine
 
-    paths = list(getattr(args, "path", None) or [])
+    # `nargs="*"` yields [] when the user named no path, and [] means "release everything"
+    # HERE while it means "release nothing" to `forget`. Collapsing it to None at the single
+    # point of translation keeps that divergence out of core, where a future caller passing an
+    # empty list would otherwise silently wipe a repository.
+    paths = list(args.path or [])
     released = quarantine.forget(args.repo, paths or None)
     if not released:
         # Said plainly, because "released 0" reads as success at a glance and the user needs
@@ -1558,8 +1562,9 @@ def cmd_repos_quarantine_clear(args, cfg):
               + (" matching those paths" if paths else ""))
 
         return
-    what = f"{released} file(s)"
-    print(f"released {what} for {args.repo!r} — the daemon retries them on its next cycle")
+
+    print(f"released {released} file(s) for {args.repo!r}"
+          " — the daemon retries them on its next cycle")
 
 
 def cmd_repos_daemon(args, cfg):
