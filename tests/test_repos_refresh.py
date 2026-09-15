@@ -462,5 +462,55 @@ class TestAnOutageIsNotAPropertyOfTheFile(unittest.TestCase):
         self.assertEqual(len(out["skipped"]), 1)
 
 
+class TestResumingDoesNotPayForWhatDidNotChange(unittest.TestCase):
+    """The spec's own justification for cancelling being safe: "E retomar é barato: um novo
+    trabalho pula os arquivos cujo digest não mudou, comparação que refresh já implementa."
+    `docs/usage.md:68` repeats the promise to the user — "running `add-all` again skips the
+    files that did not change".
+
+    It did not skip anything. `add_files` embedded every path it was given, so resuming a
+    cancelled `add-all` of 1,800 files re-embedded all 1,800 — against the same shared
+    endpoint the quarantine work exists to keep from being hammered. Measured on a 3-file
+    repo: pass 1 = 3 embed calls, pass 2 with the disk untouched = 3 more, while `refresh`
+    over the identical state cost 0.
+    """
+
+    def test_a_second_add_files_over_an_UNCHANGED_disk_embeds_nothing(self):
+        ix = an_index("alpha")
+        paths = [a_file("def a():\n    return 1\n"), a_file("def b():\n    return 2\n")]
+        ix.add_files("alpha", paths)
+        self.assertTrue(ix.embedder.calls, "precondition: the first pass did embed")
+
+        ix.embedder.calls.clear()
+        out = ix.add_files("alpha", paths)
+
+        self.assertEqual(ix.embedder.calls, [],
+                         "resuming re-embedded files whose content never changed")
+        self.assertEqual(out["files"], len(paths),
+                         "a skipped file is still a file this repo holds, not a failure")
+
+    def test_a_file_that_DID_change_is_still_re_embedded(self):
+        """The other direction, so the fix cannot be "never index twice"."""
+        ix = an_index("alpha")
+        path = a_file("def a():\n    return 1\n")
+        ix.add_files("alpha", [path])
+        ix.embedder.calls.clear()
+
+        rewrite(path, "def a():\n    return 999\n")
+        ix.add_files("alpha", [path])
+
+        self.assertTrue(ix.embedder.calls, "a changed file was skipped")
+
+    def test_a_file_the_archive_never_held_is_indexed(self):
+        """And a genuinely new path is not mistaken for an unchanged one."""
+        ix = an_index("alpha")
+        ix.add_files("alpha", [a_file("def a():\n    return 1\n")])
+        ix.embedder.calls.clear()
+
+        ix.add_files("alpha", [a_file("def brand_new():\n    return 2\n")])
+
+        self.assertTrue(ix.embedder.calls, "a file the archive never saw was skipped")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

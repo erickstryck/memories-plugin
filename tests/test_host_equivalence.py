@@ -1446,11 +1446,31 @@ class TestTheRepositoryOperationsDoTheSameThingOnBothHosts(unittest.TestCase):
         self.assertEqual(self.ix.divergent_repos(), [])
 
     def test_add_indexes_the_same_files_from_both_hosts(self):
+        """Each host indexing a file of its OWN, because the interesting equality is "the two
+        surfaces do the same work", not "the archive answers twice for one file".
+
+        Handing both the same path used to be the fixture, and it only produced equal chunk
+        counts because `add_files` re-embedded whatever it was given. It now skips a file
+        whose digest is unchanged — the promise `docs/usage.md` makes about resuming — so the
+        second host would legitimately report 0 chunks for work the first one had done."""
         cli = self._through_the_cli(self.cli.cmd_repos_add, repo="alpha",
                                     paths=[self.paths[0]])
-        tool = self._through_the_tool("repos_add", repo="alpha", paths=[self.paths[0]])
+        tool = self._through_the_tool("repos_add", repo="alpha", paths=[self.paths[1]])
+
         self.assertEqual(cli["chunks"], tool["chunks"])
         self.assertEqual((cli["repo"], cli["files"]), (tool["repo"], tool["files"]))
+
+    def test_re_adding_an_UNCHANGED_file_is_free_on_both_hosts(self):
+        """And the skip itself has to be the same on both surfaces, or resuming through one
+        of them costs what the other does not."""
+        self._through_the_cli(self.cli.cmd_repos_add, repo="alpha", paths=[self.paths[0]])
+        again_cli = self._through_the_cli(self.cli.cmd_repos_add, repo="alpha",
+                                          paths=[self.paths[0]])
+        again_tool = self._through_the_tool("repos_add", repo="alpha", paths=[self.paths[0]])
+
+        self.assertEqual(again_cli["chunks"], 0, "the CLI re-embedded an unchanged file")
+        self.assertEqual(again_tool["chunks"], 0, "the tool re-embedded an unchanged file")
+        self.assertEqual(again_cli["files"], again_tool["files"])
 
     def test_list_reports_the_same_repositories_and_the_same_divergence(self):
         from tests.fakes import make_divergent

@@ -18,6 +18,23 @@ from core.chunk import is_probably_binary
 FLOOR_PCT = 0.20
 #: Fraction of the free space a single file may take.
 SHARE_PCT = 0.40
+#: The smallest read the floor may refuse, as a fraction of the window.
+#:
+#: THE SECOND ROAD TO THE FAILURE THE 2026-08-16 AMENDMENT FORBIDS. That amendment closed the
+#: case of a window guessed LOW (`used >= window` — a refuted guess). But
+#: `after > window * (1 - floor_pct)` never consults the cost: once a session legitimately
+#: passes 80% of a CORRECT window the comparison is already true before the file is weighed,
+#: so EVERY read is refused. Measured at 810k of a real 1M window: a 15-byte file, a 246-byte
+#: file and an empty file were all denied, each told the read would cost "0% of the 190,000
+#: you have left" and advised to index it instead — advice that is wrong for 15 bytes. A
+#: guard against expensive reads that refuses a free one is a cage, which is the one failure
+#: this feature is not allowed to produce.
+#:
+#: 0.5% of the window: 5k tokens at 1M, 1k at 200k. Big enough that a trivial read never
+#: trips it, small enough that it cannot rescue a read worth refusing — the amendment's own
+#: example file was 4 KB (~1k tokens) and stays below this line at a 1M window, exactly as
+#: that amendment demands. The share criterion is untouched and still fires on its own.
+FLOOR_MIN_COST_PCT = 0.005
 #: Same ratio hermes uses in `agent/context_breakdown.py::_chars_to_tokens`. Bytes are not
 #: characters under UTF-8, but the error is far below the precision a threshold needs.
 CHARS_PER_TOKEN = 4
@@ -199,7 +216,10 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
         # fail closed. Erring large costs a sleeping guard; erring small costs a cage.
         return Verdict(False, "", cost, free)
 
-    floor_hit = after > budget.window * (1 - floor_pct)
+    # AND the read has to actually cost something: see FLOOR_MIN_COST_PCT. Past 80% of a
+    # correct window the left-hand side is true for every file, including an empty one.
+    floor_hit = (after > budget.window * (1 - floor_pct)
+                 and cost > budget.window * FLOOR_MIN_COST_PCT)
     # No `free > 0` here on purpose. The early return above is the SINGLE OWNER of "the
     # window is not usable" — `free == 0` iff `used >= window` iff that return has already
     # fired — so a guard here would be a second owner of the same invariant, and two owners
@@ -225,7 +245,10 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
     cost = int(loaded_bytes(size, sample, read_lines=read_lines,
                             read_bytes=read_bytes) // CHARS_PER_TOKEN)
     after = budget.used + cost
-    floor_hit = after > budget.window * (1 - floor_pct)
+    # AND the read has to actually cost something: see FLOOR_MIN_COST_PCT. Past 80% of a
+    # correct window the left-hand side is true for every file, including an empty one.
+    floor_hit = (after > budget.window * (1 - floor_pct)
+                 and cost > budget.window * FLOOR_MIN_COST_PCT)
     share_hit = cost > free * share_pct
     if not (floor_hit or share_hit):
         return Verdict(False, "", cost, free)

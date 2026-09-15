@@ -184,7 +184,35 @@ class RepoIndex:
                 f"(repos_register as a tool), or check the name with `qctx repos list`.")
         files = chunks = 0
         skipped: list = []
+        # WHAT THE ARCHIVE ALREADY HOLDS, read ONCE for the whole batch. Resuming is the
+        # reason: cancelling a big `add-all` is only safe because starting it again is cheap,
+        # and the spec says so in those words — "retomar é barato: um novo trabalho pula os
+        # arquivos cujo digest não mudou, comparação que refresh já implementa". It did not
+        # skip anything; every path was re-embedded, so resuming an interrupted `add-all` of
+        # 1,800 files paid for all 1,800 again, against the one endpoint every repo shares.
+        # `docs/usage.md` makes the same promise to the user.
+        #
+        # ONE SCROLL, NOT ONE PER FILE: `_indexed_sources` filters by `repo` server-side, and
+        # hoisting it here keeps the cost independent of how many paths were handed in.
+        #
+        # AND NOT EVEN ONE when the repo has nothing indexed yet, which is the whole `add-all`
+        # of a fresh repository — the common case, and the one where a scroll could only ever
+        # come back empty. The registry entry already records the count, so the question "is
+        # there anything to compare against" is answered from a row this method has in hand.
+        entry = self.get_repo(repo) or {}
+        known = (self._indexed_sources(repo)
+                 if paths and (entry.get("chunks") or entry.get("files")) else {})
         for path in paths:
+            md = known.get(os.path.abspath(path))
+            if md and not source_changed(path, md.get("src_mtime"), md.get("src_size"),
+                                         md.get("src_digest")):
+                # UNCHANGED IS STILL A FILE THIS REPO HOLDS, so it counts. Reporting it as
+                # skipped would put it in the caller's `skipped` list, and `indexer.work`
+                # feeds that list to the quarantine — "already indexed" would be recorded as
+                # a reason this file cannot be indexed, which is the inversion the quarantine
+                # work exists to prevent.
+                files += 1
+                continue
             try:
                 added = self._write_one(repo, path)
             except infrastructure_errors():

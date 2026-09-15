@@ -76,6 +76,38 @@ class TestTheTwoCriteria(unittest.TestCase):
                 self.assertFalse(v.block, "a refuted window must allow, never block")
                 self.assertGreaterEqual(v.free, 0)
 
+    def test_a_read_that_costs_NOTHING_is_never_blocked(self):
+        """THE FAILURE THIS FEATURE IS NOT ALLOWED TO PRODUCE, and the 2026-08-16 amendment
+        says so in those words: "fail open inverted into fail closed ... the only failure
+        this feature cannot produce".
+
+        The amendment closed one road to it — a window guessed low, refuted by `used >=
+        window`. This is the other road, and it needs no wrong window at all: once a session
+        passes 80% of a CORRECT window, `after > window * 0.8` is already true before the
+        file is even weighed, so the floor fires on a cost of zero. Measured at 810k of a
+        real 1M window: a 15-byte file, a 246-byte file and an EMPTY file were all denied,
+        each told it would cost "0% of the 190,000 you have left" and advised to index it.
+
+        The guard exists to stop a read that costs too much. A read that costs nothing
+        cannot cost too much, whatever the session has already spent."""
+        b = Budget(window=1_000_000, used=810_000, exact=True)
+        self.assertLess(b.used, b.window, "the window must NOT be refuted here")
+        self.assertGreater(b.used, b.window * 0.8, "precondition: past the floor already")
+
+        for size, label in ((0, "an empty file"), (15, "a 15-byte file"),
+                            (246, "a 246-byte file")):
+            with self.subTest(file=label):
+                v = bigfile.decide(a_file(size), b)
+                self.assertFalse(v.block, f"{label} was denied for costing too much")
+
+    def test_the_floor_still_blocks_a_read_that_DOES_cost(self):
+        """The other direction, so the fix cannot be "never block". Same session, same
+        window; only the file's weight changes."""
+        b = Budget(window=1_000_000, used=810_000, exact=True)
+
+        self.assertTrue(bigfile.decide(a_file(4 * 20_000), b).block,
+                        "a 20k-token read past the floor must still be refused")
+
     def test_the_floor_blocks_alone_with_the_window_intact(self):
         """THE ISOLATOR for the final-remainder floor, and it has to be its own fixture.
 
