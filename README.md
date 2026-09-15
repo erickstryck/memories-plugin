@@ -283,7 +283,9 @@ qctx setup
 ```
 
 Precedence is **environment variable > file > default**; the file lives at
-`~/.config/memories-plugin/config.json`. `qctx setup` is the one command to run when
+`$XDG_CONFIG_HOME/memories-plugin/config.json`, which is
+`~/.config/memories-plugin/config.json` unless `XDG_CONFIG_HOME` is set. `QCTX_CONFIG`
+overrides both. `qctx setup` is the one command to run when
 something is wrong: it probes the three endpoints and the collections, and prints the
 exact command that fixes each gap.
 

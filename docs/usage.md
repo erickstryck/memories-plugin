@@ -195,7 +195,9 @@ diagnose-only mode; `--json` returns the full picture for consumption by a progr
 ### Precedence, and where each thing lives
 
 **Environment variable > file > default.** The file lives at
-`~/.config/memories-plugin/config.json`.
+`$XDG_CONFIG_HOME/memories-plugin/config.json`, which is
+`~/.config/memories-plugin/config.json` unless `XDG_CONFIG_HOME` is set, and `QCTX_CONFIG`
+overrides both. `qctx config set` prints the path it wrote to, so the answer is never a guess.
 
 ```bash
 qctx collections list           # what exists in Qdrant, with dimensions
@@ -246,7 +248,9 @@ Two habits hide this, and both were measured on a working machine:
   **file** for exactly this reason.
 - **`qctx config show` MIXES the file and the environment.** It prints a complete-looking
   picture while the file holds empty strings. To see what a shell-less process would read, read
-  the file: `cat ~/.config/memories-plugin/config.json`.
+  the file, and read the one the code actually writes:
+  `${XDG_CONFIG_HOME:-$HOME/.config}/memories-plugin/config.json`:
+  `cat "${QCTX_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/memories-plugin/config.json}"`.
 
 So, for hermes specifically, the two keys need a second home, the one hermes itself loads:
 

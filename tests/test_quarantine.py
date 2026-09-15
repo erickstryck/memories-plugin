@@ -74,6 +74,55 @@ class TestChangedContentIsRetried(unittest.TestCase):
     def setUp(self):
         a_state_dir()
 
+    def test_a_touch_that_does_NOT_change_the_content_keeps_the_file_held(self):
+        """The module's own first claim — "IT REMEMBERS A CONTENT, NOT A PATH" — and the
+        promise `docs/usage.md` makes to the user: the record is keyed by the file's content.
+
+        It was keyed by `(mtime, size)`, which is metadata, and that is wrong in BOTH
+        directions. A `touch`, a `git checkout` that rewrites mtimes, a `cp -p` restore — any
+        of them released a file whose content never changed, putting it straight back into the
+        loop the quarantine exists to break.
+
+        The digest costs what it is worth here: `held` stats only the files already HELD, not
+        the repository. Measured on the 22-file case that motivated this feature, at 200 KB
+        each: 0.02 ms to stat them, 2.08 ms to hash them, against the watcher's 16 ms cycle."""
+        path = a_file("x = 1  # original\n")
+        quarantine.record("alpha", path, "nothing indexable")
+        self.assertIn(path, quarantine.held("alpha"), "precondition: the file is held")
+
+        st = os.stat(path)
+        os.utime(path, (st.st_atime, st.st_mtime + 5))
+
+        self.assertIn(path, quarantine.held("alpha"),
+                      "a touch released a file whose content is identical")
+
+    def test_an_edit_that_PRESERVES_mtime_and_size_releases_the_file(self):
+        """The other direction, and the one a human hits: fixing a file in place — an editor
+        that restores the mtime, a same-length correction — left it held forever."""
+        path = a_file("x = 1  # original\n")
+        quarantine.record("alpha", path, "nothing indexable")
+        st = os.stat(path)
+
+        with open(path, "w") as fh:
+            fh.write("x = 2  # changed!\n")          # same length, on purpose
+        os.utime(path, (st.st_atime, st.st_mtime))
+        self.assertEqual(os.stat(path).st_size, st.st_size, "fixture: size must match")
+
+        self.assertNotIn(path, quarantine.held("alpha"),
+                         "an edited file stayed held because its metadata was unchanged")
+
+    def test_an_entry_from_BEFORE_the_digest_still_works(self):
+        """Records written by the previous version carry no digest. They must keep behaving,
+        not be released in a batch the first time the new code reads them."""
+        path = a_file("x = 1\n")
+        quarantine.record("alpha", path, "nothing indexable")
+        entry = quarantine.load("alpha")
+        entry[path].pop("digest", None)
+        quarantine._write("alpha", entry)
+
+        self.assertIn(path, quarantine.held("alpha"),
+                      "an old record was dropped instead of falling back to metadata")
+
     def test_a_file_whose_size_changed_is_no_longer_held(self):
         path = a_file("")
         quarantine.record("alpha", path, "nothing indexable")

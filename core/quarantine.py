@@ -19,6 +19,7 @@ format — must not require a change here.
 SAME IDIOM AS `jobs.py` AND `lease.py`: a JSON file per repository, written atomically, with
 OSError tolerated. There is no protocol between processes; the daemon writes, the CLI reads.
 """
+import hashlib
 import json
 import os
 import time
@@ -67,6 +68,33 @@ def load(repo: str) -> dict:
             if path != _REPO_KEY and isinstance(meta, dict)}
 
 
+def _digest(path: str) -> str | None:
+    """SHA-1 of the file's bytes, or None when it cannot be read.
+
+    WHY A HASH AND NOT JUST (mtime, size). This module's first paragraph promises a record
+    keyed by CONTENT, and `docs/usage.md` repeats it to the user. Metadata is not content, and
+    it was wrong in both directions: a `touch`, a `git checkout` that rewrites mtimes or a
+    `cp -p` restore released a file whose bytes never changed — back into the very loop this
+    module exists to break — while an in-place fix that preserved length and mtime left the
+    repaired file held forever, with no command the user was told to run.
+
+    IT IS AFFORDABLE HERE, which is why `repos._changed_paths` may NOT do the same thing. That
+    one stats every TRACKED file every ~5 s; this one reads only the files already HELD, and a
+    quarantine large enough for the hash to matter is a repository with a bigger problem.
+    Measured on the 22-file case that motivated the feature, at 200 KB each: 0.02 ms to stat
+    them against 2.08 ms to hash them, inside a 16 ms cycle budget.
+    """
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(65536), b""):
+                h.update(block)
+
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
 def record(repo: str, path: str, reason: str) -> None:
     """Remembers that `path` could not be indexed, with the content it had when it failed.
 
@@ -80,7 +108,7 @@ def record(repo: str, path: str, reason: str) -> None:
         return
     entry = load(repo)
     entry[str(path)] = {"reason": str(reason), "mtime": st.st_mtime, "size": st.st_size,
-                        "at": time.time()}
+                        "digest": _digest(path), "at": time.time()}
     _write(repo, entry)
 
 
@@ -101,6 +129,28 @@ def held(repo: str) -> set:
             changed = True
             continue
         if st.st_mtime == meta.get("mtime") and st.st_size == meta.get("size"):
+            # METADATA AGREES, BUT IT IS NOT THE PROMISE. An in-place fix that preserves both
+            # — an editor that restores the mtime, a same-length correction — left the
+            # repaired file held forever, and nothing told the user a command existed. When a
+            # digest was recorded it decides; without one, metadata is all there is.
+            recorded = meta.get("digest")
+            if not recorded or recorded == _digest(path):
+                still.add(path)
+                continue
+            del entry[path]
+            changed = True
+            continue
+        # THE DIGEST OVERRULES THE METADATA, in the one direction metadata can be wrong about
+        # content: mtime or size moved, but the bytes did not. A `touch`, a `git checkout` that
+        # rewrites mtimes, a `cp -p` restore — each of those released a file that had not
+        # changed at all, putting it back into the loop this module exists to break.
+        #
+        # ONLY WHEN A DIGEST WAS RECORDED. Entries written before this existed carry none, and
+        # for them the metadata comparison above stays the whole answer — releasing every old
+        # record in a batch the first time the new code runs would re-queue exactly the files
+        # the quarantine was holding.
+        recorded = meta.get("digest")
+        if recorded and recorded == _digest(path):
             still.add(path)
             continue
         del entry[path]

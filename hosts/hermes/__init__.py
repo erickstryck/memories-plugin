@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import core  # noqa: E402
-from core import blocks, names, query, session_state  # noqa: E402
+from core import blocks, knobs, names, query, session_state  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE, INSTRUCTIONS  # noqa: E402
 
@@ -109,6 +109,18 @@ def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
 
 
 
+
+
+#: State files that belong to the MACHINE, not to a hermes profile or a session — so they
+#: live where the claude-code hook also looks, and the two hosts read one file.
+#:
+#: Only the breaker qualifies today, and the test is not "is it small" but "whose fact is
+#: it". A breaker records that ONE endpoint is saturated, and there is one GPU behind it:
+#: scoping that to a profile means a saturation claude-code already backed off from costs
+#: hermes the full rerank timeout on every prompt for the rest of the outage. Recall state
+#: and the checkpoint counter are the opposite — they are per session, and `initialize`'s
+#: contract puts profile-scoped storage under `hermes_home` for exactly that reason.
+SHARED_STATE = frozenset({"rerank-breaker", "index-breaker"})
 
 
 class MemoriesProvider(_Base):
@@ -565,11 +577,22 @@ class MemoriesProvider(_Base):
           `lease`, `jobs`, `quarantine`, `windowcache`, `daemon` and `bindings` but not this —
           a half-working knob is worse than no knob, because it looks like it worked.
 
-        With the variable unset the behaviour is unchanged: `hermes_home` when hermes gave us
-        one, the plugin's own directory otherwise.
+        With the variable unset the SHARED files still land in the plugin's own directory and
+        the per-session ones stay under `hermes_home`. That split is the point: recall state
+        is per session and two hermes profiles must not read each other's, which is the
+        contract `initialize` documents. A breaker is neither per session nor per profile — it
+        is a fact about one endpoint that every session on this machine shares, so scoping it
+        to a profile reintroduces the exact outage this method's first paragraph describes.
+        Measured with the knob unset: `$HERMES_HOME/memories-state/rerank-breaker` against the
+        hook's `~/.memories-plugin/state/rerank-breaker` — two files, one GPU.
         """
         explicit = os.environ.get("QCTX_STATE_DIR")
-        base = Path(explicit) if explicit else getattr(self, "_state_dir", None)
+        if explicit:
+            base = Path(explicit)
+        elif name in SHARED_STATE:
+            base = knobs.state_dir()
+        else:
+            base = getattr(self, "_state_dir", None)
         if base is None:
             base = Path.home() / ".memories-plugin" / "state"
             self._state_dir = base

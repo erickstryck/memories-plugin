@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -2395,6 +2396,61 @@ class TestTheINDICATORCannotDescribeAnEarlierTurn(unittest.TestCase):
             self.assertIn("UNAVAILABLE", block, "precondition: this turn failed")
             self.assertEqual(p._last_count, 0,
                              "the indicator still carried the previous turn's count")
+
+
+class TestTheBREAKERIsSharedEvenWithoutTheKnob(unittest.TestCase):
+    """The shared-breaker fix closed only half the case, and the docstring that argues for it
+    proves the other half: "there is only one GPU", so what one host learned about a saturated
+    re-ranker holds for the other. That is not a claim about `QCTX_STATE_DIR` being set.
+
+    With the variable unset — the DEFAULT, and what README:133-136 describes — hermes keeps
+    its state under `$HERMES_HOME/memories-state` while the claude-code hook reads
+    `~/.memories-plugin/state`. Measured: two different `rerank-breaker` paths, so a saturation
+    claude-code already backed off from costs hermes the full rerank timeout on every prompt
+    for the rest of the outage.
+
+    THE SPLIT IS NOT ARBITRARY, and the fix must not flatten it. `initialize`'s own comment
+    says profile-scoped storage belongs under `hermes_home`, which is right for RECALL STATE:
+    it is per session, and two hermes profiles should not read each other's. A breaker is not
+    per session and not per profile — it is a fact about one endpoint that every session on
+    this machine shares."""
+
+    def _hermes_provider(self, home, hermes_home):
+        from hosts.hermes import MemoriesProvider
+
+        p = MemoriesProvider()
+        p._state_dir = Path(hermes_home) / "memories-state"
+
+        return p
+
+    def test_both_hosts_read_ONE_breaker_file_by_default(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.environ.pop("QCTX_STATE_DIR", None)
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 mock.patch.object(Path, "home", staticmethod(lambda: Path(home))):
+                from core import knobs
+
+                hermes = self._hermes_provider(home, os.path.join(home, ".hermes"))
+                hermes_breaker = hermes._state_path("rerank-breaker")
+                claude_breaker = knobs.state_dir() / "rerank-breaker"
+
+                self.assertEqual(str(hermes_breaker), str(claude_breaker),
+                                 "a saturation one host backed off from is invisible to the "
+                                 "other")
+
+    def test_the_PER_SESSION_state_still_honours_the_profile(self):
+        """The other direction: flattening everything into one directory would break the
+        contract `initialize` documents — two hermes profiles must not share recall state."""
+        with tempfile.TemporaryDirectory() as home:
+            os.environ.pop("QCTX_STATE_DIR", None)
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 mock.patch.object(Path, "home", staticmethod(lambda: Path(home))):
+                a = self._hermes_provider(home, os.path.join(home, ".hermes"))
+                b = self._hermes_provider(home, os.path.join(home, ".hermes-other"))
+
+                self.assertNotEqual(str(a._state_path("recall-s.json")),
+                                    str(b._state_path("recall-s.json")),
+                                    "two profiles share per-session state")
 
 
 class TestTheBREAKERIsSharedBetweenHosts(unittest.TestCase):
