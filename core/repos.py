@@ -30,8 +30,7 @@ from . import ports
 from .chunk import chunk_text, mode_for_suffix
 from .docs import (GONE, MTIME_TOLERANCE, _iso, _point_id, _read_source, content_digest,
                     doc_id_for, source_changed)
-from .errors import CoreError, infrastructure_errors
-from .qdrant import QdrantError, _is_absent
+from .errors import CoreError, infrastructure_errors, means_absent
 
 
 class RepoError(CoreError):
@@ -396,11 +395,20 @@ class RepoIndex:
         """
         try:
             rows = [p.get("payload") or {} for p in self.q.scroll_all(self.registry_name)]
-        except QdrantError as exc:
-            if _is_absent(exc):
+        except Exception as exc:                      # noqa: BLE001 — re-raised below
+            # BY STATUS AND NOT BY THE VENDOR'S CLASS. This file used to catch `QdrantError`
+            # and ask the adapter's own `_is_absent`, which contradicts what `ports.py`
+            # promises — that swapping the store is writing an adapter, with no rule file
+            # changes. Measured with a second conformant adapter: a fresh install, where both
+            # collections are absent until first use, answered "the repository registry could
+            # not be read" instead of an empty list. Anything that is NOT absence is re-raised
+            # unchanged, so a 502 is still a failure and a bug here is still a traceback.
+            if means_absent(exc):
                 # Nothing has ever been registered. That is an empty list, not a broken
                 # registry — and saying otherwise makes a fresh install look damaged.
                 return []
+            if not isinstance(exc, infrastructure_errors()):
+                raise
             raise RepoError(f"the repository registry could not be read: {exc}") from exc
         except Exception as exc:                       # noqa: BLE001
             raise RepoError(f"the repository registry could not be read: {exc}") from exc
@@ -927,8 +935,9 @@ class RepoIndex:
                 # "size unknown" on exactly the servers that lack the facet index — the older
                 # ones, where a useful answer matters most.
                 counts[name] = (counts.get(name) or 0) + 1
-        except QdrantError as exc:
-            if _is_absent(exc):
+        except Exception as exc:                      # noqa: BLE001 — re-raised below
+            # As in `list_repos`: absence is a STATUS, not a vendor's exception class.
+            if means_absent(exc):
                 return {}
             raise
 

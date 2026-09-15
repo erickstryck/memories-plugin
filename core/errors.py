@@ -41,3 +41,27 @@ def infrastructure_errors() -> tuple:
     from .reranking import RerankError
 
     return (EmbeddingError, HttpError, QdrantError, RerankError)
+
+
+def means_absent(exc: Exception) -> bool:
+    """Whether a store error means "it is not there", for a caller that must not know WHICH
+    store raised it.
+
+    BY STATUS, NEVER BY MESSAGE — the same rule `core/qdrant.py::_is_absent` documents and for
+    the reason measured there: this archive sits behind a reverse proxy, and proxies echo
+    upstream statuses into their own bodies, so a 502 reading "upstream error: backend returned
+    HTTP 404" was taken for "the collection does not exist". Deciding by substring breaks the
+    day the message changes, and here it broke without anything changing at all.
+
+    WHY IT LIVES HERE AND NOT IN THE ADAPTER. `core/repos.py` imported `QdrantError` and
+    `_is_absent` from the adapter to answer this, which contradicts what `ports.py` promises in
+    its own words — that swapping the store "is writing an adapter, no rule file changes".
+    Measured with a second conformant adapter raising its own error type: a fresh install, where
+    both collections are absent until first use, reported "the repository registry could not be
+    read" instead of an empty list. This module already exists to name error FAMILIES without a
+    rule file naming a vendor (`infrastructure_errors` above); absence is one more family.
+
+    Any exception may be passed. One with no status is not absence — an error that cannot say
+    what it was is not evidence that something is missing.
+    """
+    return getattr(exc, "status", None) == 404
