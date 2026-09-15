@@ -28,6 +28,13 @@ from . import names
 from .knobs import state_dir
 
 
+#: The key under which a record file names its own repository. Prefixed so it can never
+#: collide with a path: every real key is an absolute path, and `names.safe` is lossy, so the
+#: FILENAME cannot be reversed into the name. Without this, a held file was invisible in
+#: `repos status` for any repository that had no job row — see `repos_on_record`.
+_REPO_KEY = "//repo"
+
+
 def dir() -> Path:                                  # noqa: A001 — the name says what it holds
     return state_dir() / "quarantine"
 
@@ -52,7 +59,12 @@ def load(repo: str) -> dict:
     # silently and permanently. `repos status` raised on the same entry, so the one command
     # that could have diagnosed it was the one that died. Dropping the bad entry degrades to
     # "retry that file", which is this module's safe direction.
-    return {path: meta for path, meta in found.items() if isinstance(meta, dict)}
+    #
+    # `_REPO_KEY` is filtered out here so no caller ever sees the bookkeeping as a path: the
+    # readers iterate this mapping expecting one entry per FILE, and a stray key would be
+    # stat'ed, displayed and released like one.
+    return {path: meta for path, meta in found.items()
+            if path != _REPO_KEY and isinstance(meta, dict)}
 
 
 def record(repo: str, path: str, reason: str) -> None:
@@ -102,13 +114,67 @@ def held(repo: str) -> set:
 def clear(repo: str, paths) -> None:
     """Forgets `paths`. Clearing something never held is not an error — the caller indexes a
     batch and releases all of it, without having to know which members had failed before."""
+    forget(repo, paths)
+
+
+def forget(repo: str, paths=None) -> int:
+    """Drops records on purpose, returning HOW MANY were dropped. `paths=None` drops them all.
+
+    WHY A DELIBERATE RELEASE EXISTS AT ALL, when `held` already releases on a content change.
+    That covers the file that was repaired; it cannot cover the file that was always fine and
+    whose REASON went away — a server limit that was raised, a model that was swapped, an
+    endpoint that was fixed. The content never changes in those cases, so nothing would ever
+    let go, and the user would be left reading a `status` line with no way to act on it.
+
+    IT RETURNS A COUNT BECAUSE THE CALLER HAS TO BE ABLE TO SAY WHAT HAPPENED. A command that
+    prints "released" after releasing nothing is the class of small lie this project refuses
+    everywhere else; `0` lets the caller say "there was nothing to release" instead.
+
+    FORGETTING IS NOT AN EXEMPTION. It drops the record, and the next attempt decides afresh —
+    a file that still cannot be indexed is simply held again. An allow-list would be a second
+    policy living beside this one, and nobody asked for it.
+    """
     entry = load(repo)
-    removed = False
-    for path in paths:
-        if entry.pop(str(path), None) is not None:
-            removed = True
-    if removed:
+    if not entry:
+        return 0
+    if paths is None:
+        released = len(entry)
+        entry = {}
+    else:
+        wanted = {str(p) for p in paths}
+        kept = {path: meta for path, meta in entry.items() if path not in wanted}
+        released = len(entry) - len(kept)
+        entry = kept
+    if released:
         _write(repo, entry)
+
+    return released
+
+
+def repos_on_record() -> list:
+    """Every repository that HAS a quarantine file, by name.
+
+    The caller cannot derive this itself: `names.safe` is lossy, so the filename does not
+    reverse into a repository name. Reading the name back out of the record is what lets
+    `repos status` show a held file for a SETTLED repository — one whose daemon has had
+    nothing to do lately and therefore has no job row. That is exactly the repository whose
+    files have been held longest, and it was the one place the count was invisible.
+    """
+    try:
+        paths = sorted(dir().glob("*.json"))
+    except OSError:
+        return []
+    found = []
+    for path in paths:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        name = entry.get(_REPO_KEY) if isinstance(entry, dict) else None
+        if name:
+            found.append(name)
+
+    return found
 
 
 def _path(repo: str) -> Path:
@@ -117,12 +183,23 @@ def _path(repo: str) -> Path:
 
 def _write(repo: str, entry: dict) -> bool:
     """Writes atomically, the way `jobs._write` does. False on failure, never raises: state
-    that cannot be written is state the reader will not find, which every caller handles."""
+    that cannot be written is state the reader will not find, which every caller handles.
+
+    Stamps `_REPO_KEY` so the file can name its own repository — `load` filters it back out,
+    so this is invisible to every reader. An EMPTY record is deleted rather than written as
+    an empty object: a file that holds nothing should not make `repos_on_record` name a
+    repository with nothing held.
+    """
     try:
         dir().mkdir(parents=True, exist_ok=True)
         path = _path(repo)
+        if not entry:
+            path.unlink(missing_ok=True)
+
+            return True
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(entry, indent=1, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps({_REPO_KEY: repo, **entry}, indent=1, sort_keys=True),
+                       encoding="utf-8")
         os.replace(tmp, path)
 
         return True

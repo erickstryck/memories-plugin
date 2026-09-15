@@ -49,6 +49,7 @@ the CLI name is on the left, the hermes tool name on the right.
 | `repos add-all` | *(CLI only)* | index the whole repository, in the background |
 | `repos status` | *(CLI only)* | what is indexing, whether the daemon is up, and what is held in quarantine |
 | `repos cancel` | *(CLI only)* | stop indexing; what is already indexed stays |
+| `repos quarantine clear` | *(CLI only)* | release files held as unindexable, so the daemon retries them |
 | `repos daemon` | *(CLI only)* | start, stop, or run the background indexer |
 | `repos drop` | `repos_drop` | delete a repository archive, permanently |
 
@@ -84,6 +85,19 @@ a quarantine and `repos status` names it with the reason:
 path, so editing it (or filling in a file that was empty) puts it back in the queue with no
 command to run. An outage is deliberately *not* held: an unreachable endpoint fails the whole job
 and is retried, because that is a fact about the minute, not about the file.
+
+**When the reason went away instead of the file**, release it by hand. A server limit that was
+raised, a model that was swapped, an endpoint that was fixed: nothing about the file changed, so
+nothing would ever let go of it on its own.
+
+```bash
+qctx repos quarantine clear my-project                 # release every held file
+qctx repos quarantine clear my-project /path/to/one.json  # or just these
+```
+
+It answers with how many it released, and `nothing held for 'my-project'` when there was nothing
+to do, so a mistyped name does not read as success. Releasing is not an exemption: the next
+attempt decides afresh, and a file that still cannot be indexed is simply held again.
 
 ### Configuration and diagnostics: CLI only
 

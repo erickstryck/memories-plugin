@@ -170,5 +170,50 @@ class TestItDependsOnNothingHeavy(unittest.TestCase):
         self.assertNotIn("import core", source)
 
 
+class TestForgettingOnPurpose(unittest.TestCase):
+    """The automatic release covers a file whose CONTENT changed. It cannot cover a file the
+    user knows is fine but the archive refused for a reason that has since gone away — a
+    server limit that was raised, a model that was swapped. `clear` already served the
+    indexer; `forget` is the same operation offered deliberately, to a person."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_forgetting_one_path_releases_only_that_one(self):
+        kept, released = a_file(), a_file()
+        quarantine.record("alpha", kept, "nothing indexable")
+        quarantine.record("alpha", released, "HTTP 500: too large")
+        self.assertEqual(quarantine.forget("alpha", [released]), 1)
+        self.assertEqual(quarantine.held("alpha"), {kept})
+
+    def test_forgetting_the_whole_repo_releases_everything(self):
+        for _ in range(3):
+            quarantine.record("alpha", a_file(), "nothing indexable")
+        self.assertEqual(quarantine.forget("alpha"), 3)
+        self.assertEqual(quarantine.load("alpha"), {})
+
+    def test_it_reports_how_many_it_released_so_the_caller_can_say_so(self):
+        """The count is the answer to "did that do anything?" — a command that prints
+        "released" after releasing nothing is the kind of lie this project refuses."""
+        self.assertEqual(quarantine.forget("never-seen"), 0)
+        self.assertEqual(quarantine.forget("alpha", ["/not/held.py"]), 0)
+
+    def test_forgetting_a_repo_leaves_another_alone(self):
+        mine, theirs = a_file(), a_file()
+        quarantine.record("alpha", mine, "r")
+        quarantine.record("beta", theirs, "r")
+        quarantine.forget("alpha")
+        self.assertEqual(quarantine.held("beta"), {theirs})
+
+    def test_a_forgotten_file_can_be_held_again_if_it_fails_again(self):
+        """Forgetting is not an exemption: it drops the record, and the next attempt decides
+        afresh. A permanent allow-list would be a second policy nobody asked for."""
+        path = a_file()
+        quarantine.record("alpha", path, "nothing indexable")
+        quarantine.forget("alpha", [path])
+        quarantine.record("alpha", path, "nothing indexable")
+        self.assertIn(path, quarantine.held("alpha"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

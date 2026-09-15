@@ -1488,8 +1488,14 @@ def cmd_repos_status(args, cfg):
     # Read before the early `return`, so the JSON form and the printed one carry the same
     # facts. `load` and not `held`: the user is being shown what is on record, and re-stat'ing
     # every path to render a status would make reading it a side effect.
+    #
+    # The repo names come from the UNION of the job rows and the quarantine's own records. A
+    # job file is per-repo and replaced, so a settled repository may have none — and that is
+    # precisely the repository whose files have been held longest. Deriving the list from
+    # `jobs.all_jobs()` alone hid exactly that case.
+    named = {j["repo"] for j in rows} | set(quarantine.repos_on_record())
     held = {repo: entries for repo, entries in
-            ((j["repo"], quarantine.load(j["repo"])) for j in rows) if entries}
+            ((r, quarantine.load(r)) for r in sorted(named)) if entries}
     if args.json:
         output({"daemon": running, "jobs": rows, "leases": lease.live(),
                 "quarantine": held}, True)
@@ -1499,9 +1505,10 @@ def cmd_repos_status(args, cfg):
     # a reader who does not know that reads stalled progress as activity.
     print(f"daemon: {'running (pid %d)' % running['pid'] if running else 'not running'}")
     if not rows:
+        # NOT AN EARLY RETURN ANY MORE. "No jobs" and "nothing held" are different facts, and
+        # a settled repository has the first without the second — which is the state where a
+        # held file has been held longest.
         print("no indexing jobs")
-
-        return
     for job in rows:
         pct = f"{100 * job['done'] // job['total']}%" if job.get("total") else "—"
         line = f"  {job['repo']:<24} {job['state']:<10} {job['done']}/{job['total']} {pct}"
@@ -1529,6 +1536,30 @@ def cmd_repos_cancel(args, cfg):
         print(f"cancel requested for {args.repo!r} — what is already indexed stays")
     else:
         print(f"no job for {args.repo!r}")
+
+
+def cmd_repos_quarantine_clear(args, cfg):
+    """Releases files held as unindexable, so the daemon will try them again.
+
+    WHY THIS IS A COMMAND AND NOT ONLY AUTOMATIC. `quarantine.held` releases a file whose
+    CONTENT changed, which is the common repair. It cannot release a file that was always
+    fine and whose REASON went away — a server limit raised, a model swapped, a limit
+    lifted. Nothing about that file changes, so nothing would ever let go of it, and the
+    user would read `repos status` with no way to act on what it says.
+    """
+    from core import quarantine
+
+    paths = list(getattr(args, "path", None) or [])
+    released = quarantine.forget(args.repo, paths or None)
+    if not released:
+        # Said plainly, because "released 0" reads as success at a glance and the user needs
+        # to tell "done" from "there was nothing to do" — usually a mistyped repo name.
+        print(f"nothing held for {args.repo!r}"
+              + (" matching those paths" if paths else ""))
+
+        return
+    what = f"{released} file(s)"
+    print(f"released {what} for {args.repo!r} — the daemon retries them on its next cycle")
 
 
 def cmd_repos_daemon(args, cfg):
@@ -1744,6 +1775,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = repsub.add_parser("daemon", help="the background indexer")
     p.add_argument("action", choices=["start", "stop", "run"])
     p.set_defaults(fn=cmd_repos_daemon)
+
+    # Under `repos quarantine` rather than a bare `repos release`, so the noun the user
+    # reads in `repos status` is the noun they type. `path` is variadic and optional: no
+    # path means the whole repository, which is the common case after fixing whatever the
+    # reason was.
+    quar = repsub.add_parser("quarantine", help="files held as unindexable")
+    quarsub = quar.add_subparsers(dest="quarantine_cmd", required=True)
+    p = quarsub.add_parser("clear", help="release held files so the daemon retries them")
+    p.add_argument("repo")
+    p.add_argument("path", nargs="*", help="specific paths (default: the whole repository)")
+    p.set_defaults(fn=cmd_repos_quarantine_clear)
 
     p = repsub.add_parser("drop", help="delete a repository archive, permanently")
     p.add_argument("repo")

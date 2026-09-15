@@ -565,6 +565,64 @@ class TestStatusShowsWhatIsQuarantined(CLICase):
         self.assertNotIn("unindexable", text,
                          "an empty quarantine must not add noise to every status")
 
+    def test_a_quarantine_is_visible_even_with_no_job_for_that_repo(self):
+        """Job files are per-repo and replaced, so a settled repository whose daemon has had
+        nothing to do for a while may have none. That is precisely the state where a held file
+        has been held longest, and it was the state where `status` hid it: the count was built
+        from `jobs.all_jobs()`, so the repo had to be mid-work to be shown at all."""
+        from core import quarantine
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        quarantine.record("settled", path, "nothing indexable")
+        text = self.rendered(self.cli.cmd_repos_status)
+        self.assertIn("settled", text, "a held file was invisible because the repo had no job")
+        self.assertIn(path, text)
+
+
+class TestReleasingAHeldFileByHand(CLICase):
+    """`held` releases a file whose CONTENT changed. The reason that goes away on its own —
+    a raised server limit, a swapped model — leaves the content untouched, so without a
+    deliberate command the user reads `status` with no way to act on it."""
+
+    def _held(self, repo="alpha", reason="nothing indexable"):
+        from core import quarantine
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        quarantine.record(repo, path, reason)
+
+        return path
+
+    def test_releasing_one_path_releases_only_that_one(self):
+        from core import quarantine
+
+        kept, released = self._held(), self._held()
+        text = self.rendered(self.cli.cmd_repos_quarantine_clear, repo="alpha",
+                             path=[released])
+        self.assertIn("1", text)
+        self.assertEqual(quarantine.held("alpha"), {kept})
+
+    def test_releasing_the_whole_repo_says_how_many(self):
+        from core import quarantine
+
+        self._held(); self._held(); self._held()
+        text = self.rendered(self.cli.cmd_repos_quarantine_clear, repo="alpha", path=[])
+        self.assertIn("3", text)
+        self.assertEqual(quarantine.load("alpha"), {})
+
+    def test_releasing_nothing_SAYS_it_released_nothing(self):
+        """Printing "released" after releasing nothing is the class of small lie this project
+        refuses; the user must be able to tell "done" from "there was nothing there"."""
+        text = self.rendered(self.cli.cmd_repos_quarantine_clear, repo="empty", path=[])
+        self.assertIn("nothing", text.lower())
+
+    def test_it_names_the_daemon_consequence_so_the_user_knows_what_happens_next(self):
+        self._held()
+        text = self.rendered(self.cli.cmd_repos_quarantine_clear, repo="alpha", path=[])
+        self.assertIn("retr", text.lower(),
+                      "the user is not told the file will be tried again")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

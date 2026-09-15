@@ -1035,9 +1035,16 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: finds, and writes nothing — see its "writes nothing" test in test_hermes_tools.py.
     #: It ANSWERS rather than acts, same as `repos_search`, so it IS a tool; only its
     #: neighbour `repos_add_all`, which queues the real work, is withheld.
+    #: `repos_quarantine_clear` joins the acting four by the same argument: it discards the
+    #: indexer's record that a file cannot be indexed, over a whole repository by default, and
+    #: the next cycle then spends embedding calls retrying every one of them. Releasing a hold
+    #: is a decision about what the archive should spend its budget on, which belongs to the
+    #: person reading `repos status`, not to a model mid-conversation. Reading the holds is
+    #: not withheld — `repos status` already reports them, and it is withheld for its own
+    #: reason above.
     NOT_FOR_THE_MODEL = {"setup", "install", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_daemon", "repos_add_all", "repos_status",
-                         "repos_cancel"}
+                         "repos_cancel", "repos_quarantine_clear"}
 
     def setUp(self):
         from hosts.hermes import tools
