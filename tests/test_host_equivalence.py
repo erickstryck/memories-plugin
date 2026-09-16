@@ -2555,6 +2555,40 @@ class TestTheSHAREDDEFAULTSAreOneValue(unittest.TestCase):
     What makes name equality insufficient here is the same thing as in the knob readers: two
     surfaces can agree on what a setting is CALLED and disagree on what it is worth."""
 
+    #: The values as shipped, written down ONCE more, on purpose.
+    #:
+    #: Without this, every test in this class compares the parser against
+    #: `operations.FIND_LIMIT` — so editing the constant moves the expectation with it and
+    #: the class reports nothing. MEASURED: `FIND_LIMIT = 5` -> `9` in `core/operations.py`
+    #: left the whole suite green, while the same change made on the CLI side turned it red.
+    #: A guard that bites in one direction only is worse than none, because it is quoted as
+    #: proof that both are covered.
+    #:
+    #: These are user-visible defaults: how many memories `find` returns, how long an indexed
+    #: document lives. Changing one is a product decision, and this test is where that
+    #: decision gets recorded — it is SUPPOSED to fail, and the fix is to edit this table in
+    #: the same commit, not to delete the assertion.
+    AS_SHIPPED = {
+        "FIND_LIMIT": 5,
+        "MEMORY_LIST_LIMIT": 20,
+        "SEARCH_COLLECTIONS_LIMIT": 5,
+        "DOCS_TTL": "24h",
+        "DOCS_SEARCH_LIMIT": 5,
+        "REPOS_SEARCH_LIMIT": 8,
+    }
+
+    def test_the_shared_defaults_still_hold_the_values_they_ship_with(self):
+        """Pins the VALUE, not just where it is read from.
+
+        The other tests here prove the two surfaces agree with each other. Agreement is not
+        enough on its own: both sides read `core/operations.py`, so a change there keeps them
+        in perfect agreement on a number the user never asked for."""
+        for name, shipped in self.AS_SHIPPED.items():
+            self.assertEqual(
+                getattr(operations, name), shipped,
+                f"{name} is no longer {shipped!r}. If that is deliberate, change it here too "
+                f"and say so in the commit message — this is a user-visible default.")
+
     def test_the_cli_parser_takes_its_defaults_from_the_shared_table(self):
         import argparse
 

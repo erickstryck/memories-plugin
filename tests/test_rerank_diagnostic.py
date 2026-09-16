@@ -43,6 +43,24 @@ class _RerankServer(http.server.BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         sent = json.loads(raw)
         mode = type(self).mode
+        # A server that is reachable but REFUSES. This is the common real failure: the
+        # endpoint is up, the model named in the setting is not loaded on it.
+        if mode == "http_error":
+            body = json.dumps({"error": "model 'a-cross-encoder' not found"}).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if mode == "garbage":
+            body = b"<html>502 Bad Gateway</html>"
+            self.send_response(200)          # 200 carrying something that is not JSON
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         # The documents the caller sent, in order. `_check_rerank` sends the right answer
         # first, so "good" means index 0 wins and "wrong" means it does not.
         count = len(sent.get("documents") or [sent.get("text_2")])
@@ -151,6 +169,49 @@ class TestRankOrdersByScore(RerankCase):
         self.assertTrue(info["ok"], info.get("error"))
         self.assertEqual(pairs[0][0], 1, "it did not order by score")
         self.assertGreater(pairs[0][1], pairs[-1][1])
+
+
+class TestTheDiagnosticReportsAServerThatREFUSES(RerankCase):
+    """A re-rank server that is up but will not answer must be reported as not working.
+
+    THE HOLE THIS CLOSES, MEASURED: deleting `if not info["ok"]:` from `_check_rerank`, and
+    separately flipping its Check to `ok=True`, both left the entire suite green. Every
+    other test in this file drives the SUCCESS path, so the branch that handles failure was
+    never entered — `qctx setup --check` would have reported a dead re-ranker as healthy,
+    which is the exact opposite of what the command exists for.
+
+    This is the most likely real failure, not an exotic one: the endpoint is reachable and
+    the model named in the setting is simply not loaded on it."""
+
+    def test_a_server_that_answers_404_is_reported_as_failing(self):
+        check = _check_rerank(self.a_config(self.serving("http_error")))
+
+        self.assertFalse(check.ok, f"a refusing server was reported as working: {check.detail}")
+        self.assertIn("failed", check.detail.lower())
+
+    def test_the_failure_says_WHERE_it_failed(self):
+        """The URL has to be in the message: the setting is the thing most likely wrong."""
+        url = self.serving("http_error")
+        check = _check_rerank(self.a_config(url))
+
+        port = url.rsplit(":", 1)[1].split("/")[0]
+        self.assertIn(port, check.detail,
+                      f"the report does not say which endpoint failed: {check.detail!r}")
+
+    def test_a_failure_is_a_WARNING_not_a_blocker(self):
+        """Re-rank is optional, and `setup --check` says so. A missing re-ranker must not
+        make someone conclude the package is broken."""
+        check = _check_rerank(self.a_config(self.serving("http_error")))
+
+        self.assertTrue(check.warning,
+                        "an optional component's failure was raised to a blocker")
+
+    def test_a_server_answering_NON_JSON_is_reported_as_failing(self):
+        """200 carrying an HTML error page, which is what a proxy in front of a dead
+        backend returns. The status line says fine; the body is not a ranking."""
+        check = _check_rerank(self.a_config(self.serving("garbage")))
+
+        self.assertFalse(check.ok, f"a non-JSON answer was accepted: {check.detail}")
 
 
 if __name__ == "__main__":
