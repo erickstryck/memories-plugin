@@ -44,7 +44,20 @@ def write_json(path, payload, *, make_parents: bool = True) -> bool:
         if make_parents:
             target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(f"{target.suffix}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload, indent=1, sort_keys=True), encoding="utf-8")
+        # THE MODE IS SET HERE AND NOT LEFT TO THE UMASK. These files name pids and paths
+        # this user controls; `os.replace` carries the TEMPORARY's mode onto the target, so
+        # whatever the temporary was created with is what gets published.
+        #
+        # MEASURED, and it is why this is not cosmetic: `core/daemon.py::_claim` opens its
+        # claim 0o600, and the daemon's first `record()` came straight back through here and
+        # republished the same file 0o664 under the usual 0o002 umask. The careful mode on
+        # the claim lasted exactly until the first save. Creating the temporary with 0o600
+        # fixes every caller at once, which is the point of this module owning the write.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(payload, indent=1, sort_keys=True).encode("utf-8"))
+        finally:
+            os.close(fd)
         os.replace(tmp, target)
 
         return True

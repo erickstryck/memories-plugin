@@ -215,6 +215,28 @@ class TestTheClaimWorksWithoutHardLinks(unittest.TestCase):
 
         self.assertEqual(mode, 0o600, f"the claim is mode {oct(mode)}")
 
+    def test_it_is_STILL_private_after_the_daemon_saves(self):
+        """The mode has to survive the first `record()`, and it did not.
+
+        MEASURED ON THE RUNNING DAEMON, which is how this was found and not by reading code:
+        `~/.memories-plugin/state/daemon.json` was mode 0o664 on a machine whose umask is
+        0o002, while the test above passed. `_claim` opens the file 0o600, then the daemon
+        publishes through `statefile.write_json`, whose temporary was created by
+        `Path.write_text` -- umask, so 0o664 -- and `os.replace` carries the TEMPORARY's mode
+        onto the target. The careful mode on the claim lasted until the first save.
+
+        Pinning only the creation moment is what let that through, so this pins the file
+        AFTER the write the daemon actually performs."""
+        daemon._try_create()
+        daemon._write_record({"pid": os.getpid(), "started_at": 1.0, "starttime": "42"})
+
+        mode = os.stat(daemon.path()).st_mode & 0o777
+
+        self.assertEqual(
+            mode, 0o600,
+            f"the claim is mode {oct(mode)} after a save; the umask was applied by the "
+            f"publisher and overwrote the mode the claim was created with")
+
 
 class TestAClaimIsNotAValidCorpse(unittest.TestCase):
     """The window between creating the claim file and filling it must not read as a corpse.
