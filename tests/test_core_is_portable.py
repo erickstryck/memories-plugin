@@ -104,5 +104,49 @@ class TestCoreDependsOnNoHost(unittest.TestCase):
             self.assertEqual(imported_packages(documented) & FORBIDDEN, set())
 
 
+class TestNoHostImportsAnotherHost(unittest.TestCase):
+    """A host adapter may depend on `core/`, never on a sibling host.
+
+    THE DIRECTION GUARD ABOVE DOES NOT COVER THIS, and the gap had a measured cost. The
+    table of invokable operations lived in `hosts/hermes/tools.py` although nothing in it
+    was the hermes host's, so a third adapter had two ways to offer operations to a model
+    and both were wrong: copy ~700 lines that no equivalence test would cover, or import
+    the second host's package — which is worse than ugly, because that module's tuning
+    fallback resolved the OTHER host's provider class and read ITS environment-tuned recall
+    floors. A third host would have silently inherited the second host's retrieval policy,
+    which is the exact divergence `tests/test_host_equivalence.py` exists to prevent.
+
+    The table is in `core/operations.py` now, and this is what keeps it there."""
+
+    def test_each_host_package_imports_no_other_host(self):
+        hosts_dir = REPO / "hosts"
+        seen = 0
+        for path in sorted(hosts_dir.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            seen += 1
+            mine = path.relative_to(hosts_dir).parts[0]
+            for imported in imported_packages(path):
+                if imported != "hosts":
+                    continue
+                text = path.read_text(encoding="utf-8")
+                for other in (p.name for p in hosts_dir.iterdir() if p.is_dir()):
+                    if other == mine or other.startswith("__"):
+                        continue
+                    self.assertNotIn(f"hosts.{other}", text,
+                                     f"{path.relative_to(REPO)} imports the {other} host")
+        self.assertGreater(seen, 0, "the walk found no host modules, so it asserts nothing")
+
+    def test_the_guard_would_CATCH_a_host_importing_a_sibling(self):
+        """Without this the test above passes on a tree where no host imports anything."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            offender = Path(d) / "offender.py"
+            offender.write_text("from hosts.hermes import tools\n", encoding="utf-8")
+            self.assertIn("hosts", imported_packages(offender))
+            self.assertIn("hosts.hermes", offender.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
