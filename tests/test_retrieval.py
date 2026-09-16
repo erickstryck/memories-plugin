@@ -388,6 +388,38 @@ class TestFakeContract(unittest.TestCase):
             self.assertEqual(extra, set(),
                              f"the {label} fake invents {extra}, which no consumer can rely on")
 
+    def test_the_fakes_default_ceiling_IS_the_real_clients(self):
+        """A fake more generous than production hides the bug it exists to catch.
+
+        MEASURED BEFORE THIS WAS PINNED: `FakeReranker()` defaulted to `max_docs=None` and
+        judged all 30 documents it was handed, reporting `dropped=0`, where the real client
+        judges 12 and reports 18. Every caller that did not pass `max_docs` was therefore
+        exercising a pipeline in which truncation never happens — including the callers that
+        read the "judged N of M" note.
+        """
+        from core.reranking import Reranker
+
+        documents = [f"d{i}" for i in range(30)]
+        pairs, info = FakeReranker().rank("q", documents)
+        real_ceiling = Reranker("http://127.0.0.1:1/rerank", "m").max_docs
+
+        self.assertEqual(len(pairs), real_ceiling,
+                         f"the fake judged {len(pairs)} where the real client judges "
+                         f"{real_ceiling}")
+        self.assertEqual(info["dropped"], len(documents) - real_ceiling,
+                         "the fake under-reports what it never looked at")
+
+    def test_a_ceiling_of_ZERO_is_a_real_ceiling(self):
+        """`max_docs=0` must mean "judge nothing", not "no limit".
+
+        The old truthiness test (`if self.max_docs`) read a zero as None, so a test pinning a
+        zero ceiling would have silently judged everything — the failure would have looked
+        like the production code ignoring the setting."""
+        pairs, info = FakeReranker(max_docs=0).rank("q", ["a", "b", "c"])
+
+        self.assertEqual(pairs, [], "a zero ceiling still judged documents")
+        self.assertEqual(info["dropped"], 3, "a zero ceiling did not report what it skipped")
+
     def test_outcome_payload_carries_the_whole_trail_minus_the_items(self):
         """`retrieval.outcome_payload` — the JSON form of an Outcome, defined once.
 

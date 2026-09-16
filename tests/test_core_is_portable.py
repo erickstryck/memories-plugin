@@ -54,6 +54,40 @@ def imported_packages(path: Path) -> set:
     return found
 
 
+def sibling_offenders(hosts_dir: Path) -> tuple[dict, int]:
+    """Host modules that import ANOTHER host, plus how many comparisons were made.
+
+    A FUNCTION AND NOT A LOOP INSIDE A TEST, because the version that lived inside the test
+    asserted nothing on a one-host tree: the `for other in siblings` body never ran, and the
+    test passed while making zero comparisons. Returning the count lets a caller prove the
+    walk actually did the work — a guard whose own execution is unverified is a guard that
+    reports success for the wrong reason.
+
+    Imports are read from the AST via `imported_packages`, so a docstring naming another host
+    in order to say "this does not import it" is not an offender.
+    """
+    siblings = sorted(p.name for p in hosts_dir.iterdir()
+                      if p.is_dir() and not p.name.startswith("__"))
+    offenders, compared = {}, 0
+    for path in sorted(hosts_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        mine = path.relative_to(hosts_dir).parts[0]
+        imported = imported_packages(path)
+        text = path.read_text(encoding="utf-8")
+        for other in siblings:
+            if other == mine:
+                continue
+            compared += 1
+            # BOTH conditions: the AST proves it is a real import and not prose, the text
+            # says WHICH host. Counting the comparison before either test is deliberate —
+            # the count measures work done, not violations found.
+            if "hosts" in imported and f"hosts.{other}" in text:
+                offenders.setdefault(str(path.relative_to(hosts_dir)), []).append(other)
+
+    return offenders, compared
+
+
 class TestCoreDependsOnNoHost(unittest.TestCase):
     def test_no_core_module_imports_a_host(self):
         offenders = {}
@@ -116,26 +150,87 @@ class TestNoHostImportsAnotherHost(unittest.TestCase):
     floors. A third host would have silently inherited the second host's retrieval policy,
     which is the exact divergence `tests/test_host_equivalence.py` exists to prevent.
 
-    The table is in `core/operations.py` now, and this is what keeps it there."""
+    The table is in `core/operations.py` now, and this is what keeps it there.
+
+    THE RULE IS A FUNCTION, not a loop body, for a measured reason: with one host package in
+    the tree the sibling loop executes ZERO comparisons, so the assertion never ran and the
+    test reported success while proving nothing. Instrumented and confirmed: 0 calls to
+    `assertNotIn`. A rule that only runs when a second host happens to exist is dormant
+    exactly until the day it matters. Now `sibling_offenders` takes the directory to walk,
+    and the tests below run it against a SYNTHETIC two-host tree as well as the real one."""
 
     def test_each_host_package_imports_no_other_host(self):
-        hosts_dir = REPO / "hosts"
-        seen = 0
-        for path in sorted(hosts_dir.rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            seen += 1
-            mine = path.relative_to(hosts_dir).parts[0]
-            for imported in imported_packages(path):
-                if imported != "hosts":
-                    continue
-                text = path.read_text(encoding="utf-8")
-                for other in (p.name for p in hosts_dir.iterdir() if p.is_dir()):
-                    if other == mine or other.startswith("__"):
-                        continue
-                    self.assertNotIn(f"hosts.{other}", text,
-                                     f"{path.relative_to(REPO)} imports the {other} host")
-        self.assertGreater(seen, 0, "the walk found no host modules, so it asserts nothing")
+        offenders, compared = sibling_offenders(REPO / "hosts")
+
+        self.assertEqual(offenders, {},
+                         f"a host imports a sibling host: {offenders}")
+
+    def test_the_rule_CATCHES_a_sibling_import_on_a_two_host_tree(self):
+        """The assertion above cannot fail while the tree has one host. This one can.
+
+        A synthetic tree with two hosts, one importing the other, is the only way to exercise
+        the comparison the real tree never reaches — and it stays honest when a second host
+        is added for real."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            hosts = Path(d)
+            (hosts / "alpha").mkdir()
+            (hosts / "beta").mkdir()
+            (hosts / "alpha" / "__init__.py").write_text("from core import operations\n",
+                                                         encoding="utf-8")
+            (hosts / "beta" / "__init__.py").write_text("from hosts.alpha import thing\n",
+                                                        encoding="utf-8")
+
+            offenders, compared = sibling_offenders(hosts)
+
+            self.assertGreater(compared, 0, "the synthetic tree compared nothing")
+            self.assertIn("beta/__init__.py", offenders,
+                          f"the rule missed a host importing its sibling: {offenders}")
+            self.assertNotIn("alpha/__init__.py", offenders,
+                             "importing core/ was reported as a violation")
+
+    def test_a_clean_two_host_tree_is_not_reported(self):
+        """The other direction: two hosts that both import only `core/` are fine."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            hosts = Path(d)
+            for name in ("alpha", "beta"):
+                (hosts / name).mkdir()
+                (hosts / name / "__init__.py").write_text(
+                    "from core import operations\nfrom core import knobs\n", encoding="utf-8")
+
+            offenders, compared = sibling_offenders(hosts)
+
+            self.assertGreater(compared, 0, "the synthetic tree compared nothing")
+            self.assertEqual(offenders, {}, f"a clean tree was reported: {offenders}")
+
+    def test_PROSE_naming_a_sibling_is_not_a_violation(self):
+        """A host that documents the boundary must not be reported for describing it.
+
+        These modules explain themselves in comments, and the honest way to say "this does
+        not import the other host" is to name it. A text-only rule reports that sentence and
+        gets abandoned as noisy, which is how a guard dies. Measured: dropping the AST half
+        of the condition leaves this the only failing test."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            hosts = Path(d)
+            for name in ("alpha", "beta"):
+                (hosts / name).mkdir()
+            (hosts / "alpha" / "__init__.py").write_text("from core import operations\n",
+                                                         encoding="utf-8")
+            (hosts / "beta" / "__init__.py").write_text(
+                '"""This adapter never imports hosts.alpha; the shared table is in core."""\n'
+                "# hosts.alpha owns its own tuning, see core/operations.py::bind_tuning\n"
+                "from core import operations\n", encoding="utf-8")
+
+            offenders, compared = sibling_offenders(hosts)
+
+            self.assertGreater(compared, 0, "the synthetic tree compared nothing")
+            self.assertEqual(offenders, {},
+                             f"prose naming a sibling was reported as an import: {offenders}")
 
     def test_the_guard_would_CATCH_a_host_importing_a_sibling(self):
         """Without this the test above passes on a tree where no host imports anything."""

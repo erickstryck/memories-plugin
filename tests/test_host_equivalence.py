@@ -2606,6 +2606,88 @@ class TestTheSHAREDDEFAULTSAreOneValue(unittest.TestCase):
         self.assertEqual(found.get("list"), operations.MEMORY_LIST_LIMIT,
                          "`memory list --limit` does not read the shared default")
 
+    def test_the_HOST_HANDLERS_take_their_defaults_from_the_same_table(self):
+        """The other half of the claim, and the half that was false.
+
+        THE HOLE THIS CLOSES, MEASURED. Every test above compares the CLI parser against the
+        constant, so moving the constant moves both sides of the comparison and nothing fails.
+        Meanwhile three handlers here spelled the number out — `_int(args, "limit", 20)`,
+        `_int(args, "limit", 5)` twice — and read the constant never. Changing
+        MEMORY_LIST_LIMIT 20 -> 9, SEARCH_COLLECTIONS_LIMIT 5 -> 9 and DOCS_SEARCH_LIMIT 5 -> 9
+        each left the full suite green while the CLI answered 9 and the tool answered 20/5/5:
+        the exact divergence the class docstring says it prevents.
+
+        So this drives the handler and reads the limit that ARRIVES AT THE STORE."""
+        from unittest.mock import patch as _patch
+
+        collections_seen = []
+
+        def collections_recorder(*args, **kwargs):
+            collections_seen.append((args, kwargs))
+
+            return ([], {})
+
+        # `memory_search_collections` does not go through `_memory`: it calls the module-level
+        # `core.search_collections` with the limit as a keyword. Patched where it actually is.
+        a_config = type("Cfg", (), {"vector_size": 8})()
+        with _patch.object(operations.core, "search_collections", collections_recorder), \
+                _patch.object(operations, "_configured", lambda cfg: a_config), \
+                _patch.object(operations.core, "build_qdrant", lambda cfg: None), \
+                _patch.object(operations.core, "build_embedder", lambda cfg: None):
+            operations.dispatch("memory_search_collections", {"query": "q"}, cfg=object())
+
+        self.assertTrue(collections_seen,
+                        "memory_search_collections never reached the archive")
+        self.assertEqual(collections_seen[0][1].get("limit"),
+                         operations.SEARCH_COLLECTIONS_LIMIT,
+                         "it did not pass the shared default to the search")
+
+        for operation, builder, attribute, constant in [
+            ("memory_list", "_memory", "list_page", operations.MEMORY_LIST_LIMIT),
+            ("docs_search", "_docs", "search", operations.DOCS_SEARCH_LIMIT),
+            ("memory_find", "_memory", "find", operations.FIND_LIMIT),
+            ("repos_search", "_repos", "search_request", operations.REPOS_SEARCH_LIMIT),
+        ]:
+            with self.subTest(operation=operation):
+                seen = []
+
+                def recorder(*args, **kwargs):
+                    seen.append((args, kwargs))
+
+                    return ([], {}) if attribute in ("search", "search_request") else []
+
+                archive = type("Archive", (), {attribute: staticmethod(recorder),
+                                               "store": None})()
+                with _patch.object(operations, builder, lambda cfg: archive):
+                    operations.dispatch(operation,
+                                        {"query": "q", "doc_id": "d"}, cfg=object())
+
+                self.assertTrue(seen, f"{operation} never reached the archive")
+                numbers = [a for a in seen[0][0] if isinstance(a, int)]
+                numbers += [v for v in seen[0][1].values() if isinstance(v, int)]
+                self.assertIn(
+                    constant, numbers,
+                    f"{operation} did not pass the shared default {constant} to the archive; "
+                    f"it received {numbers}. A hardcoded literal in core/operations.py drifts "
+                    f"from the CLI the moment the constant changes.")
+
+    def test_no_shared_default_is_written_as_a_literal_in_the_handlers(self):
+        """The same source-level pin as for the parser, on the other surface.
+
+        Reading the constant today does not stop someone re-typing the number tomorrow, and
+        the behavioural test above cannot see the difference while the two happen to agree."""
+        source = (REPO / "core" / "operations.py").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            source.count('_int(args, "limit", 5)'), 0,
+            "a handler spells out a shared default instead of reading the constant")
+        self.assertEqual(
+            source.count('_int(args, "limit", 20)'), 0,
+            "a handler spells out a shared default instead of reading the constant")
+        self.assertEqual(
+            source.count('_int(args, "limit", 8)'), 0,
+            "a handler spells out a shared default instead of reading the constant")
+
     def test_no_shared_default_is_written_as_a_literal_in_the_parser(self):
         """The regression is re-typing the number, so this reads the SOURCE.
 

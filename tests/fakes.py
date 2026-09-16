@@ -316,6 +316,21 @@ class FailingFakeEmbedder:
         raise self.error
 
 
+#: The real `Reranker.__init__`'s own `max_docs` default, READ FROM IT rather than re-typed.
+#:
+#: These fakes deliberately import nothing from `core` (see the module docstring), and a
+#: hand-copied 12 here would be one more number free to drift from the thing it stands in for.
+#: `inspect` reads the signature without importing the client's behaviour, so the fake's
+#: ceiling IS the real ceiling by construction.
+def _real_reranker_max_docs() -> int:
+    import importlib
+    import inspect
+
+    signature = inspect.signature(importlib.import_module("core.reranking").Reranker.__init__)
+
+    return signature.parameters["max_docs"].default
+
+
 class FakeReranker:
     """Returns the scores it was given, against the order of the documents received.
 
@@ -324,16 +339,26 @@ class FakeReranker:
     above the strict floor to warn the user that the archive held more than the re-ranker
     looked at. This fake never filled the key, so that whole computation was dead offline:
     mutating it left the suite green, and the note a user reads about a truncated judgement
-    was produced by code no test ran. `max_docs=None` keeps the old behaviour (nothing
-    dropped) for the callers that do not care.
+    was produced by code no test ran.
+
+    THE DEFAULT MATCHES THE REAL CLIENT (12), because a fake more generous than production
+    hides exactly the bug it should catch. Measured before this was fixed: `FakeReranker()`
+    handed 30 documents judged all 30 and reported `dropped=0`, where the real client judges
+    12 and reports 18 — so every caller that did not pass `max_docs` was testing a pipeline
+    in which truncation never happens.
+
+    `max_docs=0` is honoured as a real ceiling rather than read as "no ceiling": the old
+    truthiness test silently turned a zero into None.
     """
 
-    def __init__(self, scores=None, ok=True, error=None, was_logit=False, max_docs=None):
+    def __init__(self, scores=None, ok=True, error=None, was_logit=False,
+                 max_docs=None):
         self.scores = scores
         self.ok = ok
         self.error = error
         self.was_logit = was_logit
-        self.max_docs = max_docs
+        # None here means "use the real client's ceiling", not "no ceiling".
+        self.max_docs = _real_reranker_max_docs() if max_docs is None else max_docs
         self.calls: list[tuple] = []
 
     def rank(self, query, documents):
@@ -341,8 +366,9 @@ class FakeReranker:
         if not self.ok:
             return [], {"ok": False, "error": self.error or "failed", "was_logit": False,
                         "dropped": 0}
-        dropped = max(0, len(documents) - self.max_docs) if self.max_docs else 0
-        judged = documents[:self.max_docs] if self.max_docs else documents
+        # `is not None`, not truthiness: a ceiling of 0 is a real ceiling.
+        dropped = max(0, len(documents) - self.max_docs) if self.max_docs is not None else 0
+        judged = documents[:self.max_docs] if self.max_docs is not None else documents
         scores = self.scores if self.scores is not None else [1.0] * len(judged)
         pairs = sorted(enumerate(scores[:len(judged)]), key=lambda p: -p[1])
 

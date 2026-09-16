@@ -31,25 +31,26 @@ import core.docs
 import core.repos
 
 
-class DefaultTuning:
-    """The recall floors a host that binds nothing gets.
-
-    The CODED DEFAULTS of both existing adapters, restated here for ONE reason: a host that
-    forgot to call `bind_tuning` must run this archive's documented policy, not silently
-    inherit another host's environment-tuned numbers. The values live in
-    `core.retrieval.Policy`'s own defaults too; they are duplicated rather than imported so
-    that a deployer reading this file sees what an unbound host actually gets.
-    """
-
-    MAX_MEMORIES = 6
-    DENSE_FLOOR = 0.45
-    STRICT_FLOOR = 0.58
-    MIN_SCORE = 0.10
-    TOP_K = 20
+#: THERE IS NO DEFAULT TUNING HERE, ON PURPOSE.
+#:
+#: This module briefly carried a `DefaultTuning` class holding the five recall floors, so a
+#: host that never called `bind_tuning` would still answer. That was a FIFTH copy of numbers
+#: the rest of this work exists to de-duplicate, and it was pinned by nothing: measured, all
+#: five could be changed (0.58 -> 0.99, 6 -> 1, 0.45 -> 0.99, 20 -> 1, 0.10 -> 0.99) with the
+#: full suite green. Its docstring defended the duplication by claiming the values "live in
+#: `core.retrieval.Policy`'s own defaults too" -- false by construction: `dense_floor`,
+#: `strict_floor`, `min_score` and `max_results` have NO defaults, and `TOP_K` is not a
+#: `Policy` field at all.
+#:
+#: An unbound host is a WIRING MISTAKE, and the two ways to answer one are to guess or to say
+#: so. Guessing means recalling against five unguarded numbers that read like documented
+#: policy; saying so means the deployer learns immediately. The copies in `hooks/recall.py`
+#: and `hosts/hermes/__init__.py` stay because `test_host_equivalence` pins them to each
+#: other -- an unpinned third copy has no such claim to make.
 
 
 #: The object whose constants are the calling host's recall tuning. See `bind_tuning`.
-_TUNING = DefaultTuning
+_TUNING = None
 
 #: Defaults that BOTH surfaces offer, declared once so the two cannot drift.
 #:
@@ -77,6 +78,18 @@ def bind_tuning(provider_class) -> None:
 
 
 def _tuning():
+    """The calling host's recall tuning, or a refusal naming what is missing.
+
+    An unbound host used to get a hardcoded `DefaultTuning` and recall happily against five
+    numbers no test guarded. Answering a wiring mistake with plausible output is the worst of
+    the three options: the deployer sees results, cannot tell they came from guessed floors,
+    and the mistake survives. `ToolArgError` reaches the MODEL, which is the surface that can
+    surface it to a human.
+    """
+    if _TUNING is None:
+        raise ToolArgError("this host has not called operations.bind_tuning(): recall has no "
+                           "floors to apply")
+
     return _TUNING
 
 
@@ -311,13 +324,13 @@ def _memory_delete(args: dict, cfg) -> str:
 def _memory_list(args: dict, cfg) -> str:
     # `_text` and not `_require`: the first page has no cursor, and a blank string from a
     # model that filled the field with nothing means "no cursor", not "cursor of empty".
-    return _ok(_memory(cfg).list_page(_int(args, "limit", 20),
+    return _ok(_memory(cfg).list_page(_int(args, "limit", MEMORY_LIST_LIMIT),
                                       _text(args, "offset")))
 
 
 def _memory_search_collections(args: dict, cfg) -> str:
     query = _require(args, "query")
-    limit = _int(args, "limit", 5)
+    limit = _int(args, "limit", SEARCH_COLLECTIONS_LIMIT)
     collections = _object(args, "collections")
     if collections is not None and not isinstance(collections, list):
         raise ToolArgError("'collections' must be an array of collection names")
@@ -348,7 +361,7 @@ def _docs_keep(args: dict, cfg) -> str:
 def _docs_search(args: dict, cfg) -> str:
     query = _require(args, "query")
     scope = _choice(args, "scope", core.docs.SCOPES, "all")
-    doc_id, limit = _text(args, "doc_id"), _int(args, "limit", 5)
+    doc_id, limit = _text(args, "doc_id"), _int(args, "limit", DOCS_SEARCH_LIMIT)
     hits, outcome = _docs(cfg).search(query, scope, doc_id, limit)
 
     return _ok({"info": core.outcome_payload(outcome), "hits": [h.__dict__ for h in hits]})

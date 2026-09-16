@@ -112,5 +112,50 @@ class TestASecondAdapterDrivesTheRuleFiles(unittest.TestCase):
             an_index(Proxy()).list_repos()
 
 
+class TestAHostThatFORGOTToBindTuningIsTold(unittest.TestCase):
+    """An unbound host is a wiring mistake, and there are two ways to answer one.
+
+    This module briefly shipped a `DefaultTuning` class so an unbound host would still
+    answer — a FIFTH copy of the recall floors, pinned by no test. Measured at the time: all
+    five constants could be changed (0.58 -> 0.99, 6 -> 1, 0.45 -> 0.99, 20 -> 1, 0.10 -> 0.99)
+    with the full suite green, and its docstring defended the duplication with a claim that is
+    false by construction (`Policy` has no defaults for those fields and no `TOP_K` at all).
+
+    Guessing means the deployer sees plausible results from five unguarded numbers and never
+    learns the wiring is missing. Saying so means they learn immediately. THIS PINS THE
+    SECOND: without it, restoring the silent default leaves every test green.
+    """
+
+    def setUp(self):
+        from core import operations
+        self.operations = operations
+        self.previous = operations._TUNING
+        operations._TUNING = None
+
+    def tearDown(self):
+        self.operations._TUNING = self.previous
+
+    def test_recall_REFUSES_rather_than_guessing_the_floors(self):
+        import json
+
+        answer = json.loads(self.operations.dispatch("memory_recall", {"query": "q"},
+                                                     cfg=object()))
+
+        self.assertIn("error", answer,
+                      "an unbound host got an answer instead of being told it is unbound")
+        self.assertIn("bind_tuning", answer["error"],
+                      f"the refusal does not name what is missing: {answer['error']!r}")
+
+    def test_the_refusal_names_the_missing_call_not_just_a_failure(self):
+        """A message the deployer can act on without reading this module's source."""
+        with self.assertRaises(self.operations.ToolArgError) as raised:
+            self.operations._tuning()
+
+        message = str(raised.exception)
+        self.assertIn("bind_tuning", message)
+        self.assertIn("floors", message,
+                      f"the refusal does not say what it could not apply: {message!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
