@@ -52,6 +52,10 @@ class FakeVectorStore:
         self.collections: dict[str, dict] = {}   # name -> {"size", "points": {id: point}}
         self.calls: list[tuple] = []
         self.indexes: dict[str, set] = {}        # collection -> indexed payload fields
+        #: collection -> key -> values whose points were all deleted. The real Qdrant keeps
+        #: them in the keyword index and reports them from `facet` at count 0; see
+        #: `_remember_faceted_values`.
+        self._emptied_facets: dict[str, dict[str, set]] = {}
 
     # ---- collections ----
     def list_collections(self) -> list[str]:
@@ -102,12 +106,37 @@ class FakeVectorStore:
     def delete_points(self, name: str, ids: list) -> None:
         points = self._require(name)["points"]
         for i in ids:
+            self._remember_faceted_values(name, points.get(i))
             points.pop(i, None)
 
     def delete_by_filter(self, name: str, filter_: dict) -> None:
         points = self._require(name)["points"]
         for pid in [p for p, v in points.items() if _matches_filter(v.get("payload", {}), filter_)]:
+            self._remember_faceted_values(name, points[pid])
             points.pop(pid)
+
+    def _remember_faceted_values(self, name: str, point: dict | None) -> None:
+        """Keeps a deleted point's indexed values as facet entries with COUNT 0.
+
+        LISKOV, AND IT IS THE WHOLE POINT OF THIS METHOD. The real Qdrant keeps a value in the
+        keyword index after the last point carrying it is deleted, and reports it from `facet`
+        with `count: 0`. Measured against the live server after dropping every chunk of one
+        repo: `{"value": "validacao-descartavel", "count": 0}` came back beside the five real
+        repos.
+
+        A fake that counted only LIVE points could never produce that row, so no test could
+        reach the branch where a caller mistakes a zero-count value for a repo that holds
+        chunks — and none did. That is the gap this closes: the double now fails the way the
+        server fails, and the assertions that follow are about the product rather than about
+        the convenience of the double.
+        """
+        if point is None:
+            return
+        payload = point.get("payload") or {}
+        for key in self.indexes.get(name, set()):
+            value = payload.get(key)
+            if value is not None:
+                self._emptied_facets.setdefault(name, {}).setdefault(key, set()).add(value)
 
     def facet(self, name: str, key: str, limit: int, exact: bool = True) -> list[dict]:
         """Distinct values of `key` with counts, like the real server.
@@ -117,12 +146,18 @@ class FakeVectorStore:
         still pass — the same shape as the fake index that only knew how to succeed. It also
         truncates at `limit` exactly as the server does, silently, which is why callers throw
         a full-limit answer away rather than trust it.
+
+        AND IT KEEPS EMPTIED VALUES, AT COUNT 0, for the same reason — see
+        `_remember_faceted_values`. A value whose points are all gone stays in the keyword
+        index on the real server, so it stays here.
         """
         self.calls.append(("facet", name, key))
         self._require(name)
         if key not in self.indexes.get(name, set()):
             raise ValueError(f"No appropriate index for faceting on {key!r}")
         counts: dict = {}
+        for value in self._emptied_facets.get(name, {}).get(key, set()):
+            counts[value] = 0                    # emptied, but still indexed: the server's shape
         for p in self.collections.get(name, {}).get("points", {}).values():
             value = (p.get("payload") or {}).get(key)
             if value is not None:

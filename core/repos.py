@@ -891,11 +891,25 @@ class RepoIndex:
             ) from exc
 
     def _chunks_per_repo(self) -> dict:
-        """`{repo: chunk count}` for every repo the ARCHIVE holds a chunk under.
+        """`{repo: chunk count}` for every repo the ARCHIVE actually holds a chunk under.
 
         ALWAYS A NUMBER, NEVER None: both paths below establish a count. The facet is asked
         for one, and the fallback scroll tallies as it goes — so a repo that is named here is
         a repo whose chunks were counted.
+
+        A VALUE WITH NO CHUNKS IS NOT A REPO, and the server will offer you one. Qdrant keeps
+        a value in the keyword index after the last point carrying it is deleted, and reports
+        it from `facet` with `count: 0`. Measured on the live archive after dropping every
+        chunk of one repo: `{"value": "validacao-descartavel", "count": 0}` came back beside
+        the five real ones. Both divergence reads derive their answer from the KEYS of this
+        mapping, so a zero left in would be read by `divergent_repos` as "this repo holds
+        chunks nobody can name" and by `emptied_repos` as "this repo still has chunks" — the
+        same ghost breaking the two reads in OPPOSITE directions. `qctx repos list` then
+        printed "run `repos drop ghost`" and that command answered
+        `repository 'ghost' is not indexed`: advice the user cannot follow.
+
+        So the emptiness is judged HERE, once, where the counts are known — and not in each
+        caller, which is what let the two reads disagree about what "seen" means.
 
         Both divergence directions need these names, so they are taken once and handed to both
         rather than read twice for one command. The COUNTS come free with the facet — the server
@@ -924,7 +938,10 @@ class RepoIndex:
         except Exception:                              # noqa: BLE001 — see the docstring
             hits = None
         if hits is not None and len(hits) < FACET_LIMIT:
-            return {h["value"]: h.get("count") or 0 for h in hits if h.get("value")}
+            # `> 0` and not merely truthy: see the docstring. An emptied value arrives here
+            # with a real name and a count of zero, and only the count tells it from a repo.
+            return {h["value"]: h["count"] for h in hits
+                    if h.get("value") and (h.get("count") or 0) > 0}
 
         # An archive that was never created holds no chunks, which is EMPTY and not a failure:
         # both collections are made on first use, so this is the state of every fresh install
