@@ -65,6 +65,7 @@ class TestTheSHAREDFakeRefusesWhatTheRealServerRefuses(unittest.TestCase):
     def test_a_facet_with_no_payload_index_is_refused_and_the_listing_still_answers(self):
         store = FakeVectorStore()
         ix = an_index(store)
+        store.ensure_collection(CHUNKS, 8)
         store.upsert(CHUNKS, [{"id": 1, "vector": [0.0] * 8,
                                "payload": {"repo": "alpha", "text": "x"}}])
         self.assertNotIn("repo", store.indexes.get(CHUNKS, set()),
@@ -80,6 +81,7 @@ class TestTheSHAREDFakeRefusesWhatTheRealServerRefuses(unittest.TestCase):
         """The negative direction: the refusal must be about the missing index, not about the
         fake being unable to facet at all."""
         store = FakeVectorStore()
+        store.ensure_collection(CHUNKS, 8)
         store.upsert(CHUNKS, [{"id": 1, "vector": [0.0] * 8,
                                "payload": {"repo": "alpha", "text": "x"}}])
         store.ensure_payload_index(CHUNKS, "repo", "keyword")

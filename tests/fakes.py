@@ -31,6 +31,23 @@ class FakeQdrantRefusal(ValueError):
 class FakeVectorStore:
     """A vector store in a dict. Real similarity (cosine), not simulated."""
 
+    def _require(self, name: str) -> dict:
+        """REFUSES AN ABSENT COLLECTION, because the real server does.
+
+        Measured against `_AbsentCollections` over HTTP: `search`, `scroll`, `scroll_all`,
+        `search_groups`, `upsert`, `set_payload`, `delete_points` and `delete_by_filter`
+        all answer 404 on a collection that was never created, while this fake answered
+        an empty list, None, or silently CREATED the collection inside `upsert`. A fake
+        more generous than production hides exactly the bug it should catch, which is the
+        rule `scroll` already states about paging.
+        """
+        collection = self.collections.get(name)
+        if collection is None:
+            raise FakeQdrantRefusal(f"Not found: Collection `{name}` doesn't exist!",
+                                    status=404)
+
+        return collection
+
     def __init__(self):
         self.collections: dict[str, dict] = {}   # name -> {"size", "points": {id: point}}
         self.calls: list[tuple] = []
@@ -67,9 +84,9 @@ class FakeVectorStore:
 
     # ---- points ----
     def upsert(self, name: str, points: list[dict], batch: int = 256) -> int:
-        self.ensure_collection(name, self.collections.get(name, {}).get("size", 4))
+        collection = self._require(name)
         for p in points:
-            self.collections[name]["points"][p["id"]] = p
+            collection["points"][p["id"]] = p
 
         return len(points)
 
@@ -77,17 +94,18 @@ class FakeVectorStore:
         return self.collections.get(name, {}).get("points", {}).get(point_id)
 
     def set_payload(self, name: str, point_id, payload: dict) -> None:
-        point = self.collections.get(name, {}).get("points", {}).get(point_id)
+        point = self._require(name)["points"].get(point_id)
         if point is not None:
             point["payload"] = payload
         self.calls.append(("set_payload", name, point_id))
 
     def delete_points(self, name: str, ids: list) -> None:
+        points = self._require(name)["points"]
         for i in ids:
-            self.collections.get(name, {}).get("points", {}).pop(i, None)
+            points.pop(i, None)
 
     def delete_by_filter(self, name: str, filter_: dict) -> None:
-        points = self.collections.get(name, {}).get("points", {})
+        points = self._require(name)["points"]
         for pid in [p for p, v in points.items() if _matches_filter(v.get("payload", {}), filter_)]:
             points.pop(pid)
 
@@ -101,6 +119,7 @@ class FakeVectorStore:
         a full-limit answer away rather than trust it.
         """
         self.calls.append(("facet", name, key))
+        self._require(name)
         if key not in self.indexes.get(name, set()):
             raise ValueError(f"No appropriate index for faceting on {key!r}")
         counts: dict = {}
@@ -115,7 +134,7 @@ class FakeVectorStore:
                filter_: dict | None = None, with_payload: bool = True) -> list[dict]:
         self.calls.append(("search", name, limit))
         output = []
-        for pid, p in self.collections.get(name, {}).get("points", {}).items():
+        for pid, p in self._require(name)["points"].items():
             if filter_ and not _matches_filter(p.get("payload", {}), filter_):
                 continue
             output.append({"id": pid, "score": _cosine(vector, p["vector"]),
@@ -130,7 +149,7 @@ class FakeVectorStore:
         """Real grouping over the real cosine ranking, so the shadowing test means
         something. Over-fetches deliberately: grouping the top-K is the defect this method
         exists to avoid, so the fake must not reproduce it."""
-        ranked = self.search(name, vector, limit=len(self.collections.get(name, {}).get("points", {})),
+        ranked = self.search(name, vector, limit=len(self._require(name)["points"]),
                              filter_=filter_, with_payload=True)
         groups: dict = {}
         for hit in ranked:
@@ -161,7 +180,7 @@ class FakeVectorStore:
         if it ended after one page. A fake more generous than production hides exactly the
         bug it should catch.
         """
-        points = self.collections.get(name, {}).get("points", {})
+        points = self._require(name)["points"]
         items = [{"id": pid, "payload": p.get("payload", {})}
                  for pid, p in points.items()
                  if not filter_ or _matches_filter(p.get("payload", {}), filter_)]
