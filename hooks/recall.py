@@ -72,19 +72,21 @@ def env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     corrupts the protocol. Neither state occurs under a normal spawn; both are one misbehaving
     parent away, and a note must never cost the block it accompanies.
     """
-    def report(line: str, malformed: bool = False) -> None:
+    def report(line: str) -> None:
+        # ALWAYS BY FILE DESCRIPTOR. `print(file=sys.stderr)` silently falls back to STDOUT
+        # when fd 2 is closed, and stdout carries this hook's protocol — the block is then
+        # lost to a JSONDecodeError, which no `try` can catch because writing SUCCEEDS.
+        # `os.write(2, ...)` raises instead of landing on the wrong channel, so a note is
+        # dropped exactly when delivering it would cost the block, and never misdelivered.
+        #
+        # ONE BEHAVIOUR FOR BOTH NOTES. An earlier fix passed a `malformed` flag so this host
+        # could stay silent on the malformed branch and print on the floor branch; that made
+        # the typo invisible on a WORKING stderr to protect a protocol that `os.write` already
+        # protects. No host read the flag, so it is gone.
         _pending_notes.append(line)
-        if malformed:
-            # LOG ONLY, no stderr — and this asymmetry is not an oversight. A review measured
-            # what uniform printing costs: with the stderr pipe closed, `print(file=sys.stderr)`
-            # falls back to STDOUT, which carries the hook protocol, and the injected block is
-            # lost to a JSONDecodeError. The guard below cannot help, because writing to stdout
-            # SUCCEEDS. A malformed knob still degrades silently to the coded default and the
-            # note reaches the log, which is where this hook's history is read.
-            return
         try:
-            print(f"recall: {line}", file=sys.stderr)
-        except Exception:      # noqa: BLE001 — a lost note is cheaper than a lost block
+            os.write(2, f"recall: {line}\n".encode())
+        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
             pass
 
     return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)

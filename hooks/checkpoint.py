@@ -40,9 +40,21 @@ def env_num(name: str, legacy: str, default: str, kind=int, minimum=None):
     gave 1, 1 and -1 — the same typo degrading one surface and silencing another. The
     knob-name guards could not see it: identical names were never the question.
     """
-    def report(line: str, malformed: bool = False) -> None:
-        # This hook writes no protocol on stdout, so stderr is safe in both branches.
-        print(f"checkpoint: {line}", file=sys.stderr)
+    def report(line: str) -> None:
+        # ALWAYS BY FILE DESCRIPTOR, never `print(file=sys.stderr)`. Two requirements meet here
+        # and both are real: `test_a_malformed_interval_does_not_kill_the_hook` wants the typo
+        # visible ("falling back silently hides the typo"), and the protocol this hook prints
+        # on stdout must survive a closed fd 2 — where `print(file=sys.stderr)` silently falls
+        # back to stdout and corrupts the JSON, which no `try` can catch because writing
+        # SUCCEEDS. `os.write(2, ...)` raises on a closed fd instead, so the note is dropped
+        # exactly when delivering it would cost the block, and never misdelivered.
+        #
+        # The comment here used to claim this hook writes no protocol on stdout. It does:
+        # `main` ends in `print(json.dumps(...))`.
+        try:
+            os.write(2, f"checkpoint: {line}\n".encode())
+        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
+            pass
 
     return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
 
@@ -65,7 +77,12 @@ def main() -> None:
     except SystemExit:
         raise
     except BaseException as exc:  # noqa: BLE001 — see docstring
-        print(f"checkpoint: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # BY FILE DESCRIPTOR, like the config note above: `print(file=sys.stderr)` falls back
+        # to stdout when fd 2 is closed, and this hook's block travels on stdout.
+        try:
+            os.write(2, f"checkpoint: {type(exc).__name__}: {exc}\n".encode())
+        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
+            pass
 
 
 def _run() -> None:

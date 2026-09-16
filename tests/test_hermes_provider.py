@@ -205,6 +205,23 @@ class TestTheInstallPathTheLoaderActuallyReads(unittest.TestCase):
     def test_the_loader_finds_the_provider_at_hermes_home_plugins_name(self):
         import shutil
 
+        # AND THE HOST'S OWN IMPORTS MUST WORK UNDER *THIS* INTERPRETER. The subprocess below
+        # runs `sys.executable`, and hermes' `plugins.memory` imports `hermes_cli.config`,
+        # which imports `yaml` — installed in hermes' own venv and absent from, say, a
+        # linuxbrew python on the same machine. Running the suite with a different interpreter
+        # then failed here with `ModuleNotFoundError: No module named 'yaml'`, which is a fact
+        # about the ENVIRONMENT, not about this plugin: the same commit passed under hermes'
+        # python and failed under linuxbrew's. `HERMES_INSTALL.exists()` was too weak a guard —
+        # it asks whether the host is installed, not whether the interpreter running us can
+        # import it.
+        probe = subprocess.run(
+            [sys.executable, "-c", f"import sys; sys.path.insert(0, {str(HERMES_INSTALL)!r});"
+                                   " import plugins.memory"],
+            capture_output=True, text=True)
+        if probe.returncode != 0:
+            self.skipTest(f"this interpreter cannot import the host: "
+                          f"{probe.stderr.strip().splitlines()[-1] if probe.stderr.strip() else '?'}")
+
         home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, home, True)
         (home / "plugins" / "memory").mkdir(parents=True)

@@ -48,6 +48,13 @@ class TestTheLocalBinding(unittest.TestCase):
         must not happen is an exception reaching the caller."""
         import multiprocessing
 
+        # `fork` EXPLICITLY, not the platform default. Python 3.14 changed the default start
+        # method on Linux to `forkserver`, which pickles the target — and `writer` is a local
+        # function, so the suite raised `AttributeError: Can't pickle local object` under 3.14
+        # while passing under 3.11. The test is ABOUT forked concurrency on one state file, so
+        # the method is part of what it measures, not an environment detail to inherit.
+        ctx = multiprocessing.get_context("fork")
+
         def writer(n, out):
             import sys
             sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,8 +68,8 @@ class TestTheLocalBinding(unittest.TestCase):
                     errors += 1
             out.put(errors)
 
-        queue = multiprocessing.Queue()
-        procs = [multiprocessing.Process(target=writer, args=(n, queue)) for n in range(6)]
+        queue = ctx.Queue()
+        procs = [ctx.Process(target=writer, args=(n, queue)) for n in range(6)]
         for p in procs:
             p.start()
         for p in procs:

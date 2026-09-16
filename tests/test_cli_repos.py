@@ -526,6 +526,29 @@ class TestStatusReapsBeforeRendering(CLICase):
         self.assertEqual(out["jobs"][0]["state"], jobs.FAILED)
 
 
+class TestStatusSurvivesADamagedDaemonRecord(CLICase):
+    """The one command whose job is to report a broken daemon must not die on one.
+
+    `daemon.record()` has THREE answers, not two: an entry, `None` for nothing running, and a
+    truthy sentinel for a record that exists and cannot be parsed. The sentinel is truthy
+    deliberately — a damaged record read as "nothing running" would let a second daemon start
+    on top of a live one — and the renderer indexed `running['pid']` behind a truthiness test,
+    so `repos status` raised KeyError on exactly the state it exists to diagnose while
+    `repos status --json` printed it correctly. Two outputs of one command disagreeing about
+    whether the system is usable."""
+
+    def test_a_corrupt_record_is_reported_not_raised(self):
+        (Path(os.environ["QCTX_STATE_DIR"]) / "daemon.json").write_text("{not json")
+        text = self.rendered(self.cli.cmd_repos_status, json=False)
+        self.assertIn("unreadable", text,
+                      "the damaged record was not reported to the user")
+
+    def test_the_json_form_agrees_with_the_printed_one(self):
+        (Path(os.environ["QCTX_STATE_DIR"]) / "daemon.json").write_text("{not json")
+        payload = json.loads(self.rendered(self.cli.cmd_repos_status, json=True))
+        self.assertTrue(payload["daemon"], "the JSON form dropped the damaged record")
+
+
 class TestStatusShowsWhatIsQuarantined(CLICase):
     """A silent fix is one nobody can audit: a file held by mistake would never be found.
 

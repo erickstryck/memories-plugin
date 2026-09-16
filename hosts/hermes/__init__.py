@@ -82,8 +82,14 @@ def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     copy the three readers had already drifted on the floor: with `minimum=1`, `0` gave 1 here
     and 0 in the checkpoint hook.
     """
-    def report(line: str, malformed: bool = False) -> None:
-        print(f"memories: {line}", file=sys.stderr)
+    def report(line: str) -> None:
+        # BY FILE DESCRIPTOR: `print(file=sys.stderr)` falls back to stdout when fd 2 is
+        # closed, and a tool of this host (the big-file guard) prints its JSON block on
+        # stdout — a note there would corrupt it.
+        try:
+            os.write(2, f"memories: {line}\n".encode())
+        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
+            pass
 
     return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
 

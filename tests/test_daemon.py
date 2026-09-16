@@ -30,6 +30,95 @@ def a_live_lease() -> dict:
     return lease.write("s1", "claude", pid=os.getpid())
 
 
+class TestAClaimIsNotAValidCorpse(unittest.TestCase):
+    """The window between creating the claim file and filling it must not read as a corpse.
+
+    `_try_create` takes the claim with `os.open(O_CREAT|O_EXCL)` and writes the placeholder
+    in a SECOND call, so between the two the file exists and is EMPTY. `record()` parses it,
+    `json.loads("")` raises, and an empty file therefore reads exactly like the record of a
+    daemon that died — which sends the concurrent caller down `_claim`'s corpse path, where it
+    unlinks the live claim and creates its own on top. The docstring of `_try_create` argues
+    at length that a colliding `_claim()` "reads back an alive entry (this process) and
+    correctly backs off, instead of mistaking our in-progress claim for a stale one and
+    tearing it out from under us". That is the behaviour these tests demand; it was not the
+    behaviour the code had.
+
+    Measured before the fix, deterministically (no race needed): a 0-byte `daemon.json` gave
+    `record() -> None`, and `_claim()` on top of it returned True with the file rewritten to
+    the caller's own pid. Under real concurrency that is a SECOND daemon: 6 of 12 races of 8
+    processes ended with two spawns."""
+
+    def setUp(self):
+        self.state = a_state_dir()
+
+    def test_an_EMPTY_record_is_not_read_as_a_dead_daemon(self):
+        daemon.path().parent.mkdir(parents=True, exist_ok=True)
+        daemon.path().write_bytes(b"")
+        self.assertIsNotNone(daemon.record(),
+                             "a half-written claim read as a corpse")
+
+    def test_a_claim_in_progress_is_not_STOLEN_by_a_concurrent_claim(self):
+        daemon.path().parent.mkdir(parents=True, exist_ok=True)
+        daemon.path().write_bytes(b"")          # another process, mid-claim
+        self.assertFalse(daemon._claim(),
+                         "we took a claim another process was still writing")
+        self.assertEqual(daemon.path().read_bytes(), b"",
+                         "we overwrote a live claim")
+
+
+class TestUnknownIsNotDead(unittest.TestCase):
+    """"I could not tell" must never be read as "it is dead" where the answer frees a claim.
+
+    `lease.process_start` returns None on a platform without `/proc`, and `core/lease.py:18`
+    calls that the safe direction — for a LEASE it is: a host whose liveness cannot be read
+    should not keep a daemon alive forever. For the CLAIM the safe direction is the opposite,
+    and reusing the same predicate inverted the guarantee in two places:
+
+      `_claim()` — a record with an empty starttime reads as a corpse, so the caller unlinks
+      a claim whose owner is alive and creates its own on top. Measured with `process_start`
+      returning None: three consecutive `_claim()` calls all returned True.
+
+      `_stop_and_confirm()` — its docstring promises it "returns True only once it is
+      CONFIRMED gone", by re-reading `(pid, starttime)`. With an empty starttime `lease.alive`
+      returns False on its first guard, so it confirmed the death of a process that was still
+      running, in 0.000s, measured against a child ignoring SIGTERM.
+
+    Both end the same way: a second daemon on top of a live first one, which the spec calls
+    impossible."""
+
+    def setUp(self):
+        self.state = a_state_dir()
+
+    def test_a_claim_whose_owner_CANNOT_BE_JUDGED_is_not_stolen(self):
+        with patch.object(lease, "process_start", lambda pid: None):
+            self.assertTrue(daemon._claim(), "the first claim should win")
+            self.assertFalse(daemon._claim(),
+                             "a claim we cannot judge was taken from its owner")
+
+    def test_stop_does_not_confirm_a_death_it_cannot_see(self):
+        # The child TELLS US when its handler is installed, over a pipe. Waiting for
+        # `process_start` to answer instead is not the same event: the process exists from the
+        # moment it is forked, well before it reaches `signal.signal`, so the SIGTERM landed in
+        # the window before the handler and the child really did die — making the assertion
+        # pass for the wrong reason, which is worse than failing.
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import signal, sys, time\n"
+                                  "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                  "sys.stdout.write('ready\\n')\n"
+                                  "sys.stdout.flush()\n"
+                                  "time.sleep(30)\n"],
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), "ready",
+                         "the child never installed its handler")
+        confirmed = daemon._stop_and_confirm({"pid": child.pid, "starttime": ""},
+                                             timeout_s=0.3)
+        self.assertFalse(confirmed,
+                         "it confirmed the death of a process that is still running")
+        self.assertIsNotNone(lease.process_start(child.pid), "the child died on its own")
+
+
 class TestItEndsWithTheLastHost(unittest.TestCase):
     """The user's requirement, verbatim: "the daemon must be killed when claude or hermes
     exits/dies"."""
@@ -387,6 +476,13 @@ class TestCoreDoesNotDependOnTheCliLayer(unittest.TestCase):
     `cli/qctx.py repos daemon run`, so the host-neutral layer named a file in the CLI layer:
     shipping `core` alone, or adding a third host, meant editing core to point elsewhere. The
     loop being started lives in core, so core is now its own entry point."""
+
+    def setUp(self):
+        # ITS OWN STATE DIR. Without this the class inherited whatever directory the previous
+        # test left in the environment, `start()` found that test's claim still on disk, and
+        # returned `already` without spawning. It passed only because a claim left behind read
+        # as a corpse worth removing — the very confusion `record()` no longer makes.
+        a_state_dir()
 
     def test_the_spawned_command_does_not_name_the_cli(self):
         seen = []

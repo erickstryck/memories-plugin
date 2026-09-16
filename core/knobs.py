@@ -109,12 +109,11 @@ def clamped_num(name: str, legacy: str, default: str, kind=int, minimum=None, *,
         # exists to make impossible. Measured with `raw='abc', default='0', minimum=1`: the
         # early return gave 0, the two copies this replaced both gave 1.
         if note:
-            note(f"{name}={raw!r} is not a number — using {default}", malformed=True)
+            note(f"{name}={raw!r} is not a number — using {default}")
         value = kind(default)
     if minimum is not None and value < minimum:
         if note:
-            note(f"{name}={raw!r} would leave nothing to return — using {minimum}",
-                 malformed=False)
+            note(f"{name}={raw!r} would leave nothing to return — using {minimum}")
 
         return kind(minimum)
 

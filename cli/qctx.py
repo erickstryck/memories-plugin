@@ -1578,7 +1578,20 @@ def cmd_repos_status(args, cfg):
         return
     # Said first and plainly: every number below was written by a process that may be gone, and
     # a reader who does not know that reads stalled progress as activity.
-    print(f"daemon: {'running (pid %d)' % running['pid'] if running else 'not running'}")
+    #
+    # THREE STATES, NOT TWO. `daemon.record()` answers with an entry, with `None` when nothing
+    # is running, AND with a sentinel for a record that exists and cannot be parsed — that
+    # third one is truthy on purpose (a damaged record must not read as "nothing running"), so
+    # `running['pid']` raised KeyError here and killed the one command whose job is to report
+    # exactly that state. The `--json` form printed it fine, so the two outputs of one command
+    # disagreed about whether the system was usable.
+    if not running:
+        daemon_line = "not running"
+    elif running.get("pid"):
+        daemon_line = f"running (pid {running['pid']})"
+    else:
+        daemon_line = "record unreadable — remove it if no daemon is running"
+    print(f"daemon: {daemon_line}")
     if not rows:
         # NOT AN EARLY RETURN ANY MORE. "No jobs" and "nothing held" are different facts, and
         # a settled repository has the first without the second — which is the state where a

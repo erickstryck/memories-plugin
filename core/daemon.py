@@ -46,18 +46,47 @@ def path() -> Path:
     return state_dir() / "daemon.json"
 
 
+#: What `record()` answers for a file that EXISTS but cannot be parsed.
+#:
+#: NOT an empty dict: every other caller tests `record()` for TRUTHINESS (`if not entry`,
+#: `existing.get("pid", 0) if existing else 0`), so a falsy sentinel would read to them as
+#: "nothing is running" — the very answer this exists to avoid. It carries no usable pid, and
+#: that is honest: `stop()` cannot signal a daemon whose record it cannot read, and returns
+#: False rather than killing something it cannot name. `_claim()` is the one caller that tests
+#: `is not None`, which is what stops it from removing a claim it failed to parse.
+_UNREADABLE: dict = {"unreadable": True}
+
+
 def record() -> dict | None:
     """The running daemon, or None. A record whose process is gone reads as none.
 
     Same `(pid, starttime)` test the leases use: a recycled pid must not make a dead daemon look
     alive, or nothing would ever start one again.
+
+    AN UNPARSEABLE RECORD IS NOT A CORPSE. `None` here sends `_claim()` down the path that
+    unlinks the file and takes the claim, so answering `None` for a file that merely could not
+    be READ hands the claim to a caller while the real holder is still alive. `_try_create`
+    publishes the record complete, so a file that exists and does not parse is a damaged one,
+    not a half-written one — and the safe answer to damage is the one that starts no second
+    daemon. The empty case is called out separately because it is the one an interrupted write
+    leaves behind, and it used to be indistinguishable from a dead daemon's record.
     """
     try:
-        entry = json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+        raw = path().read_text(encoding="utf-8")
+    except OSError:
+        return None                     # no file at all: genuinely nothing running
+    try:
+        entry = json.loads(raw)
+    except ValueError:
+        return _UNREADABLE
     if not isinstance(entry, dict):
-        return None
+        return _UNREADABLE
+    if _unjudgeable(entry):
+        # PRESENT AND NOT JUDGEABLE, which is not the same as gone. Falling through to
+        # `lease.alive` here would answer None — the corpse verdict — for every record on a
+        # platform where `process_start` cannot read a start time, and `_claim()` removes
+        # corpses. See `_unjudgeable`.
+        return entry
     if not lease.alive(entry):
         return None
 
@@ -148,13 +177,38 @@ def _stop_and_confirm(entry: dict, timeout_s: float = 2.0, poll_s: float = 0.05,
         os.kill(int(entry["pid"]), 15)
     except (OSError, ValueError, KeyError):
         pass                                          # already gone, or never startable
+    # WITHOUT A START TIME THERE IS NOTHING TO RE-READ, so the `(pid, starttime)` test cannot
+    # confirm anything and `lease.alive` answers False on its first guard — which read as
+    # "confirmed dead" and released the claim over a process that was still running (measured:
+    # True in 0.000s against a child ignoring SIGTERM). The pid alone is the only evidence
+    # available here, and it is weaker: a recycled pid looks alive. That is the right way to
+    # be wrong for this caller, because the cost is a claim held too long, not two daemons.
+    judged = (lambda: lease.process_start(int(entry["pid"])) is not None
+              ) if _unjudgeable(entry) else (lambda: lease.alive(entry))
     deadline = time.monotonic() + timeout_s
-    while lease.alive(entry):
+    while judged():
         if time.monotonic() >= deadline:
             return False
         sleep(poll_s)
 
     return True
+
+
+def _unjudgeable(entry: dict) -> bool:
+    """True when the record names a process whose liveness we cannot establish.
+
+    `lease.process_start` returns None where `/proc` is unavailable, and `lease.alive` turns
+    that into False because for a LEASE the safe direction is "assume dead": a host whose
+    liveness cannot be read must not keep a daemon running forever. For a CLAIM the safe
+    direction is the exact opposite — "assume alive", because the answer decides whether we
+    may delete someone else's claim and spawn a second daemon on top of them.
+
+    So the predicate is not reused, it is inverted here on purpose. Measured before this
+    existed: with `process_start` stubbed to None, three consecutive `_claim()` calls each
+    returned True, and `_stop_and_confirm` confirmed in 0.000s the death of a child that was
+    ignoring SIGTERM and still running.
+    """
+    return not entry.get("starttime")
 
 
 def _claim() -> bool:
@@ -188,20 +242,42 @@ def _try_create() -> bool:
     while we are still between claiming and spawning reads back an alive entry (this process) and
     correctly backs off, instead of mistaking our in-progress claim for a stale one and tearing
     it out from under us. `_write_record` overwrites it with the real pid once spawning succeeds.
+
+    THE FILE IS NEVER PUBLISHED EMPTY. `os.open(O_EXCL)` followed by `os.write` created the
+    name first and filled it a statement later, and `record()` parses what it reads — so for
+    the width of that window the claim was a 0-byte file, `json.loads("")` raised, and an empty
+    file read EXACTLY like the record of a daemon that died. A concurrent `_claim()` then took
+    the corpse path, unlinked the live claim and created its own on top: a second daemon, which
+    the spec calls impossible. Measured deterministically (`record()` on 0 bytes -> None;
+    `_claim()` over it -> True, file rewritten to the caller's pid) and under load: 6 of 12
+    races of 8 processes ended with two spawns.
+
+    So the content is written to a private temporary and the claim is taken by LINKING it into
+    place: `os.link` fails with `FileExistsError` when the name is taken, giving the same
+    exclusive-create guarantee, and the file is complete from the instant it becomes visible.
     """
     try:
         path().parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path(), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        entry = json.dumps({"pid": os.getpid(),
+                            "starttime": lease.process_start(os.getpid()) or ""},
+                           sort_keys=True).encode("utf-8")
+        staged = path().with_suffix(f".{os.getpid()}.claim")
+        staged.write_bytes(entry)
     except OSError:
         return False
     try:
-        os.write(fd, json.dumps({"pid": os.getpid(),
-                                 "starttime": lease.process_start(os.getpid()) or ""},
-                                sort_keys=True).encode("utf-8"))
-    finally:
-        os.close(fd)
+        os.link(staged, path())
 
-    return True
+        return True
+    except OSError:
+        # FileExistsError: someone else holds it. Any other OSError (a filesystem without
+        # hard links, a full disk) is the same answer to the caller: we did not get the claim.
+        return False
+    finally:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
 
 
 def stop(timeout_s: float = 2.0, poll_s: float = 0.05, sleep=time.sleep) -> bool:

@@ -38,6 +38,48 @@ def run_hook(session: str, interval: str, state_dir: str, times: int = 1) -> lis
     return outputs
 
 
+class TestTheProtocolSurvivesAClosedStderr(unittest.TestCase):
+    """A malformed knob must never cost this hook's block either.
+
+    THE SIBLING TEST IN `test_recall_block.py` WAS NOT ENOUGH. The same fix was applied to
+    three hosts and only the recall hook got this coverage; the comment left in this module
+    asserted "this hook writes no protocol on stdout", which is false — `main` ends in
+    `print(json.dumps(...))`. Measured with fd 2 closed and `QCTX_CHECKPOINT_INTERVAL=5x`:
+
+        stdout: "checkpoint: QCTX_CHECKPOINT_INTERVAL='5x' is not a number — using 5\\n"
+
+    and the block gone entirely. A hook that had emitted its block for years dropped it the
+    first time someone typed a bad interval, on the one code path no test combined."""
+
+    def _run(self, close_stderr: bool) -> str:
+        """Runs until the interval fires: the counter lives on disk, so the block comes on
+        the Nth call, not the first. `5x` degrades to the coded default of 5."""
+        state = tempfile.mkdtemp()
+        env = dict(os.environ, QCTX_STATE_DIR=state, QCTX_CHECKPOINT_INTERVAL="5x")
+        env.pop("QCTX_CHECKPOINT_DISABLED", None)
+        payload = json.dumps({"prompt": "oi", "session_id": "s1"})
+        out = ""
+        for _ in range(5):
+            run = subprocess.run(
+                [sys.executable, str(HOOK)], input=payload, capture_output=True, text=True,
+                env=env, preexec_fn=(lambda: os.close(2)) if close_stderr else None)
+            out = run.stdout.strip()
+
+        return out
+
+    def test_a_malformed_interval_does_not_corrupt_the_block(self):
+        out = self._run(close_stderr=True)
+        self.assertTrue(out, "the hook emitted nothing at all")
+        self.assertFalse(out.startswith("checkpoint:"),
+                         f"the note landed on stdout, ahead of the protocol: {out[:80]!r}")
+        json.loads(out)                                        # raises if corrupt
+
+    def test_the_block_is_still_emitted_when_stderr_works(self):
+        out = self._run(close_stderr=False)
+        self.assertTrue(out, "the hook emitted nothing at all")
+        json.loads(out)
+
+
 class TestCheckpointFires(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
