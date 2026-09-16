@@ -180,24 +180,66 @@ class TestTheClaudeManifestsStayTRUE(unittest.TestCase):
                     seen += 1
         self.assertGreaterEqual(seen, 3, "the three hooks this plugin ships are not all declared")
 
-    def test_NO_manifest_declares_a_version(self):
-        """The commit is the version, on both hosts, and this test is the decision.
+    def test_the_version_is_ONE_number_across_every_manifest(self):
+        """`core/version.py` owns it; the manifests copy it. This is that guarantee.
 
-        A hand-maintained version string had already gone stale here: the manifests said 0.3.0
-        while `claude plugin list` reported 0.2.0 installed — measured. claude-code auto-versions
-        from the commit SHA when the field is absent, so every push is deliverable rather than
-        waiting on someone remembering to bump; hermes reads the field for display only and its
-        `plugins update` is a git pull. `--ref <sha>` is how a specific commit gets pinned.
+        THIS TEST REPLACES `test_NO_manifest_declares_a_version`, and the swap is the whole
+        decision. The old rule was sound in its reasoning -- a hand-maintained number goes
+        stale, and this one already had: the manifests said 0.3.0 while `claude plugin list`
+        reported 0.2.0 installed, measured. What it could not give was compatibility
+        information: `9ff5469 -> 5701914` says nothing about whether an upgrade is safe,
+        `1.0.0 -> 2.0.0` does.
 
-        The claude validator WARNS about the absent field and still passes. The warning is the
-        price of the field never lying, which is the trade being made on purpose."""
+        So the number is back, and the staleness it costs is paid for HERE. Three manifests
+        cannot read Python, so the string is physically written four times; this compares all
+        four against the one owner and fails on the first disagreement -- the 0.3.0/0.2.0
+        drift is now a red test rather than a silent lie. Bump `core/version.py`, run the
+        suite, and this names whatever you forgot.
+        """
+        from core.version import __version__
+
         plugin, marketplace = self.manifests()
-        self.assertNotIn("version", plugin, "plugin.json declares a version to go stale")
-        self.assertNotIn("version", top_level_keys(REPO / "plugin.yaml"),
-                         "plugin.yaml declares a version to go stale")
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$",
+                         "core/version.py must hold a plain semver triple")
+        self.assertEqual(plugin.get("version"), __version__, ".claude-plugin/plugin.json")
         for entry in marketplace["plugins"]:
             with self.subTest(plugin=entry["name"]):
-                self.assertNotIn("version", entry)
+                self.assertEqual(entry.get("version"), __version__, "marketplace.json")
+        for manifest in (REPO / "plugin.yaml", REPO / "hosts" / "hermes" / "plugin.yaml"):
+            with self.subTest(manifest=manifest.name, dir=manifest.parent.name):
+                declared = [
+                    line.split(":", 1)[1].strip()
+                    for line in manifest.read_text().splitlines()
+                    if line.startswith("version:")]
+                self.assertEqual(declared, [__version__], f"{manifest} disagrees")
+
+    def test_the_version_is_what_the_REAL_hermes_loader_reports(self):
+        """A manifest key hermes does not parse is a version nobody sees.
+
+        Read from the installed loader rather than asserted from the file: `plugins list`
+        renders `manifest.version`, and this plugin declares it in two manifests for two
+        install shapes. Skipped when hermes is not installed, like its neighbours here.
+        """
+        if not HERMES_PY.exists():
+            self.skipTest("hermes is not installed at ~/.hermes/hermes-agent")
+        from core.version import __version__
+
+        probe = (
+            "import sys, json; sys.path.insert(0, %r)\n"
+            "from hermes_cli.plugins_manifest import parse_manifest_file\n"
+            "from pathlib import Path\n"
+            "print(json.dumps([getattr(parse_manifest_file(Path(p) / 'plugin.yaml',\n"
+            "                                              Path(p), 'user', ''),\n"
+            "                          'version', None)\n"
+            "                  for p in (%r, %r)]))\n"
+        ) % (str(HERMES_SRC), str(REPO), str(REPO / "hosts" / "hermes"))
+        out = subprocess.run([str(HERMES_PY), "-c", probe], capture_output=True,
+                             text=True, timeout=180, cwd=str(HERMES_SRC))
+        self.assertEqual(out.returncode, 0,
+                         "could not drive the installed loader; if its API moved, FIX THIS "
+                         f"PROBE rather than skipping past it: {out.stderr.strip()[:300]}")
+        self.assertEqual(json.loads(out.stdout), [__version__, __version__],
+                         "the installed loader does not report the declared version")
 
     def test_the_marketplace_points_at_this_repository(self):
         """`source: ./` is what makes one repository both the plugin and its marketplace, which
@@ -207,11 +249,21 @@ class TestTheClaudeManifestsStayTRUE(unittest.TestCase):
 
     def test_every_skill_directory_is_a_skill(self):
         """Skills are auto-discovered from `skills/`, so a directory without a SKILL.md is a
-        silent no-op rather than an error."""
-        for directory in sorted((REPO / "skills").iterdir()):
-            if directory.is_dir():
-                with self.subTest(skill=directory.name):
-                    self.assertTrue((directory / "SKILL.md").is_file())
+        silent no-op rather than an error.
+
+        This reads the DIRECTORY, deliberately not `core/skills.py`: the catalogue yields
+        only directories that have a SKILL.md, so asking it the same question would answer
+        yes by construction and pin nothing. The catalogue is the other side of the
+        comparison, not the source of it.
+        """
+        from core import skills
+
+        on_disk = sorted(d.name for d in (REPO / "skills").iterdir() if d.is_dir())
+        for name in on_disk:
+            with self.subTest(skill=name):
+                self.assertTrue((REPO / "skills" / name / "SKILL.md").is_file())
+        self.assertEqual(skills.names(), on_disk,
+                         "a skill directory is being silently dropped from the catalogue")
 
     @unittest.skipUnless(CLAUDE, "the claude CLI is not on PATH")
     def test_the_REAL_validator_accepts_the_manifests(self):

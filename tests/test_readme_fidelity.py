@@ -99,8 +99,9 @@ class CountsMatchTheTree(unittest.TestCase):
         self.assertEqual(self.counted("hook"), {real})
 
     def test_skills(self):
-        real = len(list((REPO / "skills").glob("*/SKILL.md")))
-        self.assertEqual(self.counted("skill"), {real})
+        from core import skills
+
+        self.assertEqual(self.counted("skill"), {len(skills.names())})
 
     def test_tools(self):
         from hosts.hermes import tools

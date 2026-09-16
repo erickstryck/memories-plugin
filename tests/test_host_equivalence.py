@@ -136,8 +136,14 @@ class TestTheInjectedTextNamesNoSingleHostSurface(unittest.TestCase):
     else would catch it: the two hosts inject the same wrong sentence identically.
 
     The concrete case: the checkpoint procedure ended "the commands are in the memory skill",
-    which on hermes points at something the model cannot load. Skills are the claude-code
-    surface; hermes gets the 15 tools.
+    naming a bare `memory` — the spelling that resolves on claude-code and NOT on hermes,
+    where the same skill is `memories:memory` (hermes namespaces a plugin's skills by the
+    plugin name). Both hosts can load the skill now; neither can load it under the other's
+    name, so the shared text still must not send the model to one of them.
+
+    Each host's own pointer therefore lives in its adapter: `system_prompt_block()` on hermes
+    (pinned by `tests/test_hermes_skills.py`, which also asserts the namespace stays OUT of
+    these two strings), the plugin manifest on claude-code.
     """
 
     def texts(self):

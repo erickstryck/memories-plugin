@@ -71,11 +71,13 @@ def commands_in_skill() -> list[str]:
 
 class TestTheSkillExistsAndIsDiscoverable(unittest.TestCase):
     def test_the_file_is_where_a_host_looks_for_skills(self):
-        """Beside the other two, in `skills/<name>/SKILL.md`. A file anywhere else is a file
-        no host loads, and the feature would stay undiscoverable with documentation written."""
-        self.assertTrue(SKILL.is_file(), f"{SKILL} does not exist")
-        self.assertTrue((REPO / "skills" / "memory" / "SKILL.md").is_file(),
-                        "the layout this test assumes has changed")
+        """In the package's skill catalogue, which is what both hosts read. A file anywhere
+        else is a file no host loads, and the feature would stay undiscoverable with
+        documentation written."""
+        from core import skills
+
+        self.assertIn("repo-index", skills.names(), f"{SKILL} is not in the catalogue")
+        self.assertEqual(skills.paths()["repo-index"], str(SKILL))
 
     def test_the_frontmatter_carries_a_name_and_a_description(self):
         head = skill_text().split("---")[1]

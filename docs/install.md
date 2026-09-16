@@ -46,9 +46,12 @@ claude plugin marketplace update memories-plugin
 claude plugin update memories-plugin@memories-plugin      # name@marketplace, not just the name
 ```
 
-The version it reports is the **commit SHA**, because the manifests declare no version on purpose
-A hand-maintained number goes stale and this one already had (0.3.0 declared, 0.2.0 installed).
-`claude plugin details memories-plugin` lists what it found: 3 skills, 4 hooks.
+The version it reports is the one in the manifests, and `core/version.py` is where that number
+is decided. Three manifests cannot read Python, so the string is written out four times and
+`tests/test_installable_from_git.py::TestTheVersionIsONENumber` fails on the first disagreement:
+the number went stale here once (0.3.0 declared, 0.2.0 installed, measured), and that drift is
+now a red test instead of a silent lie. To pin an exact build, `--ref v1.0.0` (or a commit SHA)
+still does it. `claude plugin details memories-plugin` lists what it found: 3 skills, 4 hooks.
 
 That registers, with no path for you to maintain (the hooks resolve
 `${CLAUDE_PLUGIN_ROOT}` themselves):
@@ -146,6 +149,30 @@ hermes hooks list        # ✓ allowed, with the approval timestamp, once it is 
 
 Do **not** reach for `hooks_auto_accept: true` to skip that step: it auto-approves every future
 hook from anywhere, which is a policy change, not a fix for this one.
+
+**Then let the sandbox see the keys.** `execute_code` runs its Python in a child process that
+scrubs every environment variable whose name contains `KEY`, `TOKEN`, `SECRET` or `AUTH`
+(among others: `PASSWORD`, `CREDENTIAL`, `BEARER`, `APIKEY`, `WEBHOOK`, `DSN`), so
+`qctx` works from the `terminal` tool and fails to authenticate from `execute_code`, on the same
+machine, in the same session. Measured 2026-09-16: the terminal child had 163 variables including
+all four credentials; the `execute_code` child had 54 and none of them.
+
+The scrub is deliberate hardening, and the supported way through it is the opt-in allowlist:
+
+```bash
+hermes config set terminal.env_passthrough '["QCTX_QDRANT_API_KEY","QCTX_API_KEY"]'
+```
+
+Only the names listed pass; hermes' own provider credentials (`ANTHROPIC_API_KEY` and the rest)
+are refused even if listed, which is the GHSA-rhgp-j443-p4rf blocklist and not something to work
+around. Skip this and nothing breaks loudly: `qctx` simply rejects the credentials from one tool
+and not from the other.
+
+**List the spellings you actually set.** The allowlist matches variable NAMES, not the setting
+behind them, so it does not follow the aliases `core/config.py` accepts. If your keys are in the
+legacy spellings this manifest asks for, `QDRANT_SERVICE_API_KEY` and `SERVER_API_KEY`, list
+those two instead: the line above allowlists only the canonical `QCTX_*` pair and would leave a
+legacy install failing exactly as before, with the same silence.
 
 Run the first form first and read it. It checks the credentials, the collections, the
 provider entry, the hook block and whether the context window is declared, and prints the

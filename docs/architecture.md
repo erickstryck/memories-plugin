@@ -65,13 +65,23 @@ The same core serves two hosts, with the same operations and the same configurat
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
 | big-file guard | `PreToolUse` hook on `Read` | `pre_tool_call` shell hook, matcher `read_file` |
-| operations | `qctx` CLI + 3 skills | 22 model-invokable tools + the same CLI |
-| what the model is told | the 3 skills | `system_prompt_block()`, from the same `core/prompts.py` |
+| operations | `qctx` CLI + 3 skills | 22 model-invokable tools, the same CLI, and the same 3 skills |
+| what the model is told | the 3 skills | `system_prompt_block()`, from the same `core/prompts.py`, pointing at `memories:memory` |
 | configuration | `~/.config/memories-plugin/config.json` | the same file |
 | credentials | the environment | the environment, or `$HERMES_HOME/.env` |
 
 Equivalence is not a claim in this table: `tests/test_host_equivalence.py` renders every
 block state through both adapters and requires byte-identical output.
+
+**The skills reach the two hosts by different routes, and that asymmetry is load-bearing.**
+claude-code discovers `skills/` by itself. hermes does not: its loader hands the plugin a
+context and registers only what `register()` explicitly asks for, so the adapter walks
+`core/skills.py` and hands over each one. hermes also keeps plugin skills out of the
+available-skills list it injects (explicit loads only), so registering a skill
+makes it loadable but not findable. That is why `system_prompt_block()` names
+`memories:memory` outright: without the pointer the model is never told the name it would
+have to ask for. The skills were reachable on claude-code and unreachable on hermes for
+exactly as long as the adapter registered the provider and nothing else.
 
 The hermes install is a **symlink** into `$HERMES_HOME/plugins/memories`, one level deep and no
 deeper: hermes' loader (`plugins/memory/__init__.py`) scans `$HERMES_HOME/plugins/<name>/`,
@@ -264,10 +274,12 @@ core/       the portable core, no reference to a host or an agent
   blocks.py     the injected block, in all four of its states; one renderer, both hosts
   session_state.py  what was already injected, and when the checkpoint is due
   prompts.py    the instructions and the checkpoint procedure, shared by both hosts
+  skills.py     which skills the package ships and where they are; one owner of the list
+  version.py    the package version; the manifests copy it and a test holds them to it
 cli/        the command-line interface over the core
 hooks/      the claude-code adapter: recall.py, checkpoint.py, bigfile.py (the read guard), lease.py
 hosts/
-  hermes/       the hermes-agent adapter: the provider object and its 22 tools
+  hermes/       the hermes-agent adapter: the provider object, its 22 tools, and skill registration
 skills/     memory, doc-index, repo-index
 scripts/    install.sh (the wizard), cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
 tests/      offline tests + integration tests

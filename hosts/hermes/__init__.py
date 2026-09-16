@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import core  # noqa: E402
-from core import blocks, knobs, names, query, session_state  # noqa: E402
+from core import blocks, knobs, names, query, session_state, skills  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE, INSTRUCTIONS  # noqa: E402
 
@@ -70,6 +70,20 @@ HERMES_PREFETCH_BUDGET_S = 8.0
 MAX_ANGLES = 3
 
 
+def _note(line: str) -> None:
+    """This host's one way of saying something to the operator. Prefixed, on stderr.
+
+    BY FILE DESCRIPTOR: `print(file=sys.stderr)` falls back to stdout when fd 2 is closed,
+    and a tool of this host (the big-file guard) prints its JSON block on stdout -- a note
+    there would corrupt it. A lost note is cheaper than a lost block, so a failed write is
+    dropped rather than raised.
+    """
+    try:
+        os.write(2, f"memories: {line}\n".encode())
+    except OSError:            # noqa: BLE001 — see docstring
+        pass
+
+
 def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     """This host's channel for the shared clamped read in `core/knobs.py`.
 
@@ -78,16 +92,7 @@ def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     copy the three readers had already drifted on the floor: with `minimum=1`, `0` gave 1 here
     and 0 in the checkpoint hook.
     """
-    def report(line: str) -> None:
-        # BY FILE DESCRIPTOR: `print(file=sys.stderr)` falls back to stdout when fd 2 is
-        # closed, and a tool of this host (the big-file guard) prints its JSON block on
-        # stdout — a note there would corrupt it.
-        try:
-            os.write(2, f"memories: {line}\n".encode())
-        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
-            pass
-
-    return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
+    return knobs.clamped_num(name, legacy, default, kind, minimum, note=_note)
 
 
 
@@ -274,11 +279,29 @@ class MemoriesProvider(_Base):
         return copy.deepcopy(tools.SCHEMAS)
 
     def system_prompt_block(self) -> str:
-        """STATIC provider info. Recall goes through prefetch, never here."""
+        """STATIC provider info. Recall goes through prefetch, never here.
+
+        WHY THE SKILL IS NAMED HERE AND NOT LEFT TO DISCOVERY. `register_skill` makes a
+        plugin skill LOADABLE but not FINDABLE: hermes keeps plugin skills out of
+        `<available_skills>` on purpose ("explicit loads only", its own docstring), so a
+        model never told the qualified name will never call `skill_view` with it. This block
+        is the one text guaranteed to be read, so the pointer belongs here.
+
+        AND ONLY THE POINTER. The block is injected on every turn of every session; the
+        skill it points at is ~9.3k and is paid for only when loaded. Detail that migrates
+        up into this block is detail charged to every turn, and
+        `tests/test_hermes_skills.py` pins the block's size for that reason.
+
+        The line is host-specific and stays out of `core/prompts.py`: that text is injected
+        VERBATIM into claude-code too, where `memories:memory` is not a name that resolves
+        (`tests/test_host_equivalence.py` fails a shared text that names one host's surface).
+        """
         return (
             "Long-term memory is available and searched automatically before each turn.\n"
             "To search or write it yourself, use the memory tools, or the CLI:\n"
             "  qctx memory recall \"<topic>\"   ·   qctx memory store \"<atomic fact>\"\n"
+            "Before saving, and before asserting a fact that may already have been decided,\n"
+            f"load the full procedure: skill_view(\"{qualified_skill(PRIMARY_SKILL)}\").\n"
             + INSTRUCTIONS
         )
 
@@ -889,6 +912,63 @@ tools = _load_tools()
 tools.bind_tuning(MemoriesProvider)
 
 
+#: The name hermes resolves this plugin's skills under: `<plugin>:<skill>`. The namespace is
+#: hermes' own (it derives it from the plugin name and refuses a ':' inside the bare name),
+#: so it is spelled HERE, in hermes' adapter, and never in `core/skills.py` -- a catalogue
+#: that learned one host's naming would have to learn the other's next.
+SKILL_NAMESPACE = "memories"
+
+#: The skill a session must load before writing to the archive. Named in the system prompt
+#: block because registration alone does not make a plugin skill FINDABLE (see there).
+PRIMARY_SKILL = "memory"
+
+
+def qualified_skill(name: str) -> str:
+    """`memory` -> `memories:memory`. One spelling of hermes' namespacing, not four."""
+    return f"{SKILL_NAMESPACE}:{name}"
+
+
+def _register_skills(ctx) -> None:
+    """Hand every skill in the package's catalogue to the host, if this host takes skills.
+
+    WHY THE CATALOGUE AND NOT A LIST HERE. `core/skills.py` owns what this package ships; a
+    fourth skill must not depend on somebody remembering to edit this function.
+    `tests/test_hermes_skills.py` drives the two against each other.
+
+    WHY EVERY FAILURE IS SWALLOWED, AND ONLY HERE. hermes' loader catches whatever
+    `register()` raises and DISABLES THE WHOLE PLUGIN -- so an accessory that raises costs
+    the memory provider, which is the reason this plugin exists. Two refusals are real and
+    MEASURED against the installed host: a ctx with no `register_skill` at all (the memory
+    collector in `plugins/memory/__init__.py` calls this same `register()` and offers only
+    `register_memory_provider`), and `ValueError: Invalid skill name` for a directory whose
+    name does not match `[a-zA-Z0-9_-]+` (`agent/skill_utils.py::_NAMESPACE_RE`, enforced in
+    `PluginContext.register_skill`). Skills are an accessory; they never take the provider
+    down with them. The provider's own registration is deliberately NOT wrapped -- a failure
+    there is the one the user must see, and a test pins that asymmetry.
+
+    NOT among the reasons, though it looks like one: a duplicate registration on reload.
+    hermes gates that raise on `self.manifest.portable`, and this plugin ships a native
+    `plugin.yaml`, so `portable` is False -- measured on a live manifest, where registering
+    the same skill twice simply replaces the entry. An earlier version of this docstring
+    claimed otherwise.
+
+    THE SWALLOW LOGS. A silent drop here would be the very defect this function fixes, one
+    layer down: a skill on disk that no host ever loads, with nothing anywhere saying why.
+
+    A `pathlib.Path` IS REQUIRED, not a str: hermes calls `path.exists()` on what it is
+    given, and the AttributeError from a str is precisely the silent-disable above.
+    """
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is None:
+        return
+    for skill in skills.find():
+        try:
+            register_skill(skill.name, Path(skill.path))
+        except Exception as exc:  # noqa: BLE001 -- see docstring: never cost the provider
+            _note(f"skill {skill.name!r} not registered: {type(exc).__name__}: {exc}")
+
+
 def register(ctx) -> None:
     """Entry point the loader prefers. Also the string discovery greps for."""
     ctx.register_memory_provider(MemoriesProvider())
+    _register_skills(ctx)

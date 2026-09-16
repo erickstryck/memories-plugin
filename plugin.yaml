@@ -2,13 +2,17 @@
 # `provides_tools` is deliberately absent: the installer resolves those names against hermes'
 # TOOLSET registry, and this plugin's 22 tools are exposed through the memory provider instead.
 # Declaring them would make `plugins show` look richer and answer wrongly.
-# NO `version:` FIELD, DELIBERATELY. hermes reads it for display only (default "") and its
-# `plugins update` is a git pull, not a version comparison — so a version here buys nothing and
-# costs a string somebody has to remember to bump. It went stale once already on the other host:
-# the manifest said 0.3.0 while the installed record said 0.2.0, measured. The commit is the
-# version, and `--ref <sha>` is how you pin one.
+#
+# THE `version:` BELOW IS A COPY. `core/version.py` owns the number; this file cannot read
+# Python, so it is written out here and in the two other manifests, and
+# `tests/test_installable_from_git.py::TestTheVersionIsONENumber` fails the moment any of the
+# four disagree. That test is the whole reason a version is safe to declare again: a
+# hand-maintained one went stale here before (manifest said 0.3.0, installed record said
+# 0.2.0, measured), and drift is now red instead of silent. Bump `core/version.py`, run the
+# suite, tag the commit `v<version>` — `--ref` pins the tag.
 manifest_version: 1
 name: memories
+version: 1.0.0
 kind: standalone
 description: >-
   Long-term memory, document indexing and repository search in Qdrant, shared with the
