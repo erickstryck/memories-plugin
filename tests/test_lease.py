@@ -168,10 +168,24 @@ class TestAnAPPROXIMATEResolutionSaysSo(unittest.TestCase):
 
 
 class TestFindingTheHOST(unittest.TestCase):
+    def _own_exec_name(self) -> str:
+        """The name `/proc` reports for THIS process, which is what `find_host_pid` matches.
+
+        NOT `basename(sys.executable)`. The two disagree whenever the interpreter is reached
+        through a symlink: measured on this machine, `/home/linuxbrew/.linuxbrew/bin/python3`
+        resolves `sys.executable` to `.../bin/python3.14` while `/proc/<pid>/stat` reports
+        `python3`, the name it was EXECUTED under. A test asserting on the first form fails
+        under that interpreter and passes under the other two, at every commit — it states a
+        fact about how the runner was invoked, not about the code.
+        """
+        with open(f"/proc/{os.getpid()}/stat", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+        return raw.split("(", 1)[1].rsplit(")", 1)[0]
+
     def test_it_walks_up_and_finds_a_named_ancestor(self):
         """On claude-code the hook is a subprocess: python3 -> bash -> claude. Measured on this
         machine in 2026-08-18."""
-        found = lease.find_host_pid(names=(os.path.basename(sys.executable),))
+        found = lease.find_host_pid(names=(self._own_exec_name(),))
         self.assertIsNotNone(found, "did not find the interpreter in the process tree")
         pid, start = found
         self.assertEqual(lease.process_start(pid), start)
