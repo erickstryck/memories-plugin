@@ -160,6 +160,35 @@ def _release_claim() -> None:
         pass
 
 
+def _pid_alive_fn(entry: dict):
+    """A liveness test for a record we cannot judge by `(pid, starttime)`. ONE owner.
+
+    Signal 0 is the only liveness question that answers on every platform: `process_start`
+    reads `/proc`, which does not exist on macOS or Windows, so it answers None for live
+    processes there and any caller comparing it against None confirms deaths it never saw.
+
+    The pid alone is weaker evidence than `(pid, starttime)` — a recycled pid reads as alive —
+    and both callers want to be wrong in that direction: a claim held too long delays a daemon,
+    a claim released too early spawns a second one on top of a live first.
+    """
+    try:
+        pid = int(entry["pid"])
+    except (TypeError, ValueError, KeyError):
+        return lambda: True             # no pid to check: never confirm anything
+
+    def alive() -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True                 # PermissionError and friends: it exists
+
+        return True
+
+    return alive
+
+
 def _stop_and_confirm(entry: dict, timeout_s: float = 2.0, poll_s: float = 0.05,
                       sleep=time.sleep) -> bool:
     """Signals the process named by `entry` and returns True only once it is CONFIRMED gone.
@@ -183,8 +212,14 @@ def _stop_and_confirm(entry: dict, timeout_s: float = 2.0, poll_s: float = 0.05,
     # True in 0.000s against a child ignoring SIGTERM). The pid alone is the only evidence
     # available here, and it is weaker: a recycled pid looks alive. That is the right way to
     # be wrong for this caller, because the cost is a claim held too long, not two daemons.
-    judged = (lambda: lease.process_start(int(entry["pid"])) is not None
-              ) if _unjudgeable(entry) else (lambda: lease.alive(entry))
+    #
+    # LIVENESS IS ASKED WITH SIGNAL 0, NOT WITH `process_start`. The first version of this
+    # fallback asked `process_start(pid) is not None`, which fixed nothing off Linux: with no
+    # `/proc` that answers None for EVERY pid, so the loop exits on its first turn and confirms
+    # a death it never saw. Measured with `process_start` stubbed to None, as macOS and Windows
+    # behave: stop() returned True in 0.000s against a live child ignoring SIGTERM and released
+    # the claim. `os.kill(pid, 0)` answers the same question on every platform.
+    judged = _pid_alive_fn(entry) if _unjudgeable(entry) else (lambda: lease.alive(entry))
     deadline = time.monotonic() + timeout_s
     while judged():
         if time.monotonic() >= deadline:
@@ -226,7 +261,8 @@ def _claim() -> bool:
     """
     if _try_create():
         return True
-    if record() is not None:
+    held = record()
+    if held is not None and not _reclaimable(held):
         return False
     try:
         path().unlink()
@@ -234,6 +270,44 @@ def _claim() -> bool:
         pass
 
     return _try_create()
+
+
+def _reclaimable(entry: dict) -> bool:
+    """Whether a record we cannot judge by `(pid, starttime)` names a process that is GONE.
+
+    `record()` answers an unjudgeable record as truthy on purpose: for `stop()` and for
+    `status`, "I cannot tell" must read as "assume alive". But `_claim()` asks a different
+    question — may I remove this file? — and truthiness alone answered "never", which jams
+    `start()` forever on a record with no `starttime`. Measured: three consecutive `start()`
+    calls each returned `{"action": "already"}` with zero spawns and no path out.
+
+    That state is not exotic. `start()` persists `lease.process_start(pid) or ""`, so a child
+    that exits immediately leaves it empty here on Linux, and on macOS and Windows — both
+    listed as supported — `/proc` never exists, so EVERY record is written this way and
+    indexing would stop for good after the first daemon exited.
+
+    The pid alone is weaker evidence than `(pid, starttime)`: a recycled pid reads as alive.
+    That is the right way to be wrong here, because holding a claim too long delays a daemon
+    while releasing one too early spawns a second on top of a live first.
+
+    LIVENESS IS ASKED WITH SIGNAL 0, NOT WITH `process_start` — see `_pid_alive_fn`, which owns
+    that question for this module. On a platform without `/proc` `process_start` answers None
+    for every pid, live ones included, so asking it here would steal every claim on exactly the
+    platforms this branch exists to serve.
+
+    NO PID AT ALL IS NOT A CORPSE, IT IS A CLAIM IN PROGRESS. A record with no readable pid is
+    what another process writing its claim RIGHT NOW looks like from here, and the 0-byte
+    window is exactly the race `_try_create` was rewritten to close. Answering "reclaimable"
+    would reopen it from the other side.
+    """
+    if not _unjudgeable(entry):
+        return False                    # judgeable and alive: record() would have said None
+    try:
+        int(entry["pid"])
+    except (TypeError, ValueError, KeyError):
+        return False                    # mid-write, not dead: leave it alone
+
+    return not _pid_alive_fn(entry)()
 
 
 def _try_create() -> bool:
@@ -255,6 +329,15 @@ def _try_create() -> bool:
     So the content is written to a private temporary and the claim is taken by LINKING it into
     place: `os.link` fails with `FileExistsError` when the name is taken, giving the same
     exclusive-create guarantee, and the file is complete from the instant it becomes visible.
+
+    NOT EVERY `OSError` FROM `os.link` MEANS THE NAME IS TAKEN. `FileExistsError` does; ENOSYS
+    or EPERM from a filesystem without hard-link support means the exact opposite — nobody
+    holds the claim and nobody ever will. Swallowing both told the caller "a daemon is already
+    running" where none was, with no path out: measured with `os.link` raising ENOSYS,
+    `start()` answered `{"action": "already", "pid": 0}` with zero spawns, forever. So the
+    link-less case falls back to `os.open(O_CREAT | O_EXCL)`, which gives the same exclusivity
+    the link was chosen for; it is only the 0-byte window that makes it second choice, and
+    that window is closed here by writing the content before the name is published.
     """
     try:
         path().parent.mkdir(parents=True, exist_ok=True)
@@ -262,17 +345,38 @@ def _try_create() -> bool:
                             "starttime": lease.process_start(os.getpid()) or ""},
                            sort_keys=True).encode("utf-8")
         staged = path().with_suffix(f".{os.getpid()}.claim")
-        staged.write_bytes(entry)
+        # THE CLAIM NAMES A PID THIS USER CONTROLS, and the `os.open(..., 0o600)` this replaced
+        # said so explicitly. `write_bytes` takes the umask instead, which published it 0o644
+        # under the common umask 022. Staging with an explicit mode keeps the old guarantee,
+        # and the link inherits it.
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, entry)
+        finally:
+            os.close(fd)
     except OSError:
         return False
     try:
-        os.link(staged, path())
+        try:
+            os.link(staged, path())
+        except FileExistsError:
+            return False                # someone else holds it: the answer the link is for
+        except OSError:
+            # No hard links here. Same exclusivity via O_EXCL, and the content is written
+            # before the name exists, so the 0-byte window that made this second choice
+            # does not reopen.
+            try:
+                fd = os.open(path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return False
+            except OSError:
+                return False
+            try:
+                os.write(fd, entry)
+            finally:
+                os.close(fd)
 
         return True
-    except OSError:
-        # FileExistsError: someone else holds it. Any other OSError (a filesystem without
-        # hard links, a full disk) is the same answer to the caller: we did not get the claim.
-        return False
     finally:
         try:
             staged.unlink()
@@ -292,23 +396,19 @@ def stop(timeout_s: float = 2.0, poll_s: float = 0.05, sleep=time.sleep) -> bool
     `starttime` too so a pid recycled during the wait is not mistaken for the daemon still
     running. A timeout that runs out KEEPS the claim rather than guessing — a stale "running"
     that turns out to be true is safer than a second daemon spawned onto a live first one.
+    A record that cannot be judged is handled by `_stop_and_confirm`, which owns the
+    signal-then-confirm rule for BOTH callers. This function used to carry its own copy of the
+    loop, and when the unjudgeable case was taught to the other copy this one was left behind:
+    it kept looping on `lease.alive(entry)`, which answers False on its first guard for a
+    record with no `starttime`, so it confirmed in 0.000s the death of a child that was
+    ignoring SIGTERM and released the claim over it. One owner, so that cannot happen again.
     """
     entry = record()
     if not entry:
         return False
-    try:
-        os.kill(int(entry["pid"]), 15)
-    except (OSError, ValueError, KeyError):
+    if not _stop_and_confirm(entry, timeout_s=timeout_s, poll_s=poll_s, sleep=sleep):
         return False
-    deadline = time.monotonic() + timeout_s
-    while lease.alive(entry):
-        if time.monotonic() >= deadline:
-            return False
-        sleep(poll_s)
-    try:
-        path().unlink()
-    except OSError:
-        pass
+    _release_claim()
 
     return True
 

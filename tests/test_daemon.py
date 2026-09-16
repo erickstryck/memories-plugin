@@ -4,6 +4,8 @@ NO TEST HERE STARTS A REAL DAEMON, nor touches Qdrant. `run` takes the work exec
 cycle count, so the whole loop is exercised in-process — the same choice `refresh_window
 (probe=...)` already makes.
 """
+import errno
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +30,190 @@ def a_state_dir() -> str:
 
 def a_live_lease() -> dict:
     return lease.write("s1", "claude", pid=os.getpid())
+
+
+class TestSTOPConfirmsBeforeReleasing(unittest.TestCase):
+    """The PUBLIC `stop()`, against a record whose liveness cannot be judged.
+
+    THE HOLE THIS CLOSES. `_stop_and_confirm` was taught that a record with no `starttime`
+    cannot be re-read, so it falls back to the pid alone. `stop()` carries a SECOND COPY of
+    the same signal-then-confirm rule and was not taught anything — it still loops on
+    `lease.alive(entry)`, which answers False on its first guard for such a record. So it
+    confirmed, in 0.000s, the death of a process that was ignoring SIGTERM and still running,
+    then released the claim. That is the precise sequence its own docstring says it exists to
+    prevent, and `repos add-all` runs `stop()` then `start()` back to back.
+
+    Measured before the fix: stop() -> True in 0.000s, child still alive, claim unlinked.
+    """
+
+    def setUp(self):
+        a_state_dir()
+        self.child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+             "time.sleep(60)"])
+        time.sleep(0.4)                       # let the handler install before we signal
+        self.addCleanup(self._end_child)
+
+    def _end_child(self):
+        self.child.kill()
+        self.child.wait()
+
+    def test_it_does_not_confirm_a_death_it_cannot_see(self):
+        daemon.path().write_text(json.dumps({"pid": self.child.pid, "starttime": ""}))
+
+        started = time.monotonic()
+        got = daemon.stop(timeout_s=0.5)
+
+        self.assertIsNone(self.child.poll(), "the child died; this test proves nothing")
+        self.assertFalse(got, "a live process that ignored SIGTERM was reported as stopped")
+        self.assertGreaterEqual(time.monotonic() - started, 0.5,
+                                "it answered without waiting, so it never confirmed anything")
+
+    def test_it_KEEPS_the_claim_when_it_could_not_confirm(self):
+        """The claim is what stops the next `start()` from spawning a second daemon."""
+        daemon.path().write_text(json.dumps({"pid": self.child.pid, "starttime": ""}))
+
+        daemon.stop(timeout_s=0.5)
+
+        self.assertTrue(daemon.path().exists(),
+                        "the claim was released over a process that is still running")
+
+    def test_it_does_not_signal_a_stranger_that_inherited_the_pid(self):
+        """A recycled pid with no starttime: the (pid, starttime) guard cannot help here.
+
+        The record names a pid that now belongs to someone else. The pid is all the evidence
+        there is, and it reads as alive — so `stop()` waits out its timeout and answers False
+        rather than releasing the claim. Being wrong in this direction costs a delayed daemon;
+        the other direction spawns a second one onto a live first."""
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        time.sleep(0.2)
+        daemon.path().write_text(json.dumps({"pid": other.pid, "starttime": ""}))
+
+        got = daemon.stop(timeout_s=0.3)
+
+        self.assertFalse(got, "it reported a stop it could not confirm")
+        self.assertTrue(daemon.path().exists(), "it released the claim over a live process")
+
+    def test_it_confirms_nothing_on_a_platform_WITHOUT_proc(self):
+        """macOS and Windows, both listed as supported, have no `/proc`.
+
+        THE HOLE THIS CLOSES. The unjudgeable fallback first asked
+        `lease.process_start(pid) is not None`, which fixed the Linux symptom and nothing else:
+        with no `/proc` that answers None for EVERY pid, so the confirmation loop exits on its
+        first turn. Measured with `process_start` stubbed to None, exactly as those platforms
+        behave: stop() returned True in 0.000s against a live child ignoring SIGTERM, and
+        unlinked the claim. Signal 0 answers on every platform."""
+        daemon.path().write_text(json.dumps({"pid": self.child.pid, "starttime": ""}))
+
+        with patch.object(lease, "process_start", lambda pid: None):
+            got = daemon.stop(timeout_s=0.3)
+
+        self.assertIsNone(self.child.poll(), "the child died; this test proves nothing")
+        self.assertFalse(got, "a live process was confirmed dead where /proc does not exist")
+        self.assertTrue(daemon.path().exists(), "the claim was released over a live process")
+
+
+class TestAnUnREADABLERecordDoesNotJamStartForever(unittest.TestCase):
+    """A record with no `starttime` must still be reclaimable, or indexing stops for good.
+
+    THE HOLE THIS CLOSES. `record()` answers such an entry as truthy, so `_claim()`'s
+    `if record() is not None: return False` can never take the corpse path and nothing else
+    removes the file. Measured: three consecutive `start()` calls each answered
+    `{"action": "already"}` with ZERO spawns, where the pre-change tree spawned every time.
+
+    This is not exotic. `start()` writes `starttime = lease.process_start(pid) or ""`, so a
+    child that exits immediately persists an empty one on Linux; and on macOS and Windows,
+    both of which README.md lists as supported, `/proc` never exists, so `process_start`
+    always answers None and EVERY record is written this way. Indexing would stop forever
+    with nothing surfaced to the user."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_record_naming_a_DEAD_pid_is_reclaimed_even_without_a_starttime(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        daemon.path().write_text(json.dumps({"pid": dead.pid, "starttime": ""}))
+        spawned = []
+
+        def spawn(argv):
+            spawned.append(argv)
+
+            return 424242
+
+        first = daemon.start(spawn=spawn, argv=["x"])
+
+        self.assertEqual(first["action"], "started",
+                         "a dead daemon's record blocked a new one forever")
+        self.assertEqual(len(spawned), 1)
+
+    def test_a_record_naming_a_LIVE_pid_without_a_starttime_still_blocks(self):
+        """The other direction, which is the one that must not regress: unknown means alive."""
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        time.sleep(0.2)
+        daemon.path().write_text(json.dumps({"pid": child.pid, "starttime": ""}))
+        spawned = []
+
+        got = daemon.start(spawn=lambda argv: spawned.append(argv) or 1, argv=["x"])
+
+        self.assertEqual(got["action"], "already",
+                         "it spawned a second daemon on top of a live one")
+        self.assertEqual(spawned, [], "a second daemon was spawned")
+
+
+class TestTheClaimWorksWithoutHardLinks(unittest.TestCase):
+    """`os.link` is not available everywhere, and its absence must not mean "never start".
+
+    THE HOLE THIS CLOSES. `_try_create` swallowed every `OSError` from `os.link` as "we did
+    not get the claim". `FileExistsError` genuinely means that; `ENOSYS`/`EPERM` from a
+    filesystem without hard links means the opposite — nobody holds it and nobody ever will.
+    Measured with `os.link` raising ENOSYS: `start()` answered `{"action": "already",
+    "pid": 0}` with zero spawns and no record on disk, forever."""
+
+    def setUp(self):
+        a_state_dir()
+
+    def test_a_filesystem_without_hard_links_can_still_claim(self):
+        spawned = []
+
+        def spawn(argv):
+            spawned.append(argv)
+
+            return 4242
+
+        def no_links(src, dst):
+            raise OSError(errno.ENOSYS, "Function not implemented")
+
+        with patch("os.link", no_links):
+            got = daemon.start(spawn=spawn, argv=["x"])
+
+        self.assertEqual(got["action"], "started",
+                         "the daemon is unstartable where hard links are unavailable")
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(daemon.path().exists(), "no record was published")
+
+    def test_it_is_still_exclusive_without_hard_links(self):
+        """The fallback must keep the guarantee the link was there to give."""
+        def no_links(src, dst):
+            raise OSError(errno.ENOSYS, "Function not implemented")
+
+        with patch("os.link", no_links):
+            first = daemon._try_create()
+            second = daemon._try_create()
+
+        self.assertTrue(first, "the first caller did not get the claim")
+        self.assertFalse(second, "two callers both won the same claim")
+
+    def test_the_claim_is_not_world_readable(self):
+        """It names a pid this user controls; the old `os.open(..., 0o600)` said so."""
+        daemon._try_create()
+
+        mode = os.stat(daemon.path()).st_mode & 0o777
+
+        self.assertEqual(mode, 0o600, f"the claim is mode {oct(mode)}")
 
 
 class TestAClaimIsNotAValidCorpse(unittest.TestCase):
