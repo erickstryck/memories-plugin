@@ -70,10 +70,6 @@ HERMES_PREFETCH_BUDGET_S = 8.0
 MAX_ANGLES = 3
 
 
-def _env(name: str, legacy: str, default: str) -> str:
-    return os.environ.get(name) or os.environ.get(legacy) or default
-
-
 def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     """This host's channel for the shared clamped read in `core/knobs.py`.
 

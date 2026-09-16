@@ -51,6 +51,21 @@ class DefaultTuning:
 #: The object whose constants are the calling host's recall tuning. See `bind_tuning`.
 _TUNING = DefaultTuning
 
+#: Defaults that BOTH surfaces offer, declared once so the two cannot drift.
+#:
+#: They used to be literals repeated on each side, with a comment here saying "the CLI's own
+#: default" and nothing reading it. A review measured the cost: changing `memory find`'s limit
+#: from 5 to 9 in `cli/qctx.py` left the whole suite GREEN, with the two hosts then answering
+#: the same question with different numbers of memories — the divergence class this project
+#: has already paid for three times, and the one `tests/test_host_equivalence.py` exists to
+#: catch. Referenced from `build_parser`, so a change that touches one side touches both.
+FIND_LIMIT = 5
+MEMORY_LIST_LIMIT = 20
+SEARCH_COLLECTIONS_LIMIT = 5
+DOCS_TTL = "24h"
+DOCS_SEARCH_LIMIT = 5
+REPOS_SEARCH_LIMIT = 8
+
 
 def bind_tuning(provider_class) -> None:
     """Hand this module the object whose constants are the recall tuning.
@@ -246,7 +261,7 @@ def _memory_store_many(args: dict, cfg) -> str:
 
 def _memory_find(args: dict, cfg) -> str:
     query = _require(args, "query")
-    limit = _int(args, "limit", 5)          # the CLI's own default
+    limit = _int(args, "limit", FIND_LIMIT)
 
     return _ok(_memory(cfg).find(query, limit))
 
@@ -319,7 +334,7 @@ def _memory_search_collections(args: dict, cfg) -> str:
 
 def _docs_index(args: dict, cfg) -> str:
     path = _require(args, "path")
-    ttl = core.parse_ttl(args.get("ttl") or "24h")     # the CLI's own default
+    ttl = core.parse_ttl(args.get("ttl") or DOCS_TTL)
 
     return _ok(_docs(cfg).index_file(path, ttl, _text(args, "doc_id")))
 
@@ -383,7 +398,7 @@ def _repos_register(args: dict, cfg) -> str:
 def _repos_search(args: dict, cfg) -> str:
     query = _require(args, "query")
     repo, across = _text(args, "repo"), _bool(args, "across")
-    limit = _int(args, "limit", 8)                      # the CLI's own default
+    limit = _int(args, "limit", REPOS_SEARCH_LIMIT)
     out = _repos(cfg).search_request(query, repo=repo, across=across, limit=limit)
 
     # The SAME conversion the CLI's `--json` applies, from the core: `_ok`'s `default=str`

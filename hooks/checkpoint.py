@@ -60,7 +60,10 @@ def env_num(name: str, legacy: str, default: str, kind=int, minimum=None):
 
 
 INTERVAL = env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)
-STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
+# `knobs.state_dir()` and not a fourth copy of this expression: `core/bindings.py`
+# already writes down why ("a third copy of where state lives is how the three start\n# to disagree"), and this file was one of the copies. Still a module-level constant
+# because a hook is one short process and the directory cannot change under it.
+STATE_DIR = knobs.state_dir()
 
 
 def main() -> None:

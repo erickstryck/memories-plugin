@@ -25,6 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from core import blocks
+from core import operations
 from core.retrieval import DENSE, Outcome
 from tests.test_blocks import FakeHit
 
@@ -2539,6 +2540,61 @@ class TestTheBREAKERIsSharedBetweenHosts(unittest.TestCase):
                                 f"state went to {path}, not to QCTX_STATE_DIR")
             finally:
                 os.environ.pop("QCTX_STATE_DIR", None)
+
+
+class TestTheSHAREDDEFAULTSAreOneValue(unittest.TestCase):
+    """A default both surfaces offer must have ONE source, or they drift apart silently.
+
+    THIS WAS MEASURED, not imagined. The limits and the TTL were literals repeated on each
+    side, with a comment in the tool table saying "the CLI's own default" and nothing
+    reading it. Changing `memory find`'s limit from 5 to 9 in `cli/qctx.py` left the entire
+    suite green, and from then on the two hosts answer the same question with different
+    numbers of memories — the divergence class this file exists to catch, and which its own
+    docstrings record as having happened three times already.
+
+    What makes name equality insufficient here is the same thing as in the knob readers: two
+    surfaces can agree on what a setting is CALLED and disagree on what it is worth."""
+
+    def test_the_cli_parser_takes_its_defaults_from_the_shared_table(self):
+        import argparse
+
+        parser = load_cli().build_parser()
+        found = {}
+        for action in parser._subparsers._group_actions[0].choices["memory"] \
+                ._subparsers._group_actions[0].choices.items():
+            name, sub = action
+            for arg in sub._actions:
+                if arg.dest in ("limit",):
+                    found[name] = arg.default
+
+        self.assertEqual(found.get("find"), operations.FIND_LIMIT,
+                         "`memory find --limit` does not read the shared default")
+        self.assertEqual(found.get("list"), operations.MEMORY_LIST_LIMIT,
+                         "`memory list --limit` does not read the shared default")
+
+    def test_no_shared_default_is_written_as_a_literal_in_the_parser(self):
+        """The regression is re-typing the number, so this reads the SOURCE.
+
+        A future edit that puts `default=5` back passes the test above — it would still
+        equal the constant — and drifts the moment the constant changes. What must not
+        exist is a second place where the value is spelled out.
+
+        COUNTED, not located: the parser legitimately writes `default=20` once, for
+        `memory recall --top-k`, which only the CLI offers and which is nobody's twin. So
+        this pins how many times each shared value may appear as a literal, which is a
+        number that only moves when someone re-types one."""
+        source = (REPO / "cli" / "qctx.py").read_text(encoding="utf-8")
+        allowed = {
+            "default=5)": 0,        # find, docs search, search-collections: all shared
+            "default=8)": 0,        # repos search
+            'default="24h"': 0,     # docs index
+            "default=20)": 1,       # memory recall --top-k, which is the CLI's alone
+        }
+        for literal, budget in allowed.items():
+            self.assertEqual(
+                source.count(literal), budget,
+                f"{literal!r} appears {source.count(literal)} times, expected {budget}: a "
+                f"shared default typed out again drifts from core.operations silently")
 
 
 class TestTheSweepCoversEveryPerSessionFile(unittest.TestCase):

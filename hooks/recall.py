@@ -52,10 +52,6 @@ from core.blocks import Budget, empty_block, recall_block, split_by_budget, unav
 from core.breaker import Breaker  # noqa: E402
 
 
-def env(name: str, legacy: str, default: str) -> str:
-    return os.environ.get(name) or os.environ.get(legacy) or default
-
-
 def env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
     """This host's channel for the shared clamped read in `core/knobs.py`.
 
@@ -97,7 +93,10 @@ def env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
 _pending_notes: list[str] = []
 
 
-STATE_DIR = Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
+# `knobs.state_dir()` and not a fourth copy of this expression: `core/bindings.py`
+# already writes down why ("a third copy of where state lives is how the three start\n# to disagree"), and this file was one of the copies. Still a module-level constant
+# because a hook is one short process and the directory cannot change under it.
+STATE_DIR = knobs.state_dir()
 LOG = STATE_DIR / "recall.log"
 LOG_MAX_BYTES = 256 * 1024
 

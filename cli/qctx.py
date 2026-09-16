@@ -48,6 +48,7 @@ import core  # noqa: E402
 import core.docs  # noqa: E402
 import core.install  # noqa: E402
 import core.setup  # noqa: E402
+import core.operations  # noqa: E402
 from core.config import ConfigError  # noqa: E402
 
 
@@ -1746,7 +1747,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = memsub.add_parser("find", help="dense search (cheap, no re-rank)")
     p.add_argument("query")
-    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--limit", type=int, default=core.operations.FIND_LIMIT)
     p.set_defaults(fn=cmd_memory_find)
 
     p = memsub.add_parser("recall", help="search with re-rank (two gates)")
@@ -1776,7 +1777,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_memory_update)
 
     p = memsub.add_parser("list")
-    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--limit", type=int, default=core.operations.MEMORY_LIST_LIMIT)
     p.add_argument("--offset", default=None,
                    help="the next_offset from a previous listing, to continue it")
     p.set_defaults(fn=cmd_memory_list)
@@ -1789,7 +1790,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = memsub.add_parser("search-collections", help="read-only search in other archives")
     p.add_argument("query")
     p.add_argument("--collections", nargs="*", default=None)
-    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--limit", type=int, default=core.operations.SEARCH_COLLECTIONS_LIMIT)
     p.set_defaults(fn=cmd_memory_search_collections)
 
     docs = sub.add_parser("docs", help="ephemeral index for long documents")
@@ -1797,7 +1798,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = docsub.add_parser("index", help="index as TEMPORARY (with a TTL)")
     p.add_argument("path")
-    p.add_argument("--ttl", default="24h", help="30m, 24h, 7d (default 24h)")
+    p.add_argument("--ttl", default=core.operations.DOCS_TTL,
+                   help="30m, 24h, 7d (default 24h)")
     p.add_argument("--doc-id", dest="doc_id", default=None)
     p.set_defaults(fn=cmd_docs_index)
 
@@ -1810,7 +1812,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query")
     p.add_argument("--scope", choices=core.docs.SCOPES, default="all")
     p.add_argument("--doc-id", dest="doc_id", default=None)
-    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--limit", type=int, default=core.operations.DOCS_SEARCH_LIMIT)
     p.set_defaults(fn=cmd_docs_search)
 
     p = docsub.add_parser("list")
@@ -1839,7 +1841,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", help="the repository to search (default: the one you are in)")
     p.add_argument("--all", action="store_true", dest="across",
                    help="search every indexed repository")
-    p.add_argument("--limit", type=int, default=8)
+    p.add_argument("--limit", type=int, default=core.operations.REPOS_SEARCH_LIMIT)
     p.set_defaults(fn=cmd_repos_search)
 
     p = repsub.add_parser("register", help="declare a repository, by name")
