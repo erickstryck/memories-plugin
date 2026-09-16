@@ -85,14 +85,36 @@ class TestSTOPConfirmsBeforeReleasing(unittest.TestCase):
         The record names a pid that now belongs to someone else. The pid is all the evidence
         there is, and it reads as alive — so `stop()` waits out its timeout and answers False
         rather than releasing the claim. Being wrong in this direction costs a delayed daemon;
-        the other direction spawns a second one onto a live first."""
-        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        the other direction spawns a second one onto a live first.
+
+        THE STRANGER HAS TO SURVIVE THE SIGNAL, and this fixture did not — which made the test
+        pass for the opposite of its own reason. `stop()` signals before it confirms, and a
+        plain `time.sleep(60)` child has no SIGTERM handler, so it DIED. What then held the
+        assertion up was the corpse: nobody reaps a `Popen` this test never waits on, so the
+        pid stayed in the table and `os.kill(pid, 0)` reported the dead child as alive. The
+        test was green because liveness was being read wrong — the very defect the module was
+        changed to fix — and it went red the moment a zombie stopped counting as alive.
+
+        So the stranger now ignores SIGTERM and SAYS SO OVER A PIPE before we signal it, the
+        same handshake `test_stop_does_not_confirm_a_death_it_cannot_see` already uses and for
+        the same reason: the process exists from the moment it is forked, well before it
+        reaches `signal.signal`, so signalling on a timer races the handler.
+        """
+        other = subprocess.Popen([sys.executable, "-c",
+                                  "import signal, sys, time\n"
+                                  "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                  "sys.stdout.write('ready\\n')\n"
+                                  "sys.stdout.flush()\n"
+                                  "time.sleep(60)\n"],
+                                 stdout=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (other.kill(), other.wait()))
-        time.sleep(0.2)
+        self.assertEqual(other.stdout.readline().strip(), "ready",
+                         "the stranger never installed its handler")
         daemon.path().write_text(json.dumps({"pid": other.pid, "starttime": ""}))
 
         got = daemon.stop(timeout_s=0.3)
 
+        self.assertIsNone(other.poll(), "the stranger died; this test proves nothing")
         self.assertFalse(got, "it reported a stop it could not confirm")
         self.assertTrue(daemon.path().exists(), "it released the claim over a live process")
 

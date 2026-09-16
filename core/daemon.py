@@ -70,6 +70,7 @@ def record() -> dict | None:
     not a half-written one — and the safe answer to damage is the one that starts no second
     daemon. The empty case is called out separately because it is the one an interrupted write
     leaves behind, and it used to be indistinguishable from a dead daemon's record.
+
     """
     try:
         raw = path().read_text(encoding="utf-8")
@@ -167,9 +168,25 @@ def _pid_alive_fn(entry: dict):
     reads `/proc`, which does not exist on macOS or Windows, so it answers None for live
     processes there and any caller comparing it against None confirms deaths it never saw.
 
-    The pid alone is weaker evidence than `(pid, starttime)` — a recycled pid reads as alive —
-    and both callers want to be wrong in that direction: a claim held too long delays a daemon,
-    a claim released too early spawns a second one on top of a live first.
+    THE ERROR SIGNAL 0 MAKES ON ITS OWN, and it is not the harmless direction. A ZOMBIE — a
+    process that has exited but whose parent has not collected it — still owns its pid, so
+    `os.kill(pid, 0)` succeeds for something that is already dead. That is not an exotic
+    state here: `_spawn` keeps every `Popen` in `_spawned` and only polls them on the NEXT
+    spawn (see its comment, "Measured: one Z per spawn"), and the daemon is spawned from a
+    host process that lives for the whole session. Measured against a daemon that exits
+    immediately: `start()` answered `already` three times running, `stop()` ran out its full
+    timeout and returned False, and the claim was never released — indexing stopped for good.
+    On macOS and Windows every record has an empty `starttime`, so that is the only path.
+
+    So the two questions are asked in the order of what each one KNOWS. `/proc` can say
+    "exited but unreaped" and is trusted where it exists; signal 0 is the fallback that keeps
+    this working where it does not. `lease.process_start` already reports `Z` as gone, with
+    its own comment saying why, so this reuses that judgement rather than re-deriving it.
+
+    Where neither can tell, the answer stays ALIVE. The pid alone is weaker evidence than
+    `(pid, starttime)` — a recycled pid reads as alive — and both callers want to be wrong in
+    that direction: a claim held too long delays a daemon, a claim released too early spawns
+    a second one on top of a live first.
     """
     try:
         pid = int(entry["pid"])
@@ -184,9 +201,35 @@ def _pid_alive_fn(entry: dict):
         except OSError:
             return True                 # PermissionError and friends: it exists
 
+        # THE PID EXISTS. Only a process table can say whether it is a running process or a
+        # corpse nobody collected, and `lease.process_start` already makes that judgement —
+        # it reports state `Z` as gone, with its own comment saying why. But it answers None
+        # for THREE different facts: gone, zombie, and "this platform has no `/proc`". The
+        # first two are the answer we want; the third would declare every live daemon dead on
+        # macOS and Windows, which is the failure signal 0 is here to avoid.
+        if _can_read_process_state():
+            return lease.process_start(pid) is not None
+
         return True
 
     return alive
+
+
+def _can_read_process_state() -> bool:
+    """Whether `lease.process_start` can answer about processes on this platform at all.
+
+    ASKED ABOUT OUR OWN PID, which is the one process guaranteed to be alive and not a
+    zombie — this process is running the question. A None for ourselves therefore cannot mean
+    "gone" or "unreaped"; it can only mean the source those answers come from is unavailable,
+    which is precisely the macOS/Windows case.
+
+    IT GOES THROUGH `lease.process_start` AND NOT DIRECTLY TO `/proc`, and that is the point.
+    A `os.stat("/proc/<pid>/stat")` here would be a SECOND, independent notion of "can this
+    platform tell me", and the two would disagree the moment either changed — including under
+    a test that simulates a platform by substituting `process_start`, which then exercises a
+    combination no real platform produces. One seam, one answer.
+    """
+    return lease.process_start(os.getpid()) is not None
 
 
 def _stop_and_confirm(entry: dict, timeout_s: float = 2.0, poll_s: float = 0.05,
@@ -258,6 +301,7 @@ def _claim() -> bool:
     loop: a claim that fails twice means somebody else's `_claim()` won the newly-empty slot in
     the interval between our unlink and our retry, which is the correct outcome of the race, not
     a bug to spin around.
+
     """
     if _try_create():
         return True
