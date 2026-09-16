@@ -12,12 +12,18 @@ lease means nobody is using it.
 WHY `run` TAKES ITS WORKER AND ITS CYCLE COUNT. So the whole loop can be exercised in-process,
 with no spawning and no network — the same choice `refresh_window(probe=...)` already makes.
 """
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:                                 # Windows: see `_reclaiming`
+    fcntl = None
 
 from . import jobs, lease, statefile
 from .errors import CoreError
@@ -71,27 +77,65 @@ def record() -> dict | None:
     daemon. The empty case is called out separately because it is the one an interrupted write
     leaves behind, and it used to be indistinguishable from a dead daemon's record.
 
+    THE IDENTITY OF THE FILE IS NOT PART OF THE RECORD. `_claim()` needs to know WHICH file
+    it read, but this dict is published verbatim by `qctx repos status --json`, so smuggling a
+    private key into it would put an inode in the user's output and in anything that stores
+    the record. `_held_claim()` is the internal reader that answers both questions at once.
+    """
+    entry, _ = _held_claim()
+
+    return entry
+
+
+def _held_claim() -> tuple:
+    """`(record, identity)` — what the claim says, and WHICH file said it.
+
+    `_claim()` decides from the record and acts on the PATH a moment later, and a path does
+    not name the file that was read: another `_claim()` winning the slot, or `_write_record`
+    republishing through `os.replace`, keeps the name and changes the file. Reading the
+    identity in the same breath as the content is what lets `_release_stale_claim` refuse to
+    delete something it never judged.
+
+    The identity is read BEFORE the content. A file replaced between the two reads then shows
+    a stale identity, which fails the later comparison and costs a delayed daemon — reading it
+    after would produce the opposite error, a fresh identity vouching for content that is gone.
     """
     try:
+        identity = _identity_of(path())
         raw = path().read_text(encoding="utf-8")
     except OSError:
-        return None                     # no file at all: genuinely nothing running
+        return None, None               # no file at all: genuinely nothing running
     try:
         entry = json.loads(raw)
     except ValueError:
-        return _UNREADABLE
+        return _UNREADABLE, identity
     if not isinstance(entry, dict):
-        return _UNREADABLE
+        return _UNREADABLE, identity
     if _unjudgeable(entry):
         # PRESENT AND NOT JUDGEABLE, which is not the same as gone. Falling through to
         # `lease.alive` here would answer None — the corpse verdict — for every record on a
         # platform where `process_start` cannot read a start time, and `_claim()` removes
         # corpses. See `_unjudgeable`.
-        return entry
+        return entry, identity
     if not lease.alive(entry):
-        return None
+        return None, identity
 
-    return entry
+    return entry, identity
+
+
+def _identity_of(target: Path):
+    """`(device, inode)` for `target`, or None when it cannot be stat'd.
+
+    This is what makes "the file I judged" a different question from "whatever is at this
+    path now". `os.replace` and a competing `_claim` both keep the path and change the inode,
+    which is exactly the substitution a path-named unlink cannot see.
+    """
+    try:
+        st = target.stat()
+
+        return (st.st_dev, st.st_ino)
+    except OSError:
+        return None
 
 
 def start(spawn=None, argv: list[str] | None = None, sleep=time.sleep) -> dict:
@@ -302,18 +346,133 @@ def _claim() -> bool:
     the interval between our unlink and our retry, which is the correct outcome of the race, not
     a bug to spin around.
 
+    THE REMOVAL IS CONDITIONAL ON THE FILE STILL BEING THE ONE WE JUDGED, and the whole
+    judge-remove-retake sequence runs under `_reclaiming()` — see `_release_stale_claim`.
+    Deciding from a record and then unlinking a PATH is a check followed by an act on a
+    different name, and the file can be replaced in between.
     """
     if _try_create():
         return True
-    held = record()
-    if held is not None and not _reclaimable(held):
-        return False
+    with _reclaiming() as holding_the_reclaim_lock:
+        if not holding_the_reclaim_lock:
+            # Another process is already reclaiming this very claim. Whatever it decides, our
+            # answer is the same: we did not get the claim this time. Backing off is correct
+            # and costs one cycle; joining it is what produced two daemons.
+            return False
+        held, identity = _held_claim()
+        if held is not None and not _reclaimable(held):
+            return False
+        if not _release_stale_claim(identity):
+            return False
+
+        return _try_create()
+
+
+@contextlib.contextmanager
+def _reclaiming():
+    """Serialises the judge-remove-retake sequence. Yields True when we hold it.
+
+    WHY THE IDENTITY CHECK ALONE IS NOT ENOUGH. `_release_stale_claim` stats the file and
+    unlinks it a moment later, and those are still two syscalls: two callers can both stat the
+    same corpse, both find it unchanged, and the second's unlink then removes the claim the
+    first has already published in between. Measured with the identity check but no lock, 12
+    processes over one corpse, 240 rounds: 7 rounds still ended with two winners — down from
+    176 of 240 without it, but not zero, and "rare" is the property that makes a race hard to
+    diagnose rather than harmless.
+
+    So the sequence is made mutually exclusive instead of merely careful. `flock` is advisory
+    and tied to the OPEN FILE, released by the kernel when the descriptor closes — including
+    when the process dies, which is what keeps a crash from jamming every future `start()`
+    the way a lock file with a pid inside would.
+
+    NON-BLOCKING, AND A FAILURE TO ACQUIRE IS NOT AN ERROR. Somebody else is doing exactly
+    this work; waiting for them only to discover they took the claim is the same answer one
+    cycle later. `start()` already treats "no claim this time" as `{"action": "already"}`.
+
+    ITS OWN FILE, NEVER THE CLAIM ITSELF. Locking `daemon.json` would mean opening the file
+    this function exists to delete — and an unlink while another process holds a descriptor on
+    it leaves that process holding a lock on an inode with no name, which is a lock over
+    nothing. A separate name has no such lifecycle.
+
+    WHERE THERE IS NO `flock` — Windows, or a filesystem that refuses it — this yields True
+    and the identity check in `_release_stale_claim` is what remains. That is the behaviour
+    this replaced, so the fallback is a narrowed race rather than a reintroduced one.
+    """
+    if fcntl is None:
+        yield True
+
+        return
+    lock = path().with_suffix(".reclaim")
+    fd = None
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False                 # somebody else is reclaiming: their race, not ours
+
+            return
+        yield True
+    except OSError:
+        # The lock could not be created at all (a read-only state directory, for instance).
+        # `_try_create` has already failed for the same reason, so answering False here simply
+        # reports the claim as not ours — which it is not.
+        yield False
+    finally:
+        if fd is not None:
+            os.close(fd)                # releases the flock, crash or not
+
+
+def _release_stale_claim(identity) -> bool:
+    """Removes the claim file, but ONLY while it is still the file `identity` names.
+
+    THE GAP THIS CLOSES. `_claim()` reads the record, judges it, and unlinks a moment later.
+    Those are two syscalls, and `unlink` names a PATH — not the file that was judged. In
+    between, another `_claim()` can win the corpse's slot and publish a live claim at the same
+    path, or `_write_record` can republish it through `os.replace`; both keep the name and
+    change the file. The unconditional unlink then deleted a LIVE claim on the strength of a
+    read that no longer described anything, and the caller went on to create its own on top:
+    two daemons, which `start()`'s docstring calls the outcome the design makes impossible.
+
+    MEASURED before this existed, 8 concurrent processes over one corpse claim, 12 rounds: 2
+    rounds ended with two winners and one with three. Deterministically: C judged the corpse,
+    B won the claim in the gap, and C's unlink removed B's live claim and returned True.
+
+    `(device, inode)` IS THE IDENTITY, not the content: `os.replace` gives the new file a new
+    inode while keeping the path, so comparing bytes would still miss a republished claim that
+    happens to say the same thing. Unlinking by name after the check leaves a much narrower
+    window than before but not a zero one — closing it entirely needs an `unlinkat` that takes
+    an inode, which POSIX does not offer. What remains is a race that needs the file to be
+    replaced between this stat and this unlink, rather than anywhere in the whole
+    read-judge-act sequence.
+
+    RETURNS False WHEN THE CLAIM IS STILL SOMEONE ELSE'S, which tells the caller to back off.
+    `identity is None` means there was no file when we looked — nothing to release, and the
+    retry is free to proceed.
+
+    A FILE THAT VANISHED IS A RELEASED CLAIM, NOT A HELD ONE. `_identity_of` answers None for
+    a path that no longer exists, and comparing that against the recorded identity is a
+    mismatch — so the obvious `!=` alone answered "somebody else holds it" for a claim that
+    nobody holds any more, which is the jam this function's whole reason for existing is to
+    avoid. It happens whenever two callers reclaim the same corpse at once: the loser sees the
+    file gone and must proceed to `_try_create`, where `O_EXCL` decides the race honestly.
+    """
+    if identity is None:
+        return True
+    current = _identity_of(path())
+    if current is None:
+        return True                     # already gone: nobody holds it, let the retry decide
+    if current != identity:
+        return False                    # replaced since we read it: not ours to remove
     try:
         path().unlink()
+    except FileNotFoundError:
+        return True                     # somebody else cleaned up the same corpse: fine
     except OSError:
-        pass
+        return False
 
-    return _try_create()
+    return True
 
 
 def _reclaimable(entry: dict) -> bool:
