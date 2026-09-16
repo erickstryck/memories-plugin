@@ -40,6 +40,7 @@ def write_json(path, payload, *, make_parents: bool = True) -> bool:
     The temporary carries this process's pid, which is what makes concurrent writers safe.
     """
     target = Path(path)
+    tmp = None
     try:
         if make_parents:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -53,9 +54,21 @@ def write_json(path, payload, *, make_parents: bool = True) -> bool:
         # republished the same file 0o664 under the usual 0o002 umask. The careful mode on
         # the claim lasted exactly until the first save. Creating the temporary with 0o600
         # fixes every caller at once, which is the point of this module owning the write.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        #
+        # O_EXCL, AND THE UNLINK BEFORE IT, BECAUSE THE MODE ONLY APPLIES TO A FILE BEING
+        # CREATED. `O_CREAT | O_TRUNC` over a temporary left behind by an earlier crash of
+        # this same pid — the name is deterministic, so that file is ours — reuses ITS
+        # permissions, and `os.replace` then publishes those. Measured: a stale temporary at
+        # 0o666 published the daemon's claim at 0o666, which is exactly the leak the comment
+        # above says this closes. Removing it first and refusing to reuse it makes the mode
+        # a property of what we publish rather than of what a crash left lying around.
         try:
-            os.write(fd, json.dumps(payload, indent=1, sort_keys=True).encode("utf-8"))
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            _write_all(fd, json.dumps(payload, indent=1, sort_keys=True).encode("utf-8"))
         finally:
             os.close(fd)
         os.replace(tmp, target)
@@ -66,9 +79,45 @@ def write_json(path, payload, *, make_parents: bool = True) -> bool:
         # writer will adopt it, and the next successful write publishes over the target
         # regardless. Removing it is courtesy, and failing to remove it must not become the
         # error that this function exists to avoid raising.
+        #
+        # THE TARGET IS NEVER TOUCHED ON THIS PATH, and that is the point of staging: a write
+        # that failed leaves the PREVIOUS state published, which every reader here can still
+        # use, rather than a half-written file that parses for nobody.
         try:
-            os.unlink(tmp)
-        except (OSError, NameError, UnboundLocalError):
+            if tmp is not None:
+                os.unlink(tmp)
+        except OSError:
             pass
 
         return False
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Writes every byte of `data`, or raises. `os.write` alone does NOT promise this.
+
+    A SHORT WRITE IS NOT AN ERROR, which is what makes it dangerous here. `os.write` may
+    consume fewer bytes than it was given and return that count, raising nothing — so the
+    `except OSError` above sees a completely successful call, `os.replace` publishes a
+    truncated document, and `write_json` returns True. Every caller is then told the state
+    landed: `jobs.enqueue`, whose docstring promises to raise rather than let "work that
+    never happens" be reported as queued, raised nothing; `core/bindings.py::_save`, whose
+    comment says the failure "IS RE-RAISED, and that is the contract these callers are built
+    on", re-raised nothing.
+
+    MEASURED with `RLIMIT_FSIZE` at 2048 bytes and SIGXFSZ ignored, against a 5012-byte
+    payload: the single `os.write` this replaced returned 2048, `write_json` returned True,
+    and reading the published file raised `Unterminated string starting at: line 2 column 7`.
+    The version this module replaced used `Path.write_text`, which loops internally — so the
+    move to `os.write` for the sake of the file mode is what introduced the defect, and this
+    loop is what pays for that mode without giving up the guarantee.
+
+    A `write` that returns 0 would spin forever, so it is treated as the failure it is: the
+    file cannot take the bytes, and saying so is the honest answer.
+    """
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(f"the write stopped after {len(data) - len(view)} of "
+                          f"{len(data)} bytes")
+        view = view[written:]
