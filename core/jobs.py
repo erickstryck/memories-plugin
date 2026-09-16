@@ -184,7 +184,17 @@ def reap(pid_alive, process_start=None) -> list[str]:
         pid = job.get("daemon_pid") or 0
         recorded = job.get("daemon_start")
         if recorded and process_start is not None:
-            if process_start(pid) == recorded:
+            # COMPARED AS TEXT, because the value has been through JSON and `==` does not
+            # bridge `"5306546"` and `5306546`. `lease.process_start` answers field 22 of
+            # `/proc/<pid>/stat` unparsed, so a str is what every writer stores today — but
+            # nothing in `update()` or `_write` coerces it, and JSON preserves the difference.
+            # A single caller storing the number, or a host whose `process_start` returns one,
+            # turns this comparison FALSE for a daemon that is alive and mid-file, and the
+            # job is then marked "interrupted: the daemon running this job is gone" underneath
+            # it — the state this module's docstring calls worse than a job that is absent.
+            # Measured: with `daemon_start` stored as an int, a live daemon's job went to
+            # FAILED on the very next cycle.
+            if str(process_start(pid)) == str(recorded):
                 continue
         elif pid_alive(pid):
             continue
