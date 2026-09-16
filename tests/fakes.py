@@ -317,23 +317,37 @@ class FailingFakeEmbedder:
 
 
 class FakeReranker:
-    """Returns the scores it was given, against the order of the documents received."""
+    """Returns the scores it was given, against the order of the documents received.
 
-    def __init__(self, scores=None, ok=True, error=None, was_logit=False):
+    IT REPORTS `dropped` LIKE THE REAL ONE. `core/reranking.py` truncates to `max_docs`
+    and records how many it left behind, and `core/retrieval.py` sums the ones that were
+    above the strict floor to warn the user that the archive held more than the re-ranker
+    looked at. This fake never filled the key, so that whole computation was dead offline:
+    mutating it left the suite green, and the note a user reads about a truncated judgement
+    was produced by code no test ran. `max_docs=None` keeps the old behaviour (nothing
+    dropped) for the callers that do not care.
+    """
+
+    def __init__(self, scores=None, ok=True, error=None, was_logit=False, max_docs=None):
         self.scores = scores
         self.ok = ok
         self.error = error
         self.was_logit = was_logit
+        self.max_docs = max_docs
         self.calls: list[tuple] = []
 
     def rank(self, query, documents):
         self.calls.append((query, list(documents)))
         if not self.ok:
-            return [], {"ok": False, "error": self.error or "failed", "was_logit": False}
-        scores = self.scores if self.scores is not None else [1.0] * len(documents)
-        pairs = sorted(enumerate(scores[:len(documents)]), key=lambda p: -p[1])
+            return [], {"ok": False, "error": self.error or "failed", "was_logit": False,
+                        "dropped": 0}
+        dropped = max(0, len(documents) - self.max_docs) if self.max_docs else 0
+        judged = documents[:self.max_docs] if self.max_docs else documents
+        scores = self.scores if self.scores is not None else [1.0] * len(judged)
+        pairs = sorted(enumerate(scores[:len(judged)]), key=lambda p: -p[1])
 
-        return pairs, {"ok": True, "error": None, "was_logit": self.was_logit}
+        return pairs, {"ok": True, "error": None, "was_logit": self.was_logit,
+                       "dropped": dropped}
 
 
 class RecordingVectorStore:

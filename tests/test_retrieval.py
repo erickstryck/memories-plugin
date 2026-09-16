@@ -282,6 +282,74 @@ class TestFloor(unittest.TestCase):
         self.assertAlmostEqual(MEMORY_POLICY.floor_for(False), 0.58)
 
 
+class TestTheTRUNCATEDJudgementIsReported(unittest.TestCase):
+    """What the user is told when the re-ranker looked at less than the archive held.
+
+    `Reranker` judges at most `max_docs` documents and reports how many it left behind;
+    `two_stage` sums the ones that were ALSO above the strict floor, because those are the
+    ones the single-stage mode would have returned. That number reaches the user as a note
+    saying the judgement was partial.
+
+    The whole computation was dead offline: `FakeReranker` never filled `dropped`, so
+    `if outcome.dropped:` was never entered by any test and mutating the sum left the suite
+    green. The key was pinned by `TestFakeContract` — the fake promised no key the real one
+    lacks — but a key that is always 0 satisfies a key check and exercises nothing.
+    """
+
+    def _candidates(self, n: int, score: float):
+        # Dense-sorted, as the pipeline guarantees: the ceiling always cuts the TAIL.
+        return [hit(f"m{i}", score, f"text {i}") for i in range(n)]
+
+    def test_nothing_dropped_reports_nothing(self):
+        rr = FakeReranker(max_docs=12)
+        outcome = two_stage(self._candidates(5, 0.90), "q", rr, MEMORY_POLICY, TEXT)
+        self.assertEqual(outcome.dropped, 0)
+        self.assertEqual(outcome.dropped_above_floor, 0)
+
+    def test_it_counts_only_the_dropped_ones_ABOVE_the_strict_floor(self):
+        """The floor is what makes the number worth showing.
+
+        A dropped candidate below the strict floor would not have been returned by the
+        single-stage mode either, so counting it would tell the user they lost something
+        they never had."""
+        rr = FakeReranker(max_docs=3)
+        # 3 judged, then 2 above the floor (0.90) and 2 below it (0.20).
+        candidates = (self._candidates(3, 0.95)
+                      + [hit("a", 0.90), hit("b", 0.90), hit("c", 0.20), hit("d", 0.20)])
+        outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
+        self.assertEqual(outcome.dropped, 4, "it miscounted what the re-ranker skipped")
+        self.assertEqual(outcome.dropped_above_floor, 2,
+                         "it counted candidates the strict cut would have dropped anyway")
+
+    def test_the_count_survives_into_the_note_the_user_reads(self):
+        from core import blocks
+
+        rr = FakeReranker(max_docs=2)
+        candidates = self._candidates(2, 0.95) + [hit("x", 0.90), hit("y", 0.90)]
+        outcome = two_stage(candidates, "q", rr, MEMORY_POLICY, TEXT)
+        self.assertEqual(outcome.dropped_above_floor, 2)
+        note = blocks.degradation_note(outcome, MEMORY_POLICY.max_results)
+        self.assertIn("2", note, f"the note does not carry the number: {note!r}")
+
+    def test_an_index_the_server_INVENTED_is_ignored(self):
+        """A re-rank server answering with an index that is not in the request.
+
+        `pairs` comes from the server, and `candidates[i]` trusts it. A real endpoint
+        answering `{"index": 99}` for a 3-document request would raise IndexError inside
+        the pipeline — a crash on a bad answer from a component whose whole contract is
+        that it degrades. The guard exists for that, and no fake produced it: `FakeReranker`
+        derives its indices from `enumerate`, so they are valid by construction."""
+        class _InventsAnIndex:
+            def rank(self, query, documents):
+                return ([(0, 0.9), (99, 0.8)],
+                        {"ok": True, "error": None, "was_logit": False, "dropped": 0})
+
+        candidates = [hit("m0", 0.90), hit("m1", 0.90)]
+        outcome = two_stage(candidates, "q", _InventsAnIndex(), MEMORY_POLICY, TEXT)
+        self.assertEqual([s.item["id"] for s in outcome.scored], ["m0"],
+                         "an index the request never contained reached the results")
+
+
 class TestFakeContract(unittest.TestCase):
     """What ties the fake to the real `Reranker`, beyond the method signature.
 

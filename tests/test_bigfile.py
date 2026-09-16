@@ -345,5 +345,75 @@ class TestAnUnreadableFileStillGetsAnAnswer(unittest.TestCase):
         self.assertFalse(v.block, "a file we cannot even sample is one we cannot advise on")
 
 
+class TestTheRuleIsAppliedOnBOTHPASSES(unittest.TestCase):
+    """`decide` prices a read twice, and each pass has to apply the rule.
+
+    The first pass prices from the file's SIZE; the second, reached only when the first
+    said block, prices from what one read actually pulls and can only bring the number
+    DOWN — so a verdict can turn from block to allow there, never the other way.
+
+    A design review mutated each application separately and the suite stayed green both
+    times: only the CONSTANT was pinned, never either use of it, so nothing told the two
+    passes apart. The rule now has one owner, and these are the tests that distinguish
+    which pass decided."""
+
+    def test_the_FIRST_pass_blocks_on_size_alone(self):
+        """No read limit: the whole file is the cost, and the size is the whole story."""
+        verdict = bigfile.decide(a_file(800_000), A_TIGHT_BUDGET)
+        self.assertTrue(verdict.block, "a file this size did not block on the first pass")
+
+    def test_the_SECOND_pass_can_turn_a_block_into_an_allow(self):
+        """Same file, same budget — but a host that reads 50 lines pulls a fraction of it.
+
+        This is the only path on which the second pass changes an answer, and the defect it
+        guards against is pricing a line-limited read as if it loaded the whole file.
+
+        The file needs MANY LINES for that to be true: `a_file` writes one enormous line,
+        and 50 lines of a one-line file is the whole file — correctly still a block. That
+        is why this builds its own."""
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        with os.fdopen(fd, "w") as fh:
+            fh.write("".join(f"line {i} with some content to pay for\n"
+                             for i in range(20_000)))
+        self.addCleanup(os.unlink, path)
+        self.assertTrue(bigfile.decide(path, A_TIGHT_BUDGET).block,
+                        "the first pass did not block, so there is no turn to observe")
+        verdict = bigfile.decide(path, A_TIGHT_BUDGET, read_lines=50)
+        self.assertFalse(verdict.block,
+                         "the second pass kept a block the real read does not justify")
+
+    def test_a_read_that_costs_nothing_is_never_blocked_on_EITHER_pass(self):
+        """The `and` in the rule, from both directions.
+
+        Past 80% of the window the floor test alone is true for every file, including an
+        empty one — so without the minimum-cost half, a nearly-full session refuses free
+        reads. `FLOOR_MIN_COST_PCT` is what stops that, on both passes."""
+        nearly_full = bigfile.Budget(window=100_000, used=99_000, exact=True)
+        self.assertFalse(bigfile.decide(a_file(0), nearly_full).block)
+        self.assertFalse(bigfile.decide(a_file(40), nearly_full, read_lines=50).block)
+
+
+class TestTheBlockingRuleItself(unittest.TestCase):
+    """`_blocks` directly, which is what makes each half of the `or` distinguishable."""
+
+    def test_the_floor_fires_on_a_read_that_fills_the_window(self):
+        self.assertTrue(bigfile._blocks(cost=30_000, after=95_000, free=40_000,
+                                        window=100_000, floor_pct=0.20, share_pct=0.40))
+
+    def test_the_share_fires_on_a_read_that_eats_the_remainder(self):
+        """Plenty of window left, but this one read would take most of what is free."""
+        self.assertTrue(bigfile._blocks(cost=30_000, after=40_000, free=60_000,
+                                        window=1_000_000, floor_pct=0.20, share_pct=0.40))
+
+    def test_a_cheap_read_near_the_ceiling_is_allowed(self):
+        """The floor half alone would fire here; the minimum-cost half is what saves it."""
+        self.assertFalse(bigfile._blocks(cost=10, after=99_010, free=1_000,
+                                         window=100_000, floor_pct=0.20, share_pct=0.40))
+
+    def test_a_small_read_with_room_to_spare_is_allowed(self):
+        self.assertFalse(bigfile._blocks(cost=100, after=1_100, free=99_000,
+                                         window=100_000, floor_pct=0.20, share_pct=0.40))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

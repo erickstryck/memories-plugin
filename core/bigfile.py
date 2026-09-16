@@ -173,6 +173,29 @@ def cost_of(path: str) -> int:
     return int(size_of(path) // CHARS_PER_TOKEN)
 
 
+def _blocks(cost: int, after: int, free: int, window: int,
+            floor_pct: float, share_pct: float) -> bool:
+    """Whether a read this expensive is worth refusing. ONE owner for BOTH passes.
+
+    `decide` prices the read twice — once from the file's size, once from what a real read
+    pulls — and the rule used to be written out twice with it. A design review mutated each
+    copy separately and the suite stayed green both times, because no test distinguishes
+    which pass produced the verdict: only the CONSTANT was pinned, never either application
+    of it. Two copies of a rule that nothing tells apart is how one gets fixed and the other
+    does not, which is the defect `core/retrieval.py` documents from its own history.
+
+    THE `and` IS THE WHOLE POINT. Past 80% of a correct window the floor test alone is true
+    for EVERY file, including an empty one, so without `FLOOR_MIN_COST_PCT` a nearly-full
+    session refuses free reads. There is deliberately no `free > 0` guard: `decide`'s early
+    return already owns "the window is not usable", and a second owner of one invariant is
+    how the two stop agreeing.
+    """
+    floor_hit = after > window * (1 - floor_pct) and cost > window * FLOOR_MIN_COST_PCT
+    share_hit = cost > free * share_pct
+
+    return floor_hit or share_hit
+
+
 def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
            floor_pct: float = FLOOR_PCT, share_pct: float = SHARE_PCT,
            read_lines=None, read_bytes=None, escape: str = "") -> Verdict:
@@ -218,17 +241,8 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
 
     # AND the read has to actually cost something: see FLOOR_MIN_COST_PCT. Past 80% of a
     # correct window the left-hand side is true for every file, including an empty one.
-    floor_hit = (after > budget.window * (1 - floor_pct)
-                 and cost > budget.window * FLOOR_MIN_COST_PCT)
-    # No `free > 0` here on purpose. The early return above is the SINGLE OWNER of "the
-    # window is not usable" — `free == 0` iff `used >= window` iff that return has already
-    # fired — so a guard here would be a second owner of the same invariant, and two owners
-    # do not stay agreeing. Ruling F5 settled the identical shape once already, when two
-    # detectors both answered "is this indexable". Do not re-add it as a missing guard: it
-    # protects no arithmetic (`free * share_pct` is fine at zero, and the division lives in
-    # `pct` below, which the same early return guards).
-    share_hit = cost > free * share_pct
-    if not (floor_hit or share_hit):
+    # The rule itself lives in `_blocks`; see there for why it is not written out twice.
+    if not _blocks(cost, after, free, budget.window, floor_pct, share_pct):
         return Verdict(False, "", cost, free)
 
     # THE ONE READ, and everything that needs the file's contents hangs off it: whether it
@@ -245,12 +259,7 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
     cost = int(loaded_bytes(size, sample, read_lines=read_lines,
                             read_bytes=read_bytes) // CHARS_PER_TOKEN)
     after = budget.used + cost
-    # AND the read has to actually cost something: see FLOOR_MIN_COST_PCT. Past 80% of a
-    # correct window the left-hand side is true for every file, including an empty one.
-    floor_hit = (after > budget.window * (1 - floor_pct)
-                 and cost > budget.window * FLOOR_MIN_COST_PCT)
-    share_hit = cost > free * share_pct
-    if not (floor_hit or share_hit):
+    if not _blocks(cost, after, free, budget.window, floor_pct, share_pct):
         return Verdict(False, "", cost, free)
 
     about = "≈" if not budget.exact else ""
