@@ -133,6 +133,13 @@ class TestSweepIfDue(unittest.TestCase):
     While `round_no % 20` was inline in `hooks/recall.py`, `purge_dead` had "moved into core
     so both hosts share it" and the hermes adapter called it from nowhere — 60 measured
     prefetch rounds left a 30-day-old abandoned file exactly where it was.
+
+    THE CADENCE IS NOW WALL CLOCK, not a round count, and these tests moved with it. The round
+    rule asked a single session to reach its twentieth round and land exactly on it, which
+    made housekeeping a privilege of long sessions: measured on the real install, 6 of 35
+    sessions ever got there and 85 files sat past the cutoff, the oldest 33 days old. What
+    each test here pins is unchanged — sweeps when due, does not glob on every prompt,
+    tolerates a corrupt argument, never raises — only the quantity that makes it due.
     """
 
     def _dir(self):
@@ -144,37 +151,50 @@ class TestSweepIfDue(unittest.TestCase):
 
         return d, dead
 
-    def test_it_sweeps_on_the_cadence(self):
+    def _age_the_stamp(self, d):
+        """Put the last sweep far enough in the past that the next call is due."""
+        stamp = d / st.SWEEP_STAMP
+        old = time.time() - (st.PURGE_EVERY_HOURS * 3600 + 60)
+        os.utime(stamp, (old, old))
+
+    def test_it_sweeps_when_due(self):
         d, dead = self._dir()
-        self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS), 1)
+        self.assertEqual(st.sweep_if_due(d, 1), 1)
         self.assertFalse(dead.exists())
 
-    def test_it_does_nothing_off_the_cadence(self):
+    def test_it_does_nothing_until_the_interval_has_passed(self):
+        """A glob on every prompt is what the cadence avoids."""
         d, dead = self._dir()
-        for round_no in range(1, st.PURGE_EVERY_ROUNDS):
+        self.assertEqual(st.sweep_if_due(d, 1), 1, "the first call sweeps")
+        dead.write_text("{}")
+        stale = time.time() - 30 * 86400
+        os.utime(dead, (stale, stale))
+        for round_no in range(2, 25):
             self.assertEqual(st.sweep_if_due(d, round_no), 0)
         self.assertTrue(dead.exists(), "a glob on every prompt is what the cadence avoids")
 
-    def test_round_zero_is_never_due(self):
-        """Round 0 means no round has happened; `0 % anything == 0` would make it due."""
+    def test_a_short_session_sweeps_where_the_round_cadence_never_did(self):
+        """The defect this cadence replaced: 29 of 35 real sessions never reached round 20."""
         d, dead = self._dir()
-        self.assertEqual(st.sweep_if_due(d, 0), 0)
-        self.assertTrue(dead.exists())
+        self.assertEqual(st.sweep_if_due(d, 1), 1)
+        self.assertFalse(dead.exists(),
+                         "a session that ends at round 1 must still clear dead state")
 
-    def test_a_corrupted_round_or_cadence_is_not_due_rather_than_an_error(self):
-        d, _ = self._dir()
+    def test_a_corrupted_cadence_is_not_due_rather_than_an_error(self):
+        d, dead = self._dir()
         for bad in ("abc", None, [1, 2]):
-            self.assertEqual(st.sweep_if_due(d, bad), 0)
-        self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS, every=0), 0)
+            with self.subTest(every_hours=bad):
+                self.assertEqual(st.sweep_if_due(d, 1, every_hours=bad), 0)
+        self.assertEqual(st.sweep_if_due(d, 1, every_hours=0), 0)
+        self.assertTrue(dead.exists(), "a cadence it could not read swept anyway")
 
     def test_an_impossible_directory_does_not_raise(self):
-        self.assertEqual(st.sweep_if_due(Path("/proc/impossible"),
-                                        st.PURGE_EVERY_ROUNDS), 0)
+        self.assertEqual(st.sweep_if_due(Path("/proc/impossible"), 1), 0)
 
     def test_a_corrupted_RETENTION_is_not_due_rather_than_an_error_either(self):
         """The tolerance stopped one argument short of the module's own contract.
 
-        `sweep_if_due` coerced `round_no` and `every` and forwarded `days` untouched, and
+        `sweep_if_due` coerced its cadence arguments and forwarded `days` untouched, and
         `purge_dead` computed `cutoff = time.time() - days * 86400` OUTSIDE its `try` — so
         `days=None` raised TypeError from the one module whose docstring says nothing here
         raises, one line above a guard that would have caught it. No host passes a bad value
@@ -184,11 +204,12 @@ class TestSweepIfDue(unittest.TestCase):
         d, dead = self._dir()
         for bad in (None, "x", [7], {}):
             with self.subTest(days=bad):
-                self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS, days=bad), 0)
+                self.assertEqual(st.sweep_if_due(d, 1, days=bad), 0)
                 self.assertEqual(st.purge_dead(d, days=bad), 0)
+                self._age_the_stamp(d)
         self.assertTrue(dead.exists(), "a housekeeping sweep it could not size ran anyway")
         # And a NUMERIC STRING still works, the same way `next_round` and `due` accept one.
-        self.assertEqual(st.sweep_if_due(d, st.PURGE_EVERY_ROUNDS, days="7"), 1)
+        self.assertEqual(st.sweep_if_due(d, 1, days="7"), 1)
         self.assertFalse(dead.exists())
 
 

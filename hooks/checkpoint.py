@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import knobs, names  # noqa: E402
 from core import session_state as st  # noqa: E402
+from core import statefile  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE as PROCEDURE  # noqa: E402
 
 
@@ -88,6 +89,29 @@ def main() -> None:
             pass
 
 
+def bump(counter: Path) -> int:
+    """Increments the session's interaction counter and returns the new value.
+
+    EXTRACTED FROM `_run` SO IT CAN BE DRIVEN DIRECTLY. The counting is one responsibility and
+    the hook's stdin/stdout protocol is another; inlining both meant the only way to exercise
+    a count was to fake a hook payload on a pipe. It also publishes through `core.statefile`,
+    which owns the file mode -- measured on the real machine, the hand-rolled `write_text`
+    this replaced published every counter 0o664 under the usual umask, and there were 64 of
+    them.
+
+    AN UNREADABLE COUNTER RESTARTS AT ONE rather than raising: a corrupt counter must cost at
+    most one early checkpoint, never the user's turn.
+    """
+    try:
+        n = int(counter.read_text().strip())
+    except Exception:
+        n = 0
+    n += 1
+    statefile.write_text(counter, str(n))
+
+    return n
+
+
 def _run() -> None:
     if os.environ.get("QCTX_CHECKPOINT_DISABLED") == "1":
         return
@@ -101,12 +125,7 @@ def _run() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     counter = STATE_DIR / f"checkpoint-{session}.count"
 
-    try:
-        n = int(counter.read_text().strip())
-    except Exception:
-        n = 0
-    n += 1
-    counter.write_text(str(n))
+    n = bump(counter)
 
     if not st.due(n, INTERVAL):
         return  # silent on the intermediate interactions

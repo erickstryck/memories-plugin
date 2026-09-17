@@ -902,11 +902,16 @@ class TestBothHostsSweepDeadSessionState(unittest.TestCase):
     claude-code hook ever called it: measured, 60 hermes prefetch rounds against a state dir
     holding a 30-day-old abandoned file left the file exactly where it was.
 
-    The cadence is read from the hook rather than invented (`PURGE_EVERY_ROUNDS`, after the
-    state save on a round that found memories), and it is asserted in BOTH directions on both
-    hosts: a round that is not a multiple must NOT pay for a glob, and a round that is must
-    sweep. A test that only checked "the file eventually disappears" would pass over a host
-    that swept on every single prompt.
+    The cadence is read from `core` rather than invented (`PURGE_EVERY_HOURS`, after the state
+    save on a round that found memories), and it is asserted in BOTH directions on both hosts:
+    a call inside the interval must NOT pay for a glob, and one past it must sweep. A test
+    that only checked "the file eventually disappears" would pass over a host that swept on
+    every single prompt.
+
+    THE CADENCE IS WALL CLOCK, not a round count. The round rule made housekeeping a privilege
+    of long sessions -- measured on the real install, 6 of 35 sessions ever reached round 20
+    and 85 files sat past the cutoff -- so what makes a sweep due is now how long it has been
+    since the last one, shared by both hosts through the same stamp file.
     """
 
     def _state_dir(self, session: str, round_no: int) -> tuple:
@@ -920,12 +925,11 @@ class TestBothHostsSweepDeadSessionState(unittest.TestCase):
 
         return d, abandoned
 
-    def test_a_round_on_the_cadence_sweeps_a_dead_session_on_both_hosts(self):
-        from core.session_state import PURGE_EVERY_ROUNDS
+    def test_a_due_round_sweeps_a_dead_session_on_both_hosts(self):
         for host, drive, session in HOSTS:
             with self.subTest(host=host):
-                # next round IS the cadence
-                d, abandoned = self._state_dir(session, PURGE_EVERY_ROUNDS - 1)
+                # No stamp yet: the very first round of a fresh state dir is due.
+                d, abandoned = self._state_dir(session, 1)
                 drive(d, session)
                 self.assertFalse(abandoned.exists(),
                                  f"{host} never sweeps: the state directory grows one file "
@@ -934,15 +938,16 @@ class TestBothHostsSweepDeadSessionState(unittest.TestCase):
                 self.assertTrue((d / f"recall-{session}.json").exists(),
                                 "the live session's own state must survive the sweep")
 
-    def test_a_round_off_the_cadence_does_not_pay_for_the_sweep_on_either_host(self):
-        from core.session_state import PURGE_EVERY_ROUNDS
+    def test_a_round_inside_the_interval_does_not_pay_for_the_sweep_on_either_host(self):
+        from core.session_state import SWEEP_STAMP
         for host, drive, session in HOSTS:
             with self.subTest(host=host):
-                # next round is not a multiple of the cadence
-                d, abandoned = self._state_dir(session, PURGE_EVERY_ROUNDS - 3)
+                d, abandoned = self._state_dir(session, 1)
+                # A sweep just happened: the next round is inside the interval.
+                (d / SWEEP_STAMP).touch()
                 drive(d, session)
                 self.assertTrue(abandoned.exists(),
-                                f"{host} swept off the shared cadence — a glob on every "
+                                f"{host} swept inside the shared interval — a glob on every "
                                 f"prompt is what the cadence exists to avoid")
 
 
@@ -2322,13 +2327,11 @@ class TestTheSWEEPRunsOnARoundThatFoundNothing(unittest.TestCase):
 
     def test_hermes_sweeps_on_a_no_hit_round(self):
         from core.retrieval import Outcome
-        from core.session_state import PURGE_EVERY_ROUNDS
         from hosts.hermes import MemoriesProvider
 
         d, abandoned = self._dir_with_an_abandoned_file()
         session = "hermes-empty"
-        (d / f"recall-{session}.json").write_text(
-            json.dumps({"round": PURGE_EVERY_ROUNDS - 1, "seen": {}}))
+        (d / f"recall-{session}.json").write_text(json.dumps({"round": 1, "seen": {}}))
 
         class NoHits:
             reranker = None
@@ -2347,12 +2350,9 @@ class TestTheSWEEPRunsOnARoundThatFoundNothing(unittest.TestCase):
                          "hermes never sweeps when the archive answers nothing")
 
     def test_claude_sweeps_on_a_no_hit_round(self):
-        from core.session_state import PURGE_EVERY_ROUNDS
-
         d, abandoned = self._dir_with_an_abandoned_file()
         session = "claude-empty"
-        (d / f"recall-{session}.json").write_text(
-            json.dumps({"round": PURGE_EVERY_ROUNDS - 1, "seen": {}}))
+        (d / f"recall-{session}.json").write_text(json.dumps({"round": 1, "seen": {}}))
         drive_claude_rounds(d, session, hits=False)
 
         self.assertFalse(abandoned.exists(),

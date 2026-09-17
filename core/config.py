@@ -15,7 +15,7 @@ the portable core and the world.
 import json
 import os
 
-from . import knobs
+from . import knobs, statefile
 from .errors import CoreError
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
@@ -265,7 +265,7 @@ def save(patch: dict, path: Path | None = None) -> Path:
     current = read_file(p)
     current.update(patch)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(current, indent=2, ensure_ascii=False) + "\n")
+    statefile.write_text(p, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
 
     return p
 

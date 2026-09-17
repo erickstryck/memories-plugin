@@ -48,6 +48,7 @@ import core  # noqa: E402
 from core import knobs, names  # noqa: E402
 from core import query  # noqa: E402
 from core import session_state as st  # noqa: E402
+from core import statefile  # noqa: E402
 from core.blocks import Budget, empty_block, recall_block, split_by_budget, unavailable_block  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 
@@ -168,13 +169,36 @@ BUDGET = Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
                max_per_mem=MAX_PER_MEM, reinject_after=st.REINJECT_AFTER)
 
 
+def rotate(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
+    """Halves `path` when it has grown past `max_bytes`. True when it was rotated.
+
+    EXTRACTED FROM `log()` SO THE THRESHOLD CAN BE DRIVEN DIRECTLY, and because rotating is
+    where a careful file mode gets thrown away: the rewrite creates a NEW file, and the
+    hand-rolled `write_text` this replaced took the umask for it -- 0o664 on the real machine,
+    for a log that records what was recalled and when. `core.statefile` owns that mode.
+
+    THE PARAMETER IS `path` AND NOT `log`, which is not a style choice: this module's own
+    `log()` is a function, and a parameter of that name shadows it for the body of this one.
+
+    THE TAIL IS KEPT, NOT THE HEAD. What a reader wants from a rotated log is what happened
+    most recently; keeping the first half would answer a question nobody asks.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return False
+        statefile.write_text(path, path.read_text(errors="replace")[-max_bytes // 2:])
+
+        return True
+    except OSError:
+        return False
+
+
 def log(msg: str) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         while _pending_notes:
             _write_log(f"config: {_pending_notes.pop(0)}")
-        if LOG.exists() and LOG.stat().st_size > LOG_MAX_BYTES:
-            LOG.write_text(LOG.read_text(errors="replace")[-LOG_MAX_BYTES // 2:])
+        rotate(LOG)
         _write_log(msg)
     except Exception:
         pass
@@ -381,9 +405,9 @@ def _run() -> None:
     pruned = st.prune(state)
     st.save(state_path, state)
     # A cheap, occasional sweep. The cadence itself lives in core.session_state
-    # (PURGE_EVERY_ROUNDS) rather than as `round_no % 20` here, so the hermes adapter runs
-    # the same one: while the arithmetic sat in this file, the purging had "moved into core
-    # so both hosts share it" and only this host ever called it.
+    # (PURGE_EVERY_HOURS) rather than as arithmetic here, so the hermes adapter runs the same
+    # one: while the arithmetic sat in this file, the purging had "moved into core so both
+    # hosts share it" and only this host ever called it.
     dead = st.sweep_if_due(STATE_DIR, round_no)
     if dead:
         log(f"cleanup: {dead} dead session state(s) removed")

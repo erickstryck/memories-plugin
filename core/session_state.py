@@ -15,6 +15,8 @@ import json
 import time
 from pathlib import Path
 
+from . import statefile
+
 #: Rounds before a memory is reinjected in full instead of as a one-line pointer.
 #: The context may have been compacted in between, so a pointer eventually stops being
 #: enough to recover the content.
@@ -55,7 +57,7 @@ def save(path, state: dict) -> None:
     if path is None:
         return
     try:
-        Path(path).write_text(json.dumps(state))
+        statefile.write_text(path, json.dumps(state))
     except Exception:
         pass
 
@@ -139,32 +141,81 @@ def purge_dead(state_dir, days: float = 7.0, pattern=None) -> int:
     return removed
 
 
-#: Rounds between dead-session sweeps. A cheap, occasional glob: once every 20 rounds is
-#: enough to keep the directory from growing, and it does not pay for a `glob` on every
-#: prompt. The number lives HERE, next to `purge_dead`, and not in an adapter: the cadence is
-#: part of the job, and two hosts that each picked their own would be one more setting that
-#: only looks shared.
-PURGE_EVERY_ROUNDS = 20
+#: How long between dead-session sweeps. The cadence is WALL CLOCK and not a round count,
+#: because the files this removes are dead by wall-clock age and because `round_no` restarts
+#: at 1 with every session: `round_no % 20` asked a single session to reach its twentieth
+#: round and land exactly on it, which made housekeeping a privilege of long sessions.
+#:
+#: MEASURED on a real install before this changed: of 35 sessions with recall state, 6 had
+#: ever reached round 20; the directory held 59 counters and 26 recall files past the
+#: seven-day cutoff, the oldest 33 days old. The sweep was correct and simply never ran.
+#:
+#: Six hours, so a machine used through the day sweeps a few times and one used for a single
+#: short session still sweeps once. The number lives HERE, next to `purge_dead`, and not in
+#: an adapter: the cadence is part of the job, and two hosts that each picked their own would
+#: be one more setting that only looks shared.
+PURGE_EVERY_HOURS = 6.0
+
+#: Where the last sweep is remembered. A file, because the cadence has to survive the process
+#: — every host here is either a short-lived hook subprocess or a session that ends, so an
+#: in-memory timestamp would reset exactly as often as the round counter it replaces.
+#:
+#: THE NAME MATCHES NO PATTERN IN `SESSION_FILE_PATTERNS`, and it must not: the stamp lives in
+#: the directory the sweep globs over, so a name like `recall-sweep.json` would schedule the
+#: sweep that then deletes it, and the cadence would reset every time it fired.
+SWEEP_STAMP = ".last-sweep"
 
 
-def sweep_if_due(state_dir, round_no, days: float = 7.0,
-                 every: int = PURGE_EVERY_ROUNDS) -> int:
+def sweep_if_due(state_dir, round_no=None, days: float = 7.0,
+                 every_hours: float = PURGE_EVERY_HOURS) -> int:
     """`purge_dead` on the shared cadence. Returns how many files went; 0 when not due.
 
-    Both hosts call this instead of testing `round_no % 20` themselves. The sweep used to be
-    the claude-code hook's inline arithmetic, so when the purging moved into `core` for both
-    hosts to share (spec §4) the hermes adapter inherited nothing and its state directory
-    grew one file per session forever.
+    Both hosts call this instead of testing a cadence themselves. The sweep used to be the
+    claude-code hook's inline arithmetic, so when the purging moved into `core` for both hosts
+    to share (spec §4) the hermes adapter inherited nothing and its state directory grew one
+    file per session forever.
+
+    `round_no` IS ACCEPTED AND IGNORED. Both call sites pass it, and the cadence stopped being
+    a function of it; taking it keeps those call sites and their tests honest about what they
+    pass, and dropping the parameter would be a breaking change to a function two hosts call
+    for the sake of an argument nobody reads.
 
     Nothing here raises, like everything else in this module: an unswept file is a
     housekeeping cost, and it must never become the reason a recall failed.
     """
     try:
-        round_no = int(round_no)
-        every = int(every)
+        every_hours = float(every_hours)
     except (TypeError, ValueError):
         return 0
-    if every <= 0 or round_no <= 0 or round_no % every:
+    if every_hours <= 0:
+        return 0
+    stamp = Path(state_dir) / SWEEP_STAMP
+    try:
+        # AN UNREADABLE STAMP READS AS "NEVER SWEPT", never as "swept just now": the failure
+        # that jams housekeeping forever is the one worth avoiding, and sweeping once too
+        # often costs a glob.
+        last = stamp.stat().st_mtime
+    except OSError:
+        last = 0.0
+    since = time.time() - last
+    # A STAMP DATED IN THE FUTURE IS NOT "SWEPT RECENTLY", IT IS UNUSABLE. `now - future` is
+    # negative and therefore below any interval, so a naive comparison jams the sweep until
+    # the clock catches up — a year, for a file restored from a backup with a bad clock, or
+    # any machine whose time was set forward and then corrected. Treating it as "never swept"
+    # costs one extra glob and cannot jam.
+    if 0 <= since < every_hours * 3600:
+        return 0
+    # THE STAMP IS TOUCHED BEFORE THE SWEEP, so a sweep that dies half way still moves the
+    # cadence on. The alternative retries the same failing glob on every single round.
+    #
+    # THROUGH `statefile`, NOT `Path.touch()`, for the reason that module exists: `touch`
+    # takes the umask and published this file 0o664 while the five writers around it were
+    # being routed through the owner to stop exactly that. A housekeeping file is not an
+    # exception to the rule it schedules. Its CONTENT is never read -- the mtime is the clock
+    # -- so it carries the timestamp only to be readable by a person debugging the cadence.
+    if not statefile.write_text(stamp, f"{time.time():.0f}\n"):
+        # A state directory we cannot write is one we cannot purge either; say nothing
+        # happened rather than globbing on every round forever.
         return 0
 
     return purge_dead(state_dir, days=days)

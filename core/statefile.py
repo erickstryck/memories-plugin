@@ -34,10 +34,49 @@ import os
 from pathlib import Path
 
 
+def write_text(path, text: str, *, make_parents: bool = True) -> bool:
+    """Writes `text` to `path` with the same mode `write_json` publishes. True when it landed.
+
+    WHY THIS EXISTS BESIDE `write_json`. The mode is the part of the publish that every state
+    file needs, and five writers -- a breaker stamp, a session's recall map, a checkpoint
+    counter, a rotated log, the config file -- were each hand-rolling `Path.write_text` and
+    taking whatever the umask gave them. MEASURED on the real machine: 105 of 107 files in
+    the state directory were published 0o664 under the common 0o002 umask, and the two that
+    were 0o600 were exactly the two that came through `write_json`. Among the group-readable
+    ones are `recall-<session>.json`, which hold the ids of the memories injected into each
+    session.
+
+    IT IS ATOMIC FOR THE SAME REASON `write_json` IS, not because every caller needs it. A
+    counter or a log has no torn-read consequence worth a rename -- but the staging is what
+    makes the MODE a property of a file being created, and a file created fresh is the only
+    one `os.open(..., 0o600)` can set a mode on. `O_CREAT | O_TRUNC` over an existing file
+    keeps that file's permissions, which is precisely how the careful mode gets lost on the
+    second write. Taking the rename as well costs one syscall and removes that whole class.
+
+    NOT A `write_json` WRAPPER, AND NOT ITS PARENT. `write_json` serialises and this does not;
+    routing one through the other would mean either a text writer that JSON-encodes its
+    counter or a JSON writer whose payload arrives pre-encoded, and both hide what the caller
+    asked for. They share the private publish below instead, which is where the mode and the
+    staging actually live.
+    """
+    return _publish(path, text.encode("utf-8"), make_parents=make_parents)
+
+
 def write_json(path, payload, *, make_parents: bool = True) -> bool:
     """Writes `payload` to `path` atomically. True when it landed.
 
     The temporary carries this process's pid, which is what makes concurrent writers safe.
+    """
+    return _publish(path, json.dumps(payload, indent=1, sort_keys=True).encode("utf-8"),
+                    make_parents=make_parents)
+
+
+def _publish(path, data: bytes, *, make_parents: bool = True) -> bool:
+    """Stages `data` and renames it over `path`, owner-readable only. True when it landed.
+
+    ONE OWNER FOR THE MODE AND THE RENAME, so a policy change is one edit rather than one per
+    serialisation format. `write_json` and `write_text` differ only in how they turn a caller's
+    value into bytes.
     """
     target = Path(path)
     tmp = None
@@ -68,7 +107,7 @@ def write_json(path, payload, *, make_parents: bool = True) -> bool:
             pass
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            _write_all(fd, json.dumps(payload, indent=1, sort_keys=True).encode("utf-8"))
+            _write_all(fd, data)
         finally:
             os.close(fd)
         os.replace(tmp, target)

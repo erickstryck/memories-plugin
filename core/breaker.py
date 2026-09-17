@@ -22,6 +22,8 @@ with, and losing it must never cost the search.
 import time
 from pathlib import Path
 
+from . import statefile
+
 
 class Breaker:
     def __init__(self, path: str | Path | None, cooldown_seconds: float = 300.0):
@@ -52,7 +54,7 @@ class Breaker:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(str(time.time()))
+            statefile.write_text(self.path, str(time.time()))
         except Exception:
             pass
 
