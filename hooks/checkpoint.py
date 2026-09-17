@@ -122,7 +122,7 @@ def _run() -> None:
         data = {}
 
     session = names.safe(data.get("session_id"))
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    statefile.ensure_dir(STATE_DIR)
     counter = STATE_DIR / f"checkpoint-{session}.count"
 
     n = bump(counter)

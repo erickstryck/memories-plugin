@@ -34,6 +34,68 @@ import os
 from pathlib import Path
 
 
+#: What a directory holding this package's state is created as. Owner-only, for the reason
+#: the files are 0o600: the NAMES in it are `recall-<session-id>.json` and
+#: `checkpoint-<session-id>.count`, so a listable state directory publishes how many sessions
+#: this user has had, when each was last active, and the id of every one of them -- without
+#: opening a single file. MEASURED on a fresh install under the common 0o002 umask: `0o775`.
+STATE_DIR_MODE = 0o700
+
+
+def ensure_dir(path) -> bool:
+    """Creates `path` as an owner-only directory. True when it was created or corrected.
+
+    ONE OWNER, like the file mode next door. Twelve `mkdir(parents=True, exist_ok=True)` calls
+    were spread across `core/`, `hooks/` and `hosts/`, and not one named a mode -- so the
+    directory took the umask while every file inside it was carefully published 0o600. A rule
+    re-typed in twelve places is the shape this module exists to collapse.
+
+    THE `mode=` ARGUMENT OF `Path.mkdir` IS NOT ENOUGH ON ITS OWN, which is why the chmod is
+    unconditional. `mkdir(mode=0o700)` is still masked by the umask (0o700 & ~0o002 happens to
+    survive, but 0o770 would not), and `exist_ok=True` ignores the mode entirely for a
+    directory that is already there -- which is every install made before this existed.
+    Correcting it on the way past is what makes an upgrade fix itself.
+
+    THE PARENTS ARE MODED TOO, and they are the half `mode=` silently skips: `mkdir` applies
+    its `mode` to the FINAL component only, so `~/.memories-plugin` was created 0o775 while
+    `~/.memories-plugin/state` under it was 0o700 -- and listing the parent is enough to see
+    that a state directory exists. Only the components this call actually creates are
+    corrected: walking further up would re-mode `$HOME`.
+
+    IT ONLY MODES WHAT IT CREATED, and never a directory that was already there. The first
+    version chmod'ed unconditionally, to "fix the 0o775 an old install left behind" -- and
+    measured, that silently made a deliberately read-only state directory (0o500) writable
+    again, which is the plugin overruling a decision its user made. Four tests that hold the
+    unwritable-directory contract went green over it. An existing directory's mode belongs to
+    whoever set it; a NEW one is ours to create correctly.
+
+    IT RAISES `OSError` WHEN THE DIRECTORY CANNOT BE MADE, and that is deliberate -- it is the
+    one place this module's "never raise" rule does not apply, because it is not the thing
+    that publishes. Its callers are the bare `mkdir` calls it replaced, and each had built its
+    own answer on top of that raise: `config.save` and `install.write_env_file` let it
+    propagate, `jobs._create_cancel_file` and `quarantine._write` turn it into their False so
+    a cancel or a hold that did not land is not reported as landed, and the hooks catch it to
+    stay silent. The write-path callers (`bindings._save` through `write_json`) never see it --
+    `_publish` catches it and reports its False, which `bindings._save` already knows how to
+    turn into its own `OSError`. Swallowing the raise would hand the direct callers a success
+    they never got.
+    """
+    target = Path(path)
+    # WHICH ANCESTORS ARE MISSING IS READ BEFORE CREATING ANY, because afterwards there is no
+    # way to tell what this call made from what was always there -- and re-moding a directory
+    # we did not create is how a helper like this reaches somewhere it has no business.
+    missing = [p for p in (target, *target.parents) if not p.exists()]
+    target.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
+    for made in missing:
+        try:
+            os.chmod(made, STATE_DIR_MODE)
+        except OSError:
+            # Created but not re-modeable: the state still lands, which is what matters.
+            pass
+
+    return True
+
+
 def write_text(path, text: str, *, make_parents: bool = True) -> bool:
     """Writes `text` to `path` with the same mode `write_json` publishes. True when it landed.
 
@@ -82,7 +144,7 @@ def _publish(path, data: bytes, *, make_parents: bool = True) -> bool:
     tmp = None
     try:
         if make_parents:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            ensure_dir(target.parent)
         tmp = target.with_suffix(f"{target.suffix}.{os.getpid()}.tmp")
         # THE MODE IS SET HERE AND NOT LEFT TO THE UMASK. These files name pids and paths
         # this user controls; `os.replace` carries the TEMPORARY's mode onto the target, so

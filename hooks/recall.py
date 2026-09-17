@@ -195,7 +195,7 @@ def rotate(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
 
 def log(msg: str) -> None:
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        statefile.ensure_dir(STATE_DIR)
         while _pending_notes:
             _write_log(f"config: {_pending_notes.pop(0)}")
         rotate(LOG)
@@ -362,7 +362,7 @@ def _run() -> None:
     state_path = None
     state: dict = {"round": 0, "seen": {}}
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        statefile.ensure_dir(STATE_DIR)
         state_path = STATE_DIR / f"recall-{session}.json"
         state = st.load(state_path)
     except Exception as exc:

@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import core  # noqa: E402
-from core import blocks, knobs, names, query, session_state, skills  # noqa: E402
+from core import blocks, knobs, names, query, session_state, skills, statefile  # noqa: E402
 from core.breaker import Breaker  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE, INSTRUCTIONS  # noqa: E402
 
@@ -602,7 +602,7 @@ class MemoriesProvider(_Base):
             base = Path.home() / ".memories-plugin" / "state"
             self._state_dir = base
         try:
-            base.mkdir(parents=True, exist_ok=True)
+            statefile.ensure_dir(base)
         except OSError:
             return None          # state is a convenience; losing it must not cost a search
 

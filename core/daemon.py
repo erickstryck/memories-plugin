@@ -405,7 +405,7 @@ def _reclaiming():
     lock = path().with_suffix(".reclaim")
     fd = None
     try:
-        lock.parent.mkdir(parents=True, exist_ok=True)
+        statefile.ensure_dir(lock.parent)
         fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -543,7 +543,7 @@ def _try_create() -> bool:
     that window is closed here by writing the content before the name is published.
     """
     try:
-        path().parent.mkdir(parents=True, exist_ok=True)
+        statefile.ensure_dir(path().parent)
         entry = json.dumps({"pid": os.getpid(),
                             "starttime": lease.process_start(os.getpid()) or ""},
                            sort_keys=True).encode("utf-8")

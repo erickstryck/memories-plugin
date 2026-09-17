@@ -53,7 +53,7 @@ class Breaker:
         if self.path is None:
             return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            statefile.ensure_dir(self.path.parent)
             statefile.write_text(self.path, str(time.time()))
         except Exception:
             pass

@@ -264,7 +264,7 @@ def save(patch: dict, path: Path | None = None) -> Path:
         )
     current = read_file(p)
     current.update(patch)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    statefile.ensure_dir(p.parent)
     statefile.write_text(p, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
 
     return p

@@ -228,7 +228,7 @@ def _create_cancel_file(repo: str) -> bool:
     """Creates a cancel file for the given repo. Returns True on success, False on failure —
     checked by `request_cancel`, which must not report a cancel that did not land."""
     try:
-        dir().mkdir(parents=True, exist_ok=True)
+        statefile.ensure_dir(dir())
         _cancel_path(repo).touch()
 
         return True

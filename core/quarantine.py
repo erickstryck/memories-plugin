@@ -271,7 +271,7 @@ def _write(repo: str, entry: dict) -> bool:
     repository with nothing held.
     """
     try:
-        dir().mkdir(parents=True, exist_ok=True)
+        statefile.ensure_dir(dir())
         path = _path(repo)
         if not entry:
             path.unlink(missing_ok=True)

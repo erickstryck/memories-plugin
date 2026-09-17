@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from . import statefile
 from .config import ENV_ALIASES, SECRET_FIELDS, load
 from .errors import CoreError
 from .setup import COMMAND_PREFIX, Check
@@ -78,7 +79,7 @@ def write_env_file(path: Path, values: dict) -> None:
     the original exactly as it was, and takes the temporary with it — a directory of
     half-written files each holding a plaintext key would be worse than the truncation.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    statefile.ensure_dir(path.parent)
     try:
         lines = path.read_text().splitlines() if path.exists() else []
     except UnicodeDecodeError as exc:
