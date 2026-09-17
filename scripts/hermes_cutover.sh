@@ -302,6 +302,101 @@ enabled="$(read_memory_key memory_enabled)"
 # `memory.provider` alone. Reported so nobody reads its absence as the cause of a failure.
 note "memory.memory_enabled: ${enabled:-<unset>} (gates hermes' built-in store, not this plugin)"
 
+# ------------------------------------------------ the execute_code sandbox and the keys
+#
+# REPORTED, NEVER APPLIED — not even under `--apply`, and that is the decision, not an
+# omission. hermes strips every environment variable whose name contains KEY, TOKEN, SECRET,
+# AUTH (and more) from the child process behind its `execute_code` tool
+# (`tools/code_execution_env.py::_scrub_child_env`); `terminal.env_passthrough` is the opt-in
+# that lets a name through. That is the host's SECURITY policy (the scrub is GHSA-rhgp-j443-p4rf
+# hardening), and it is about which secrets cross a sandbox boundary — the operator's call, not
+# a plugin's. Everything else this script writes is about the plugin itself.
+#
+# It is also NOT required for the plugin to work. Nothing here invokes `execute_code`: recall,
+# the daemon and the provider all run inside hermes' own process or through this repo's own
+# subprocess calls. The gap only shows up when an AGENT chooses to run `qctx` through
+# `execute_code` instead of `terminal` — same machine, same session, and it fails to
+# authenticate in one and not the other, with nothing saying why. MEASURED 2026-09-16: the
+# terminal child had 163 variables including all four credentials, the execute_code child 54
+# and none of them.
+#
+# So: say it, name the spellings THIS operator actually has, and let them decide.
+say ""
+say "=== the execute_code sandbox (reported only — nothing here writes it) ==="
+
+# A LIST, so `read_key` cannot answer it: that reader matches `key: value` and returns the
+# empty string for a `key:` whose items are on the following lines — indistinguishable from
+# "not configured", which would report a gap the operator had already closed.
+read_passthrough() {
+  python3 - "$CONFIG" <<'PY' 2>/dev/null || true
+import re, sys
+try:
+    src = open(sys.argv[1], encoding="utf-8").read()
+except OSError:
+    sys.exit(0)
+#: `terminal:` -> `env_passthrough:` -> `- NAME` items. Inline `[a, b]` is valid YAML and
+#: `hermes config set` writes the block form, so both are read.
+names, inside_terminal, inside_list, indent = [], False, False, None
+for line in src.splitlines():
+    if re.match(r"^terminal:\s*(#.*)?$", line):
+        inside_terminal = True
+        continue
+    if inside_terminal:
+        if line.strip() and not line[0].isspace():
+            break
+        m = re.match(r"^(\s+)env_passthrough:\s*(.*?)\s*$", line)
+        if m:
+            indent, inline = m.group(1), m.group(2)
+            if inline.startswith("["):
+                names += [n.strip().strip("\"'") for n in inline.strip("[]").split(",")]
+            else:
+                inside_list = True
+            continue
+        if inside_list:
+            item = re.match(r"^\s+-\s*(.+?)\s*$", line)
+            if item:
+                names.append(item.group(1).strip("\"'"))
+                continue
+            if line.strip():
+                inside_list = False
+print(" ".join(n for n in names if n))
+PY
+}
+
+passthrough="$(read_passthrough)"
+# The names that are ACTUALLY set, collected by check_key above — not the canonical pair. An
+# operator whose keys are in the legacy spellings (which plugin.yaml's `requires_env` is what
+# asks for) would otherwise be told to allowlist two names they do not have, apply it, and see
+# nothing change.
+#
+# `$( )` AND NOT `"$in_shell $in_dotenv"` DIRECTLY. Both accumulate a LEADING SPACE per hit and
+# are empty when nothing is set, so the naive concatenation is `" "` — one space, which `[ -z ]`
+# reports as non-empty. Measured: with no credential set at all, the script announced
+# "already covers your keys:" followed by nothing. The one state where the answer must be
+# "there is nothing to allowlist" was the state it got wrong, and it got it wrong in the
+# reassuring direction. Word-splitting the substitution normalises both cases.
+have="$(printf '%s %s' "$in_shell" "$in_dotenv" | tr -s ' ' | sed 's/^ //;s/ $//')"
+sandbox_gap=""
+for name in $have; do
+  case " $passthrough " in
+    *" $name "*) : ;;
+    *) case " $sandbox_gap " in *" $name "*) : ;; *) sandbox_gap="$sandbox_gap $name" ;; esac ;;
+  esac
+done
+if [ -z "$have" ]; then
+  note "no credential is set yet, so there is nothing to allowlist (see the section above)"
+elif [ -z "$sandbox_gap" ]; then
+  ok "terminal.env_passthrough already covers your keys:${have}"
+else
+  quoted="$(printf '"%s",' $sandbox_gap)"
+  note "\`qctx\` works from the terminal tool and NOT from execute_code: hermes scrubs these"
+  say  "        names from that sandbox, and they are not in terminal.env_passthrough:$sandbox_gap"
+  say  "        Nothing here changes it — allowing a secret through a sandbox is your call:"
+  say  "            hermes config set terminal.env_passthrough '[${quoted%,}]'"
+  say  "        hermes refuses its OWN provider credentials there even if listed, so this"
+  say  "        cannot widen anything beyond the names you name."
+fi
+
 # ------------------------------------------------------------------ where it installs
 say ""
 say "=== install location ==="

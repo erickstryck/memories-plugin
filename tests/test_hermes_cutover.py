@@ -1233,6 +1233,126 @@ class TestTheBigFileGuardCheck(CutoverCase):
 
 
 
+class TestTheExecuteCodeSandboxIsREPORTEDAndNeverWritten(CutoverCase):
+    """The one gap this script names and refuses to close, and the refusal is the design.
+
+    `terminal.env_passthrough` decides which secrets cross hermes' `execute_code` sandbox
+    boundary. That is the HOST's security policy (the scrub it opts out of is
+    GHSA-rhgp-j443-p4rf hardening), and it is not required for this plugin to work: nothing
+    in this repo invokes `execute_code`. The gap only bites an agent that runs `qctx` there
+    instead of through `terminal` -- where it silently fails to authenticate.
+
+    So the script says it and stops. These tests hold it to both halves: that it REPORTS the
+    gap accurately, and that no path -- including `--apply` -- ever writes the key.
+    """
+
+    def config_with(self, passthrough_block: str) -> None:
+        self.config_yaml.write_text(CONFIG_YAML + "terminal:\n  backend: local\n"
+                                    + passthrough_block)
+
+    def test_it_reports_the_gap_and_names_the_command(self):
+        out = self.run_script()
+
+        self.assertLine(out, "execute_code")
+        self.assertLine(out, "hermes config set terminal.env_passthrough")
+
+    def test_it_names_the_spellings_THIS_operator_actually_has(self):
+        """The legacy names are what `plugin.yaml::requires_env` asks for, so an install that
+        followed the manifest has those and not the canonical pair. Printing the canonical
+        pair would have them apply a fix that changes nothing -- the failure stays silent,
+        which is the whole complaint this section exists to answer."""
+        out = self.run_script()
+
+        self.assertLine(out, "QDRANT_SERVICE_API_KEY")
+        self.assertLine(out, "SERVER_API_KEY")
+        self.assertNoLine(out, "QCTX_QDRANT_API_KEY\",\"QCTX_API_KEY")
+
+    def test_it_says_nothing_is_missing_when_the_allowlist_COVERS_the_keys(self):
+        self.config_with("  env_passthrough:\n"
+                         "    - QDRANT_SERVICE_API_KEY\n"
+                         "    - SERVER_API_KEY\n")
+
+        out = self.run_script()
+
+        self.assertLine(out, "terminal.env_passthrough already covers your keys")
+        self.assertNoLine(out, "hermes config set terminal.env_passthrough")
+
+    def test_the_INLINE_list_form_is_read_too(self):
+        """`hermes config set` writes the block form, but a hand-edited config is valid YAML
+        as `[a, b]`. Reading only one form reports a gap the operator already closed."""
+        self.config_with('  env_passthrough: ["QDRANT_SERVICE_API_KEY", "SERVER_API_KEY"]\n')
+
+        out = self.run_script()
+
+        self.assertLine(out, "already covers your keys")
+
+    def test_a_PARTIAL_allowlist_reports_only_what_is_missing(self):
+        self.config_with("  env_passthrough:\n    - QDRANT_SERVICE_API_KEY\n")
+
+        out = self.run_script()
+
+        self.assertLine(out, "hermes config set terminal.env_passthrough")
+        self.assertLine(out, "SERVER_API_KEY")
+        self.assertNoLine(out, '[\"QDRANT_SERVICE_API_KEY\",\"SERVER_API_KEY\"]')
+
+    def test_env_passthrough_under_ANOTHER_block_is_not_read_as_terminals(self):
+        """A key of the same name under a different top-level block says nothing about the
+        sandbox. Reading it would report a gap as closed while every key is still scrubbed."""
+        self.config_yaml.write_text(CONFIG_YAML + "other:\n  env_passthrough:\n"
+                                    "    - QDRANT_SERVICE_API_KEY\n    - SERVER_API_KEY\n"
+                                    "terminal:\n  backend: local\n")
+
+        out = self.run_script()
+
+        self.assertLine(out, "hermes config set terminal.env_passthrough")
+
+    def test_with_NO_credentials_set_it_asks_for_nothing(self):
+        """Allowlisting a name nobody has is noise on top of the real problem, which the
+        credentials section above already reports."""
+        env = self.env(QDRANT_SERVICE_API_KEY=None, SERVER_API_KEY=None)
+
+        out = self.run_script(env=env)
+
+        self.assertLine(out, "no credential is set yet")
+        self.assertNoLine(out, "hermes config set terminal.env_passthrough")
+
+    def test_the_DRY_RUN_writes_nothing(self):
+        before = self.config_yaml.read_text()
+
+        self.run_script()
+
+        self.assertEqual(self.config_yaml.read_text(), before)
+
+    def test_even_APPLY_never_writes_env_passthrough(self):
+        """The decision, pinned: `--apply` rewrites `memory.provider` and the hook block, and
+        must not touch this. A plugin that widens the host's credential boundary on install
+        has made a security decision for its operator, silently.
+
+        Runs from a fake ROOT with the suite guard CLEARED, like `TestApplyAgainstAFakeHome`:
+        `HERMES_CUTOVER_SKIP_SUITE` deliberately refuses to authorise an apply, so leaving it
+        set would make this pass on a refusal -- green because nothing ran, which proves
+        nothing about what an apply writes.
+        """
+        script = self.fake_root()
+        target = self.hermes / "plugins" / "memories"
+        target.symlink_to(REPO)
+
+        out = self.run_script("--apply", script=script,
+                              env=self.env(HERMES_CUTOVER_SKIP_SUITE=None))
+
+        self.assertEqual(out.returncode, 0, self.report)
+        written = self.config_yaml.read_text()
+        self.assertNotIn("env_passthrough", written,
+                         "--apply wrote the sandbox allowlist:\n" + written)
+        self.assertIn("provider: memories", written, "the apply did not run at all")
+
+    def test_it_never_prints_a_key_VALUE(self):
+        """The section names variables; this output gets pasted into issues."""
+        out = self.run_script()
+
+        self.assertNoLine(out, SECRET)
+
+
 class TestNoCheckIsDECIDEDByAPipeline(unittest.TestCase):
     """The bug that was mistaken for a flaky test, pinned so it cannot come back.
 
