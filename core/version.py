@@ -28,4 +28,4 @@ SEMANTICS, so the number means something:
 """
 
 #: The one place this number is decided. Every manifest is checked against it.
-__version__ = "1.0.0"
+__version__ = "1.0.1"

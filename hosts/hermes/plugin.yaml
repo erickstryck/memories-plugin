@@ -5,7 +5,7 @@
 # tests/test_installable_from_git.py::TestTheVersionIsONENumber for what enforces it.
 # tests/test_hermes_provider.py pins the three keys the loader reads.
 name: memories
-version: 1.0.0
+version: 1.0.1
 description: "Long-term semantic memory with automatic recall, plus indexes for long documents and for git repositories, on top of Qdrant. Shares its archives with the claude-code plugin."
 category: memory
 kind: exclusive

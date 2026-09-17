@@ -12,7 +12,7 @@
 # suite, tag the commit `v<version>` — `--ref` pins the tag.
 manifest_version: 1
 name: memories
-version: 1.0.0
+version: 1.0.1
 kind: standalone
 description: >-
   Long-term memory, document indexing and repository search in Qdrant, shared with the
