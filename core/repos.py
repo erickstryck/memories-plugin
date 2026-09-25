@@ -37,6 +37,24 @@ class RepoError(CoreError):
     """Something about a repository archive operation could not be done."""
 
 
+def _metadata_drifted(st: os.stat_result, md: dict) -> bool:
+    """Whether the file on disk no longer matches the size or mtime recorded for it.
+
+    ONE OWNER for the cheap comparison: `changed_paths` asks it to decide what LOOKS changed,
+    and `refresh`/`add_files` ask it whether a file whose content matched still needs its
+    record brought up to date. Two copies of this test is how the watcher's idea of "changed"
+    and the restamp's idea of "stale record" would drift apart, and the loop the restamp exists
+    to close would reopen through the gap.
+    """
+    recorded_size = md.get("src_size")
+    if recorded_size is not None and st.st_size != recorded_size:
+        return True
+    recorded_mtime = md.get("src_mtime")
+
+    return recorded_mtime is not None and \
+        abs(st.st_mtime - float(recorded_mtime)) > MTIME_TOLERANCE
+
+
 #: The registry stores no meaning in its vector — it is a key-value table that happens to
 #: live in Qdrant, read by scroll and never by similarity. Size 1 says so out loud, and a
 #: unit vector avoids the zero-norm that Cosine has no answer for.
@@ -210,6 +228,7 @@ class RepoIndex:
                 # feeds that list to the quarantine — "already indexed" would be recorded as
                 # a reason this file cannot be indexed, which is the inversion the quarantine
                 # work exists to prevent.
+                self._restamp_if_drifted(path, md)
                 files += 1
                 continue
             try:
@@ -237,6 +256,41 @@ class RepoIndex:
             self._write_entry(entry)
 
         return {"repo": repo, "files": files, "chunks": chunks, "skipped": skipped}
+
+    def _restamp_if_drifted(self, path: str, md: dict) -> int:
+        """Records the file's current mtime and size on its chunks, when the content matched
+        but those two did not. Returns how many chunks were rewritten.
+
+        WHY THIS EXISTS. A checkout, a rebase or a `touch` moves a file's mtime without
+        changing a byte. `changed_paths` compares mtime and size (it must stay cheap, see its
+        docstring) and so kept reporting the file forever; `refresh` compared the digest,
+        answered "ok", and changed nothing. The watcher then queued another refresh every other
+        cycle, and each one read and hashed every file in the repository. Measured on a real
+        archive: 322 of 681 files flagged by mtime, 22 actually changed.
+
+        NO EMBEDDING. The vectors describe the content, and the content did not change; only
+        the record of WHEN we last saw it is stale. `set_payload` replaces the payload without
+        touching the vector, which is exactly what the port says it is for.
+
+        Infrastructure errors propagate, as they do from `add_files`: a restamp that cannot
+        reach the archive is an outage, and the caller already knows how to report one.
+        """
+        try:
+            st = os.stat(path)
+        except OSError:
+            return 0
+        if not _metadata_drifted(st, md):
+            return 0
+        rewritten = 0
+        filter_ = {"must": [{"key": "doc_id", "match": {"value": doc_id_for(path)}}]}
+        for point in self.q.scroll_all(self.chunks_name, filter_=filter_):
+            payload = dict(point.get("payload") or {})
+            payload["metadata"] = {**(payload.get("metadata") or {}),
+                                   "src_mtime": st.st_mtime, "src_size": st.st_size}
+            self.q.set_payload(self.chunks_name, point["id"], payload)
+            rewritten += 1
+
+        return rewritten
 
     def _write_one(self, repo: str, path: str) -> int:
         path, st, content = _read_source(path)
@@ -468,6 +522,7 @@ class RepoIndex:
                 report.append({"path": path, "action": "missing", "reason": reason})
                 continue
             if reason is None:
+                self._restamp_if_drifted(path, md)
                 report.append({"path": path, "action": "ok"})
                 continue
             # `add_files` replaces this path's chunks rather than adding to them, and reports
@@ -527,13 +582,7 @@ class RepoIndex:
             except OSError:
                 out.append(path)                     # gone or unreadable — `refresh` reports it
                 continue
-            recorded_size = md.get("src_size")
-            if recorded_size is not None and st.st_size != recorded_size:
-                out.append(path)
-                continue
-            recorded_mtime = md.get("src_mtime")
-            if recorded_mtime is not None and \
-                    abs(st.st_mtime - float(recorded_mtime)) > MTIME_TOLERANCE:
+            if _metadata_drifted(st, md):
                 out.append(path)
 
         return out

@@ -512,5 +512,65 @@ class TestResumingDoesNotPayForWhatDidNotChange(unittest.TestCase):
         self.assertTrue(ix.embedder.calls, "a file the archive never saw was skipped")
 
 
+class TestATouchedFileIsRestampedNotReembedded(unittest.TestCase):
+    """A file whose mtime moved while its content did not (a checkout, a rebase, a `touch`)
+    stayed in `changed_paths` FOREVER. `refresh` saw the matching digest, reported `ok`, and
+    left the recorded mtime alone, so the watcher queued another refresh every other cycle, and
+    each one read and SHA-1'd every file in the repository. Measured on 2026-09-25 on a real
+    archive: 322 of 681 files flagged by mtime, 22 of them actually changed.
+
+    The fix records the new mtime and size on the file's chunks WITHOUT embedding anything:
+    the content is what the vectors describe, and it did not change."""
+
+    def _touched(self):
+        ix = an_index("alpha")
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
+        later = time.time() + 10_000
+        os.utime(path, (later, later))
+        self.assertEqual(ix.changed_paths("alpha"), [path], "setup: the touch must show")
+        ix.embedder.calls.clear()
+
+        return ix, path
+
+    def test_after_a_refresh_a_touched_file_leaves_changed_paths(self):
+        ix, path = self._touched()
+        ix.refresh("alpha")
+        self.assertEqual(ix.changed_paths("alpha"), [],
+                         "the file stays flagged, so the watcher refreshes it forever")
+        self.assertEqual(ix.embedder.calls, [], "restamping must not embed anything")
+
+    def test_add_files_over_a_touched_unchanged_file_restamps_it_too(self):
+        ix, path = self._touched()
+        ix.add_files("alpha", [path])
+        self.assertEqual(ix.changed_paths("alpha"), [])
+        self.assertEqual(ix.embedder.calls, [])
+
+    def test_the_report_still_says_ok_for_a_restamped_file(self):
+        ix, path = self._touched()
+        self.assertEqual([r["action"] for r in ix.refresh("alpha")], ["ok"])
+
+    def test_every_chunk_of_a_multi_chunk_file_is_restamped(self):
+        ix = an_index("alpha")
+        path = a_file("".join(f"def f{i}():\n    return {i}\n\n" for i in range(600)))
+        ix.add_files("alpha", [path])
+        self.assertGreater(ix.get_repo("alpha")["chunks"], 1, "setup: needs several chunks")
+        later = time.time() + 10_000
+        os.utime(path, (later, later))
+        ix.refresh("alpha")
+        mtimes = {p["payload"]["metadata"]["src_mtime"]
+                  for p in ix.q.scroll_all(CHUNKS, payload_fields=["metadata"])}
+        self.assertEqual(len(mtimes), 1, f"chunks disagree about the file's mtime: {mtimes}")
+        self.assertAlmostEqual(mtimes.pop(), os.stat(path).st_mtime, places=3)
+
+    def test_a_real_content_change_is_still_reembedded(self):
+        """Green before the fix, and it must stay green: restamping is only for content that
+        did not change."""
+        ix, path = self._touched()
+        rewrite(path, "x = 2\ny = 3\n")
+        self.assertEqual([r["action"] for r in ix.refresh("alpha")], ["reindexed"])
+        self.assertTrue(ix.embedder.calls)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
