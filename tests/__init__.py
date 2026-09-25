@@ -33,6 +33,15 @@ _RUN_DIR = tempfile.mkdtemp(prefix=f"qctx-suite-{os.getpid()}-")
 tempfile.tempdir = _RUN_DIR
 os.environ["TMPDIR"] = _RUN_DIR
 
+#: A DEFAULT STATE DIRECTORY for the whole suite, inside the run directory. The plugin's logs
+#: (`recall.log`, `daemon.log`) are written to the state directory by both hosts and the
+#: daemon, and a test that isolates a provider through its private attribute, or forgets to
+#: pin the variable, would otherwise append to the developer's REAL log: measured, one class
+#: added 15 lines per run, and `qctx stats` on that machine then reported rounds that only ever
+#: happened inside the suite. Tests that set their own directory still win, since this is only
+#: a default; tests that remove it on purpose (to exercise the HOME fallback) still can.
+os.environ["QCTX_STATE_DIR"] = os.path.join(_RUN_DIR, "state")
+
 
 @atexit.register
 def _remove_run_dir() -> None:

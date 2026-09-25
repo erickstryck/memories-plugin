@@ -109,12 +109,20 @@ attempt decides afresh, and a file that still cannot be indexed is simply held a
 | `config set` | write one setting to the file |
 | `config detect` | ask the embedding endpoint its real dimension and store it |
 | `collections list` | what exists in Qdrant, and whether each matches your model |
+| `stats` | what both hosts and the daemon recorded: recall rounds and latency per host, failures by dependency, the breaker, the daemon's jobs and errors |
 
 `install --check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the
 5 collections, whether a shell-less process would find the configuration, whether each of
 the two keys is set and in which spelling and where (names and lengths only, never a
 value), and each host's own cutover report. `install --yes` answers yes to every group
 (the script case); `install --config-only` is the configuration pass only, touching no host.
+
+`stats` reads two files in the state directory and nothing else, so it answers when Qdrant is
+down: `recall.log` (one line per recall round, written by both hosts, each line naming its host)
+and `daemon.log` (starts and stops with the version, each job with its duration and outcome,
+what the watcher queued, and the watcher's failures). Both rotate to their newest half past
+256 KB. `repos status` also shows the version the daemon runs, and the command to restart it
+when that is not the version you just ran.
 
 ## Example session
 

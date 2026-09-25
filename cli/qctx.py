@@ -1627,6 +1627,39 @@ def cmd_repos_status(args, cfg):
         print("  (a held file returns on its own once its content changes)")
 
 
+def cmd_stats(args, cfg):
+    """Summarises `recall.log` and `daemon.log`. Reads two local files and nothing else, so it
+    answers on a machine whose Qdrant is down, which is one of the reasons to run it."""
+    from core import knobs, stats
+
+    summary = stats.summarize(knobs.state_dir())
+    if args.json:
+        output(summary, True)
+
+        return
+    if not summary["recall"] and not summary["daemon"]["jobs"] \
+            and not summary["daemon"]["last_start"]:
+        print(f"nothing recorded yet in {knobs.state_dir()}")
+
+        return
+    for host, h in sorted(summary["recall"].items()):
+        print(f"{host}  ({h['first']} .. {h['last']})")
+        latency = (f"p50 {h['p50']:.1f}s  p95 {h['p95']:.1f}s  max {h['max']:.1f}s"
+                   if h["rounds"] else "no rounds")
+        print(f"  rounds {h['rounds']}  with memories {h['with_memories']}  "
+              f"empty {h['empty']}  skipped {h['skips']}")
+        print(f"  latency {latency}")
+        failures = "  ".join(f"{dep} {n}" for dep, n in sorted(h["failures"].items())) or "none"
+        print(f"  failures {failures}  breaker {h['breaker']}")
+    d = summary["daemon"]
+    print(f"daemon  (last start {d['last_start'] or 'never'}, version {d['version'] or '?'})")
+    jobs_line = "  ".join(f"{result} {n}" for result, n in sorted(d["jobs"].items())) or "none"
+    print(f"  jobs {jobs_line}  queued by the watcher {d['enqueued']}  "
+          f"archive reads {d['archive_reads']}  watcher errors {d['watcher_errors']}")
+    if d["last_error"]:
+        print(f"  last error: {d['last_error'][:200]}")
+
+
 def cmd_repos_cancel(args, cfg):
     from core import jobs
 
@@ -1725,6 +1758,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config-only", action="store_true",
                    help="only the configuration pass; touch no host")
     p.set_defaults(fn=cmd_install)
+
+    sub.add_parser("stats", help="what both hosts and the daemon recorded, summarised"
+                   ).set_defaults(fn=cmd_stats)
 
     col = sub.add_parser("collections", help="inspect Qdrant collections")
     colsub = col.add_subparsers(dest="action", required=True)

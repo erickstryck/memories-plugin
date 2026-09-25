@@ -45,6 +45,17 @@ def hermes_adapter_source() -> str:
 class TestBothHostsRenderTheSameBlock(unittest.TestCase):
     """Same Outcome and same hits through both adapters -> byte-identical text."""
 
+    def setUp(self):
+        # The hermes side writes the shared `recall.log`, which lives in QCTX_STATE_DIR and not
+        # under the provider's private `_state_dir`. Unpinned, every run of this class appended
+        # 15 lines to the developer's real log (measured).
+        previous = os.environ.get("QCTX_STATE_DIR")
+        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        if previous is None:
+            self.addCleanup(os.environ.pop, "QCTX_STATE_DIR", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "QCTX_STATE_DIR", previous)
+
     CASES = {
         "populated": ([FakeHit(id="m1", document="a durable fact about pagination")],
                       Outcome(candidates=3, reranked=True)),
@@ -1073,9 +1084,13 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: person reading `repos status`, not to a model mid-conversation. Reading the holds is
     #: not withheld — `repos status` already reports them, and it is withheld for its own
     #: reason above.
+    #: `stats` joins them for `config_show`'s reason, not the acting four's: it describes how
+    #: the PLUGIN is running (latencies, failures, what the daemon did) for the operator reading
+    #: it, and answers nothing about the archive a model asked about. Offering it would spend a
+    #: tool slot on every turn for a question no conversation has.
     NOT_FOR_THE_MODEL = {"setup", "install", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_daemon", "repos_add_all", "repos_status",
-                         "repos_cancel", "repos_quarantine_clear"}
+                         "repos_cancel", "repos_quarantine_clear", "stats"}
 
     def setUp(self):
         from hosts.hermes import tools
