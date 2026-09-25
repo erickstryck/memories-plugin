@@ -1548,6 +1548,7 @@ def cmd_repos_add_all(args, cfg):
 
 def cmd_repos_status(args, cfg):
     from core import daemon, jobs, lease, quarantine
+    from core.version import __version__
 
     # REAPS BEFORE READING, because `status` is the ONLY reader that runs with no guarantee a
     # daemon is alive to do it for itself — `reap` otherwise runs solely from inside
@@ -1589,10 +1590,18 @@ def cmd_repos_status(args, cfg):
     if not running:
         daemon_line = "not running"
     elif running.get("pid"):
-        daemon_line = f"running (pid {running['pid']})"
+        version = running.get("version") or "unknown"
+        daemon_line = f"running (pid {running['pid']}, version {version})"
     else:
         daemon_line = "record unreadable — remove it if no daemon is running"
     print(f"daemon: {daemon_line}")
+    # BOTH HOSTS START THE DAEMON, and they are not always on the same version (measured: the
+    # claude-code install on a commit from 8 September while hermes ran 1.0.1), so the code
+    # the daemon runs depends on who started it. A record with no version predates this line
+    # and was written by an older tree, so it warns too.
+    if running and running.get("pid") and running.get("version") != __version__:
+        print(f"  this command is {__version__}; restart the daemon to run it: "
+              f"qctx repos daemon stop && qctx repos daemon start")
     if not rows:
         # NOT AN EARLY RETURN ANY MORE. "No jobs" and "nothing held" are different facts, and
         # a settled repository has the first without the second — which is the state where a

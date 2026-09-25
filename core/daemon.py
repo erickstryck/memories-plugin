@@ -25,9 +25,10 @@ try:
 except ImportError:                                 # Windows: see `_reclaiming`
     fcntl = None
 
-from . import jobs, lease, statefile
+from . import eventlog, jobs, lease, statefile
 from .errors import CoreError
 from .knobs import state_dir
+from .version import __version__
 
 #: How long the loop sleeps between cycles. Short enough that a cancel or a file change is
 #: noticed while the user is still looking at the screen; long enough to be free.
@@ -185,7 +186,11 @@ def start(spawn=None, argv: list[str] | None = None, sleep=time.sleep) -> dict:
         _release_claim()
         raise DaemonError(f"could not start the daemon: {exc}") from exc
     starttime = lease.process_start(pid) or ""
-    if not _write_record({"pid": pid, "starttime": starttime, "started_at": time.time()}):
+    # THE VERSION is the caller's, and it is the daemon's too: `_spawn` puts the caller's own
+    # package root on the child's PYTHONPATH, so the child runs this same tree. Both hosts start
+    # a daemon and they are not always on the same version, so `repos status` shows it.
+    if not _write_record({"pid": pid, "starttime": starttime, "started_at": time.time(),
+                          "version": __version__}):
         if _stop_and_confirm({"pid": pid, "starttime": starttime}, sleep=sleep):
             _release_claim()
             raise DaemonError(f"the daemon started (pid {pid}) but its record could not be "
@@ -633,8 +638,22 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
     must not end the daemon for the others. `watch` gets the SAME survival guarantee: it has no
     single job to mark failed, but letting it propagate would end indexing for every repository
     being watched over one that could not enqueue, not just the one that failed.
+
+    WHAT IT LEAVES IN `daemon.log`: the start (with the version), the reason it stopped, and a
+    watcher failure ONCE per distinct failure plus once when it recovers. The daemon's stdout
+    and stderr go to /dev/null, so before this a watcher failing on every cycle and a watcher
+    with nothing to do looked exactly alike.
     """
+    _log(f"start pid={os.getpid()} version={__version__}")
+    reason = _loop(work, cycles, sleep, watch)
+    _log(f"stop reason={reason!r}")
+
+    return reason
+
+
+def _loop(work, cycles, sleep, watch) -> str:
     seen = 0
+    watch_error = None
     while cycles is None or seen < cycles:
         if not lease.live():
             return "no live lease"
@@ -645,18 +664,31 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
         elif watch is not None:
             try:
                 watch()
-            except Exception:                            # noqa: BLE001 — see the docstring
+                if watch_error is not None:
+                    _log("watch recovered")
+                watch_error = None
+            except Exception as exc:                     # noqa: BLE001 (see `run`)
                 # A watcher that cannot enqueue must not end the daemon for every OTHER
                 # repository. There is no job here to mark failed, so the loop simply carries
-                # on: the change is still on disk, the next cycle sees it again, and a file
-                # whose reindex never happens keeps showing `[stale]` in search — which is
-                # where the user actually notices, not in a daemon log nobody is watching.
-                pass
+                # on: the change is still on disk, and the next cycle sees it again. Logged
+                # when the failure CHANGES, so an outage is one line and not one per cycle.
+                described = f"{type(exc).__name__}: {exc}"[:400]
+                if described != watch_error:
+                    _log(f"watch failed ({described})")
+                watch_error = described
         seen += 1
         if cycles is None or seen < cycles:
             sleep(CYCLE_S)
 
     return "cycles exhausted"
+
+
+def _log(line: str) -> None:
+    """One line in `daemon.log`. Never raises: a log is not worth a daemon cycle."""
+    try:
+        eventlog.write(eventlog.DAEMON, line)
+    except Exception:                                   # noqa: BLE001 (see the docstring)
+        pass
 
 
 def _run_one(job: dict, work) -> None:
@@ -670,11 +702,20 @@ def _run_one(job: dict, work) -> None:
     it a success. With `only_if`, the stale write simply does not land: the new job stays
     PENDING and the next cycle picks it up, which is what queueing it meant.
     """
+    started = time.monotonic()
+    result, error = _run_job(job, work)
+    tail = f" ({error})" if error else ""
+    _log(f"job repo={job['repo']} kind={job.get('kind') or 'index'} result={result} "
+         f"in {time.monotonic() - started:.1f}s{tail}")
+
+
+def _run_job(job: dict, work) -> tuple:
+    """The job itself, as `_run_one` always ran it. Returns `(state, error)` for the log."""
     repo, jid = job["repo"], job.get("id")
     if jobs.cancel_requested(repo):
         jobs.update(repo, only_if=jid, state=jobs.CANCELLED)
 
-        return
+        return jobs.CANCELLED, ""
     # THE PAIR, not just the number: `jobs.reap` compares both, because a recycled pid
     # answering "alive" left a dead job RUNNING forever. Same test `lease.alive` applies.
     jobs.update(repo, only_if=jid, state=jobs.RUNNING, daemon_pid=os.getpid(),
@@ -682,15 +723,17 @@ def _run_one(job: dict, work) -> None:
     try:
         work(job)
     except Exception as exc:                        # noqa: BLE001 — see the docstring of `run`
-        jobs.update(repo, only_if=jid, state=jobs.FAILED,
-                    error=f"{type(exc).__name__}: {exc}"[:400])
+        error = f"{type(exc).__name__}: {exc}"[:400]
+        jobs.update(repo, only_if=jid, state=jobs.FAILED, error=error)
 
-        return
+        return jobs.FAILED, error
     if jobs.cancel_requested(repo):
         jobs.update(repo, only_if=jid, state=jobs.CANCELLED)
 
-        return
+        return jobs.CANCELLED, ""
     jobs.update(repo, only_if=jid, state=jobs.DONE, current="")
+
+    return jobs.DONE, ""
 
 
 def _write_record(entry: dict) -> bool:

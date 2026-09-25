@@ -11,7 +11,7 @@ import os
 import subprocess
 import time
 
-from . import jobs, quarantine, scan
+from . import eventlog, jobs, quarantine, scan
 from .breaker import Breaker
 from .errors import CoreError, infrastructure_errors
 from .knobs import state_dir
@@ -170,8 +170,13 @@ def watcher(cfg=None, index=None, clock=time.monotonic):
         cached = sources_memo.get(repo)
         if cached is not None and cached[0] == key and clock() - cached[1] < SOURCES_TTL_S:
             return cached[2]
+        started = time.monotonic()
         sources = target.indexed_sources(repo)
         sources_memo[repo] = (key, clock(), sources)
+        # Straight to `eventlog`, with no guard of its own: it never raises, and `watch()` runs
+        # inside the daemon loop's own `try`, so even a broken log would cost one cycle.
+        eventlog.write(eventlog.DAEMON, f"sources repo={repo} files={len(sources)} "
+                                        f"in {time.monotonic() - started:.1f}s")
 
         return sources
 
@@ -233,6 +238,9 @@ def watcher(cfg=None, index=None, clock=time.monotonic):
                 seen.pop(repo, None)
                 continue
             if seen.get(repo) == changed:
+                kind = "index" if new_paths else "refresh"
+                eventlog.write(eventlog.DAEMON, f"enqueue repo={repo} kind={kind} "
+                                                f"paths={len(new_paths) or len(changed)}")
                 if new_paths:
                     # A file just added to git was never indexed, so there is no digest for
                     # `refresh` to check — `add_files` is the one way a never-indexed file
