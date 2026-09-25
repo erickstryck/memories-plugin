@@ -9,6 +9,7 @@ index answers questions about the part it has, and re-running skips whatever did
 """
 import os
 import subprocess
+import time
 
 from . import jobs, quarantine, scan
 from .breaker import Breaker
@@ -20,6 +21,31 @@ from .knobs import state_dir
 #: and the cost of not backing off is paid on the endpoint automatic recall shares: measured
 #: 10 hits in 30 cycles against a refused connection, one every 15 s for the whole outage.
 BREAKER_COOLDOWN_S = 60.0
+
+#: How long the watcher trusts its in-memory copy of a repository's archive sources when
+#: nothing it can see has moved. The registry and the job cover every write this plugin makes
+#: (see `_sources_key`); this covers what they cannot see, a chunk deleted by hand or a restamp
+#: done by `qctx repos refresh` outside the daemon. The worst case of expiring late is one
+#: extra refresh, never a file missed for good.
+SOURCES_TTL_S = 300.0
+
+
+def _sources_key(entry: dict, job: dict | None) -> tuple:
+    """What must stay the same for a repository's cached sources to still be the archive's.
+
+    THE JOB, because every job the daemon runs rewrites chunks, and a finished job is exactly
+    the moment a stale copy would re-queue the files it just indexed: that loop was measured
+    once at one re-embed every 3 cycles (`TestTheWatcherDoesNotReindexForever`). The id catches
+    a new job that happens to end in the same state as the last one.
+
+    THE REGISTRY ENTRY, because `add_files` rewrites `indexed_at` and the counts whenever it
+    writes a file, and it is also reached from outside the daemon: `qctx repos add`, the hermes
+    `repos_add` tool, `qctx repos refresh`.
+    """
+    job = job or {}
+
+    return (entry.get("indexed_at"), entry.get("files"), entry.get("chunks"),
+            job.get("id"), job.get("state"))
 
 
 def index_breaker() -> Breaker:
@@ -115,7 +141,7 @@ def work(cfg=None, index=None, batch: int = BATCH):
     return run_job
 
 
-def watcher(cfg=None, index=None):
+def watcher(cfg=None, index=None, clock=time.monotonic):
     """Returns the `watch()` the daemon calls when no job is pending.
 
     WHY POLLING AND NOT `inotify`. Measured on 2026-08-18: stat over 2,000 files costs 16 ms, so
@@ -125,16 +151,41 @@ def watcher(cfg=None, index=None):
     WHY A CHANGE MUST BE SEEN TWICE. A file being written is a file that will change again in a
     moment; queueing on the first sighting reindexes on every keystroke of a long save. Seen
     twice with the same content, it is done being written.
+
+    WHY THE ARCHIVE'S SOURCES ARE KEPT IN MEMORY. The 16 ms above is the LOCAL half. The other
+    half is knowing what the archive holds, and that is a scroll of every chunk of the
+    repository: measured on 2026-09-25, 28,019 chunks, 110 pages and 11 MB for one repository,
+    ~15 MB and ~150 HTTPS requests per cycle across five, ~8.6% CPU on a daemon with nothing to
+    do. So each repository's sources are read once and reused until one of the things that can
+    change them moves: see `_sources_key`. `clock` is injected for the tests, like `sleep` is
+    for `daemon.run`.
     """
     seen: dict = {}
     new_memo: dict = {}
+    sources_memo: dict = {}
+
+    def sources_for(target, entry: dict, job) -> dict:
+        repo = entry["repo"]
+        key = _sources_key(entry, job)
+        cached = sources_memo.get(repo)
+        if cached is not None and cached[0] == key and clock() - cached[1] < SOURCES_TTL_S:
+            return cached[2]
+        sources = target.indexed_sources(repo)
+        sources_memo[repo] = (key, clock(), sources)
+
+        return sources
 
     def watch() -> None:
         target = index if index is not None else _build(cfg)
         # Read once per cycle, not per repository: it is one file read, and every repo in this
         # loop is behind the same endpoint.
         breaker = index_breaker()
-        for entry in target.list_repos():
+        entries = target.list_repos()
+        # A repository that left the registry takes its copy with it: nothing else would ever
+        # free it, and a re-registered name must start from what the archive says now.
+        for gone in set(sources_memo) - {e["repo"] for e in entries}:
+            sources_memo.pop(gone, None)
+        for entry in entries:
             repo = entry["repo"]
             job = jobs.load(repo)
             if job and job.get("state") in (jobs.PENDING, jobs.RUNNING):
@@ -147,9 +198,11 @@ def watcher(cfg=None, index=None):
             # connection in 30 cycles, on the endpoint automatic recall shares.
             if breaker.is_open() is not None:
                 continue
-            # ONE archive fetch per repository per cycle, not two: `poll` answers both halves
-            # of the question ("what moved" and "what is already indexed") from a single read.
-            state = target.poll(repo)
+            # ONE archive read answers both halves of the question ("what moved" and "what is
+            # already indexed"), and it is paid only when the copy in memory went stale.
+            sources = sources_for(target, entry, job)
+            state = {"changed": target.changed_paths(repo, sources=sources),
+                     "indexed": set(sources)}
             new_paths = _new_tracked_paths(entry, state["indexed"], new_memo)
             # Read ONCE per cycle, not per candidate: `held` reads the file, stats every
             # entry and may rewrite it. Inside `_new_tracked_paths`'s comprehension it ran

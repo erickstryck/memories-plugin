@@ -209,7 +209,7 @@ class RepoIndex:
         # 1,800 files paid for all 1,800 again, against the one endpoint every repo shares.
         # `docs/usage.md` makes the same promise to the user.
         #
-        # ONE SCROLL, NOT ONE PER FILE: `_indexed_sources` filters by `repo` server-side, and
+        # ONE SCROLL, NOT ONE PER FILE: `indexed_sources` filters by `repo` server-side, and
         # hoisting it here keeps the cost independent of how many paths were handed in.
         #
         # AND NOT EVEN ONE when the repo has nothing indexed yet, which is the whole `add-all`
@@ -217,7 +217,7 @@ class RepoIndex:
         # come back empty. The registry entry already records the count, so the question "is
         # there anything to compare against" is answered from a row this method has in hand.
         entry = self.get_repo(repo) or {}
-        known = (self._indexed_sources(repo)
+        known = (self.indexed_sources(repo)
                  if paths and (entry.get("chunks") or entry.get("files")) else {})
         for path in paths:
             md = known.get(os.path.abspath(path))
@@ -513,7 +513,7 @@ class RepoIndex:
             raise RepoError(f"repository {repo!r} is not indexed")
 
         report = []
-        for path, md in sorted(self._indexed_sources(repo).items()):
+        for path, md in sorted(self.indexed_sources(repo).items()):
             if should_stop is not None and should_stop():
                 break
             reason = source_changed(path, md.get("src_mtime"), md.get("src_size"),
@@ -576,7 +576,7 @@ class RepoIndex:
         """
         out = []
         for path, md in sorted((sources if sources is not None
-                                else self._indexed_sources(repo)).items()):
+                                else self.indexed_sources(repo)).items()):
             try:
                 st = os.stat(path)
             except OSError:
@@ -587,30 +587,14 @@ class RepoIndex:
 
         return out
 
-    def poll(self, repo: str) -> dict:
-        """`{"changed": [paths], "indexed": {paths}}` — everything the watcher needs, from ONE
-        fetch.
-
-        WHY THIS EXISTS RATHER THAN TWO CALLS. `changed_paths` and `indexed_paths` each pulled
-        their own copy of the same source metadata, so a watch cycle scrolled the archive
-        TWICE, every few seconds, per repository, to answer two halves of one question. They
-        stay public because they read well alone and the CLI uses them that way; this is the
-        method for the caller that wants both and runs on a loop.
-        """
-        sources = self._indexed_sources(repo)
-
-        return {"changed": self.changed_paths(repo, sources=sources),
-                "indexed": set(sources)}
-
-    def indexed_paths(self, repo: str) -> set:
-        """Every source path this repository has a chunk for. Public wrapper over
-        `_indexed_sources`, for callers (the watcher) that need only the set of paths and not
-        their metadata — finding a NEWLY tracked file is a membership test against this, not a
-        comparison, so it does not belong in `changed_paths`."""
-        return set(self._indexed_sources(repo).keys())
-
-    def _indexed_sources(self, repo: str) -> dict:
+    def indexed_sources(self, repo: str) -> dict:
         """`path -> source metadata`, one entry per FILE, for the chunks of one repository.
+
+        PUBLIC because the watcher keeps what this returns in memory and asks `changed_paths`
+        against it (`sources=`), paying this scroll only when its copy went stale. There used to
+        be a `poll` that bundled both answers and an `indexed_paths` that wrapped this; the
+        watcher was the only caller of either, and a method documented as "the one for callers
+        that run on a loop" became false the day the loop stopped calling it every cycle.
 
         Filtered by `repo` server-side: the archive is a single collection keyed by that field,
         and a scan without the filter would judge — and re-embed — every repository on the
@@ -618,9 +602,9 @@ class RepoIndex:
         """
         found = {}
         filter_ = {"must": [{"key": "repo", "match": {"value": repo}}]}
-        # ONLY `metadata`, never the whole payload: the payload also holds each chunk's TEXT,
-        # and the watcher calls this every cycle. Fetching everything meant pulling the
-        # repository's entire indexed content over the network to read a few mtimes.
+        # ONLY `metadata`, never the whole payload: the payload also holds each chunk's TEXT.
+        # Fetching everything meant pulling the repository's entire indexed content over the
+        # network to read a few mtimes.
         for point in self.q.scroll_all(self.chunks_name, filter_=filter_,
                                        payload_fields=["metadata"]):
             md = (point.get("payload") or {}).get("metadata") or {}

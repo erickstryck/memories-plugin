@@ -53,28 +53,25 @@ class FakeIndex:
         self.refresh_raises: Exception | None = None
         self.refreshed = []
         self.indexed_calls = []
+        #: Extra registry fields, so a test can move `indexed_at` the way `add_files` does.
+        self.registry_extra: dict = {}
         # `added` records EVERY embed, with repeats, so a test can tell "indexed once" from
         # "indexed again every few cycles" -- which `_indexed` alone (a set) cannot show.
         self.added = []
 
     def list_repos(self):
-        return [{"repo": "alpha", "checkouts": self._checkouts}]
+        return [{"repo": "alpha", "checkouts": self._checkouts, **self.registry_extra}]
 
-    def changed_paths(self, repo):
+    def changed_paths(self, repo, sources=None):
         return list(self._changed)
 
-    def indexed_paths(self, repo):
+    def indexed_sources(self, repo):
+        """Mirrors `RepoIndex.indexed_sources`: `path -> metadata`, the ONE archive read a
+        watch cycle may pay. Counted through `indexed_calls`, which is what lets the tests here
+        assert how many archive reads a cycle costs."""
         self.indexed_calls.append(repo)
 
-        return set(self._indexed)
-
-    def poll(self, repo):
-        """Mirrors `RepoIndex.poll`: both halves of the watch question from ONE archive read.
-
-        Counts through `indexed_calls` exactly once per call, which is what lets the tests here
-        assert how many archive reads a cycle costs.
-        """
-        return {"changed": self.changed_paths(repo), "indexed": self.indexed_paths(repo)}
+        return {p: {} for p in self._indexed}
 
     def add_files(self, repo, paths, **kwargs):
         skipped = [(p, self._fails[p]) for p in paths if p in self._fails]
@@ -268,16 +265,19 @@ class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
             watch()
         self.assertEqual(len(calls), 1,
                          "the tracked-file scan ran again although `.git/index` never moved")
-        self.assertEqual(len(ix.indexed_calls), 2,
-                         "a watch cycle read the archive more than once -- `poll` exists so "
-                         "both halves of the question share ONE fetch")
+        self.assertEqual(len(ix.indexed_calls), 1,
+                         "a quiet second cycle read the archive again -- nothing changed the "
+                         "registry or the job, so the sources in memory are still the truth")
 
     def test_a_cycle_reads_the_archive_exactly_once(self):
-        """The archive read cannot be memoised -- indexing changes it, and a memo that outlived
-        a job made the watcher re-queue the same files forever (measured: one re-embed every 3
-        cycles, see TestTheWatcherDoesNotReindexForever). So it is paid every cycle, and the
-        thing to hold is that it is paid ONCE: `changed_paths` and the newly-tracked-file diff
-        used to fetch the same source metadata separately."""
+        """The first cycle of a repository pays ONE archive read, not two: `changed_paths` and
+        the newly-tracked-file diff used to fetch the same source metadata separately.
+
+        This test used to say the read "cannot be memoised", because a memo that outlived a job
+        made the watcher re-queue the same files forever (see
+        TestTheWatcherDoesNotReindexForever). That was true of a memo with no invalidation. The
+        cache now drops a repository's sources whenever its job or its registry entry changes,
+        which are the two things indexing moves, and that class stays green over it."""
         root = a_git_repo()
         track(root, "a.py")
         ix = FakeIndex(changed=[], checkouts=[root], indexed=set())
@@ -401,6 +401,85 @@ class TestTheWatcherDoesNotReindexForever(unittest.TestCase):
         self.assertIn(os.path.abspath(second), ix.added,
                       "a file tracked after the first job was never indexed")
         self.assertEqual(len(ix.added), 2, f"embedded more than once each: {ix.added}")
+
+
+class TestTheWatcherDoesNotRereadAnUnchangedArchive(unittest.TestCase):
+    """Measured on 2026-09-25 with nothing changing on disk: the daemon spent ~8.6% CPU and
+    read ~1.4 MB/s from Qdrant, because every 5-second cycle scrolled every chunk of every
+    watched repository to read a few mtimes (awesome-cv3 alone: 28,019 chunks, 110 pages,
+    11 MB, 3.4 s per cycle). The local `stat` the watcher's docstring budgets was never the
+    cost; the remote re-read was.
+
+    The sources now live in the daemon's memory and are re-read only when something that can
+    change them moved: the repository's job (every job the daemon runs), its registry entry
+    (`add_files` from the CLI or a hermes tool rewrites `indexed_at` and the counts), or the
+    age of the copy (a safety net for a change made behind the registry's back)."""
+
+    def setUp(self):
+        a_state_dir()
+        self.now = [1000.0]
+        self.ix = FakeIndex(changed=[], indexed={"/nonexistent/alpha/a.py"})
+        self.watch = indexer.watcher(index=self.ix, clock=lambda: self.now[0])
+
+    def test_two_quiet_cycles_read_the_archive_once(self):
+        self.watch()
+        self.watch()
+        self.watch()
+        self.assertEqual(len(self.ix.indexed_calls), 1,
+                         f"{len(self.ix.indexed_calls)} archive reads for three quiet cycles")
+
+    def test_a_finished_job_forces_a_reread(self):
+        self.watch()
+        jobs.enqueue("alpha", "refresh", [])
+        jobs.update("alpha", state=jobs.DONE)
+        self.watch()
+        self.assertEqual(len(self.ix.indexed_calls), 2,
+                         "a job changed the archive and the watcher kept the old copy")
+
+    def test_a_registry_change_forces_a_reread(self):
+        self.watch()
+        self.ix.registry_extra = {"indexed_at": "2026-09-25T12:00:00+00:00"}
+        self.watch()
+        self.assertEqual(len(self.ix.indexed_calls), 2,
+                         "`add_files` outside the daemon moved the registry, and the watcher "
+                         "kept judging against sources that no longer exist")
+
+    def test_the_copy_expires_after_the_ttl(self):
+        self.watch()
+        self.now[0] += indexer.SOURCES_TTL_S + 1
+        self.watch()
+        self.assertEqual(len(self.ix.indexed_calls), 2, "the safety-net expiry never fired")
+
+    def test_a_copy_younger_than_the_ttl_is_kept(self):
+        self.watch()
+        self.now[0] += indexer.SOURCES_TTL_S - 1
+        self.watch()
+        self.assertEqual(len(self.ix.indexed_calls), 1)
+
+    def test_a_repo_that_left_the_registry_is_forgotten(self):
+        """Dropped and registered again under the same name, a repository must be judged
+        against what the archive holds NOW, not against the copy from before the drop."""
+        self.watch()
+        listed = self.ix.list_repos
+        self.ix.list_repos = lambda: []
+        self.watch()
+        self.ix.list_repos = listed
+        self.watch()
+        self.assertEqual(len(self.ix.indexed_calls), 2,
+                         "a dropped repository's sources survived its drop")
+
+    def test_changed_paths_is_asked_with_the_sources_in_memory(self):
+        """The whole saving depends on this: `changed_paths(repo)` with no `sources` scrolls
+        the archive itself, so a watcher that forgot to pass them would pay the read anyway,
+        one layer down, invisibly to the counter above."""
+        seen = []
+        original = self.ix.changed_paths
+        self.ix.changed_paths = lambda repo, sources=None: seen.append(sources) or original(repo)
+        self.watch()
+        self.watch()
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(s is not None for s in seen),
+                        "changed_paths was called without sources, so it re-read the archive")
 
 
 class TestAFileThatCannotBeIndexedIsNotRetriedForever(unittest.TestCase):

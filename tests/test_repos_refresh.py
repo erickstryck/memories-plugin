@@ -91,7 +91,7 @@ class TestAnOutageDoesNotDESTROYWhatWasIndexed(unittest.TestCase):
         with self.assertRaises(EmbeddingError):
             ix.refresh("alpha")
 
-        self.assertIn(path, ix.poll("alpha")["indexed"],
+        self.assertIn(path, ix.indexed_sources("alpha"),
                       "the archive forgot a file that is on disk, with no way back")
 
 
@@ -218,7 +218,7 @@ class TestChangedPathsIsMetadataOnly(unittest.TestCase):
         ix = an_index("alpha")
         path = a_file("x = 1\n")
         ix.add_files("alpha", [path])
-        recorded_mtime = ix._indexed_sources("alpha")[path]["src_mtime"]
+        recorded_mtime = ix.indexed_sources("alpha")[path]["src_mtime"]
         with open(path, "w") as fh:
             fh.write("x = 2\n")                        # same byte length as "x = 1\n"
         os.utime(path, (recorded_mtime, recorded_mtime))  # restore the exact recorded mtime
@@ -377,16 +377,17 @@ class TestThePollDoesNotPullTheWholeArchiveOverTheWire(unittest.TestCase):
         self.assertEqual(ix.changed_paths("alpha"), [path],
                          "the change was missed -- the projection dropped a field it needs")
 
-    def test_poll_reads_the_archive_ONCE_for_both_answers(self):
-        """`changed_paths` and the newly-tracked-file diff each used to fetch the same source
-        metadata, so one watch cycle scrolled the archive twice for two halves of one question."""
+    def test_indexed_sources_asks_for_METADATA_ONLY_and_reads_once(self):
+        """What the watcher reads when its copy of a repository's sources is stale. One scroll,
+        and never the chunk text: the full payload carries every chunk's content."""
         ix, asked = self._recording()
-        ix.add_files("alpha", [a_file("x = 1\n")])
+        path = a_file("x = 1\n")
+        ix.add_files("alpha", [path])
         asked.clear()
-        out = ix.poll("alpha")
-        self.assertEqual(len(asked), 1, f"poll cost {len(asked)} archive reads, not 1")
-        self.assertIn("changed", out)
-        self.assertIn("indexed", out)
+        out = ix.indexed_sources("alpha")
+        self.assertEqual(asked, [["metadata"]], f"indexed_sources scrolled {asked!r}")
+        self.assertIn(path, out)
+        self.assertIn("src_mtime", out[path], "the metadata the change check needs is missing")
 
 
 class TestASkippedFileIsReportedNotRaised(unittest.TestCase):
