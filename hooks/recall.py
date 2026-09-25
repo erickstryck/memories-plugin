@@ -98,7 +98,6 @@ _pending_notes: list[str] = []
 # already writes down why ("a third copy of where state lives is how the three start\n# to disagree"), and this file was one of the copies. Still a module-level constant
 # because a hook is one short process and the directory cannot change under it.
 STATE_DIR = knobs.state_dir()
-LOG = STATE_DIR / eventlog.RECALL
 #: This host's name in the shared `recall.log`, which the hermes provider writes too.
 HOST = "claude-code"
 
@@ -168,12 +167,6 @@ QDRANT_BUDGET = env_num("QCTX_RECALL_QDRANT_BUDGET", "RECALL_QDRANT_BUDGET", "5.
 #: down to core.blocks, which does not know what host it is running in.
 BUDGET = Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
                max_per_mem=MAX_PER_MEM, reinject_after=st.REINJECT_AFTER)
-
-
-def rotate(path: Path, max_bytes: int = eventlog.MAX_BYTES) -> bool:
-    """Halves `path` when it has grown past `max_bytes`. Kept as this module's name for the
-    rotation `core/eventlog.py` now owns, which both hosts and the daemon share."""
-    return eventlog.rotate(path, max_bytes)
 
 
 def log(msg: str) -> None:

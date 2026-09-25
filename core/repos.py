@@ -37,6 +37,13 @@ class RepoError(CoreError):
     """Something about a repository archive operation could not be done."""
 
 
+def _stat_or_none(path: str):
+    try:
+        return os.stat(path)
+    except OSError:
+        return None
+
+
 def _metadata_drifted(st: os.stat_result, md: dict) -> bool:
     """Whether the file on disk no longer matches the size or mtime recorded for it.
 
@@ -221,6 +228,8 @@ class RepoIndex:
                  if paths and (entry.get("chunks") or entry.get("files")) else {})
         for path in paths:
             md = known.get(os.path.abspath(path))
+            # STAT BEFORE THE DIGEST CHECK, never after: see `_restamp_if_drifted`.
+            before = _stat_or_none(path) if md else None
             if md and not source_changed(path, md.get("src_mtime"), md.get("src_size"),
                                          md.get("src_digest")):
                 # UNCHANGED IS STILL A FILE THIS REPO HOLDS, so it counts. Reporting it as
@@ -228,7 +237,7 @@ class RepoIndex:
                 # feeds that list to the quarantine — "already indexed" would be recorded as
                 # a reason this file cannot be indexed, which is the inversion the quarantine
                 # work exists to prevent.
-                self._restamp_if_drifted(path, md)
+                self._restamp_if_drifted(path, md, before)
                 files += 1
                 continue
             try:
@@ -257,7 +266,7 @@ class RepoIndex:
 
         return {"repo": repo, "files": files, "chunks": chunks, "skipped": skipped}
 
-    def _restamp_if_drifted(self, path: str, md: dict) -> int:
+    def _restamp_if_drifted(self, path: str, md: dict, st) -> int:
         """Records the file's current mtime and size on its chunks, when the content matched
         but those two did not. Returns how many chunks were rewritten.
 
@@ -272,22 +281,28 @@ class RepoIndex:
         the record of WHEN we last saw it is stale. `set_payload` replaces the payload without
         touching the vector, which is exactly what the port says it is for.
 
+        `st` IS THE STAT TAKEN BEFORE THE DIGEST WAS READ, and that order is the point. Stat'ing
+        here, after the hash, stamped the mtime of an edit that landed between the two onto
+        chunks holding the old content, and the watcher then never saw that edit (measured by
+        review: 1.0.1 still flagged the file, this did not). With the earlier stat, such an
+        edit leaves the file drifted and the next cycle picks it up.
+
+        ONLY `metadata` IS SENT. The store merges the keys it is given, so the chunk's text and
+        ids are never written from the copy read here, which another writer may have replaced
+        in the meantime.
+
         Infrastructure errors propagate, as they do from `add_files`: a restamp that cannot
         reach the archive is an outage, and the caller already knows how to report one.
         """
-        try:
-            st = os.stat(path)
-        except OSError:
-            return 0
-        if not _metadata_drifted(st, md):
+        if st is None or not _metadata_drifted(st, md):
             return 0
         rewritten = 0
         filter_ = {"must": [{"key": "doc_id", "match": {"value": doc_id_for(path)}}]}
-        for point in self.q.scroll_all(self.chunks_name, filter_=filter_):
-            payload = dict(point.get("payload") or {})
-            payload["metadata"] = {**(payload.get("metadata") or {}),
-                                   "src_mtime": st.st_mtime, "src_size": st.st_size}
-            self.q.set_payload(self.chunks_name, point["id"], payload)
+        for point in self.q.scroll_all(self.chunks_name, filter_=filter_,
+                                       payload_fields=["metadata"]):
+            metadata = {**((point.get("payload") or {}).get("metadata") or {}),
+                        "src_mtime": st.st_mtime, "src_size": st.st_size}
+            self.q.set_payload(self.chunks_name, point["id"], {"metadata": metadata})
             rewritten += 1
 
         return rewritten
@@ -516,13 +531,14 @@ class RepoIndex:
         for path, md in sorted(self.indexed_sources(repo).items()):
             if should_stop is not None and should_stop():
                 break
+            before = _stat_or_none(path)
             reason = source_changed(path, md.get("src_mtime"), md.get("src_size"),
                                     md.get("src_digest"))
             if reason == GONE:
                 report.append({"path": path, "action": "missing", "reason": reason})
                 continue
             if reason is None:
-                self._restamp_if_drifted(path, md)
+                self._restamp_if_drifted(path, md, before)
                 report.append({"path": path, "action": "ok"})
                 continue
             # `add_files` replaces this path's chunks rather than adding to them, and reports

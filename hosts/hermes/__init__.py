@@ -90,15 +90,16 @@ def _note(line: str) -> None:
 HOST = "hermes"
 
 
-def _record(line: str) -> None:
-    """One line in the shared `recall.log`. NEVER RAISES, whatever `recall_log` does.
+def _record(build, *args, **kwargs) -> None:
+    """One line in the shared `recall.log`, built from `build(*args, **kwargs)`. NEVER RAISES.
 
-    `eventlog.write` already promises not to raise; this guard exists so that the block the
-    model receives never depends on that promise. Every call below sits on the recall path,
-    where an exception would turn a successful search into an UNAVAILABLE block.
+    THE LINE IS BUILT INSIDE THE GUARD, which is why this takes the builder and not the line.
+    Every call sits on the recall path, where an exception would turn a successful search into
+    an UNAVAILABLE block; a line built at the call site would have raised outside the `try`
+    (measured by review: `prefetch(None)` went UNAVAILABLE through `_quoted`).
     """
     try:
-        recall_log.record(HOST, line)
+        recall_log.record(HOST, build(*args, **kwargs))
     except Exception:          # noqa: BLE001 (a lost line is cheaper than a lost recall)
         pass
 
@@ -356,11 +357,11 @@ class MemoriesProvider(_Base):
 
             return self._prefetch(query_text, session_id or self._session_id)
         except core.CoreError as exc:
-            _record(recall_log.failure_line(_dependency_of(exc), str(exc)[:200]))
+            _record(recall_log.failure_line, _dependency_of(exc), str(exc)[:200])
 
             return blocks.unavailable_block(type(exc).__name__, str(exc)[:200])
         except BaseException as exc:  # noqa: BLE001 — see docstring
-            _record(recall_log.failure_line("unexpected", f"{type(exc).__name__}: {exc}"[:200]))
+            _record(recall_log.failure_line, "unexpected", f"{type(exc).__name__}: {exc}"[:200])
 
             return blocks.unavailable_block("the memory provider",
                                             f"{type(exc).__name__}: {exc}"[:200])
@@ -377,7 +378,7 @@ class MemoriesProvider(_Base):
 
         skip = query.skip_reason(query_text)
         if skip:
-            _record(recall_log.skip_line(skip, query_text))
+            _record(recall_log.skip_line, skip, query_text)
 
             return self._with_checkpoint("")
 
@@ -388,7 +389,7 @@ class MemoriesProvider(_Base):
         suppressed = None
         if idle is not None:
             suppressed = f"circuit breaker: the re-rank failed {idle:.0f}s ago"
-            _record(recall_log.breaker_line(idle))
+            _record(recall_log.breaker_line, idle)
         # Decided per TURN and in BOTH directions — see `_reranker_for_this_turn`.
         self._reranker_for_this_turn(store, suppressed)
 
@@ -424,7 +425,7 @@ class MemoriesProvider(_Base):
         elapsed = time.monotonic() - started
         if outcome is not None and outcome.rerank_error:
             breaker.arm()
-            _record(recall_log.rerank_failed_line(outcome.rerank_error, self.BREAKER_SECONDS))
+            _record(recall_log.rerank_failed_line, outcome.rerank_error, self.BREAKER_SECONDS)
         elif outcome is not None and outcome.by_rerank:
             breaker.clear()
 
@@ -445,8 +446,8 @@ class MemoriesProvider(_Base):
             self._last_count = 0
             self._refresh_window(session_id)
             if outcome is not None:
-                _record(recall_log.empty_line(round_no, outcome, elapsed=elapsed,
-                                              angles=len(angles), prompt=query_text))
+                _record(recall_log.empty_line, round_no, outcome, elapsed=elapsed,
+                                              angles=len(angles), prompt=query_text)
 
             return self._with_checkpoint(blocks.empty_block(outcome, len(angles)))
 
@@ -456,8 +457,8 @@ class MemoriesProvider(_Base):
         self._sweep_dead_state(round_no)
         self._last_count = len(full)
         self._refresh_window(session_id)
-        _record(recall_log.round_line(round_no, len(full), len(pointers), len(hits), outcome,
-                                      elapsed=elapsed, angles=len(angles), prompt=query_text))
+        _record(recall_log.round_line, round_no, len(full), len(pointers), len(hits), outcome,
+                                      elapsed=elapsed, angles=len(angles), prompt=query_text)
 
         return self._with_checkpoint(
             blocks.recall_block(full, pointers, len(angles), outcome, self.BUDGET))
@@ -557,7 +558,7 @@ class MemoriesProvider(_Base):
             if probe is not None:
                 dead = session_state.sweep_if_due(probe.parent, round_no)
                 if dead:
-                    _record(recall_log.cleanup_line(dead))
+                    _record(recall_log.cleanup_line, dead)
         except BaseException:  # noqa: BLE001 — an unswept file beats a lost recall
             pass
 

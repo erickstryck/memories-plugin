@@ -100,7 +100,9 @@ class FakeVectorStore:
     def set_payload(self, name: str, point_id, payload: dict) -> None:
         point = self._require(name)["points"].get(point_id)
         if point is not None:
-            point["payload"] = payload
+            # MERGES, like the real `POST points/payload`: a fake that overwrote let a caller
+            # sending one key pass here and lose nothing on the server, or the reverse.
+            point["payload"] = {**(point.get("payload") or {}), **payload}
         self.calls.append(("set_payload", name, point_id))
 
     def delete_points(self, name: str, ids: list) -> None:

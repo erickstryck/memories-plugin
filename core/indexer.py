@@ -173,10 +173,12 @@ def watcher(cfg=None, index=None, clock=time.monotonic):
         started = time.monotonic()
         sources = target.indexed_sources(repo)
         sources_memo[repo] = (key, clock(), sources)
-        # Straight to `eventlog`, with no guard of its own: it never raises, and `watch()` runs
-        # inside the daemon loop's own `try`, so even a broken log would cost one cycle.
-        eventlog.write(eventlog.DAEMON, f"sources repo={repo} files={len(sources)} "
-                                        f"in {time.monotonic() - started:.1f}s")
+        # Logged when the read CHANGED something, not on every expiry: five repositories
+        # re-read every 300 s would be ~1,440 lines a day pushing the job lines out of a log
+        # that rotates at 256 KB. `eventlog` never raises.
+        if cached is None or cached[0] != key or len(cached[2]) != len(sources):
+            eventlog.write(eventlog.DAEMON, f"sources repo={repo} files={len(sources)} "
+                                            f"in {time.monotonic() - started:.1f}s")
 
         return sources
 
@@ -239,8 +241,6 @@ def watcher(cfg=None, index=None, clock=time.monotonic):
                 continue
             if seen.get(repo) == changed:
                 kind = "index" if new_paths else "refresh"
-                eventlog.write(eventlog.DAEMON, f"enqueue repo={repo} kind={kind} "
-                                                f"paths={len(new_paths) or len(changed)}")
                 if new_paths:
                     # A file just added to git was never indexed, so there is no digest for
                     # `refresh` to check — `add_files` is the one way a never-indexed file
@@ -252,6 +252,10 @@ def watcher(cfg=None, index=None, clock=time.monotonic):
                     jobs.enqueue(repo, "index", sorted(new_paths))
                 else:
                     jobs.enqueue(repo, "refresh", [])
+                # After the enqueue, which raises when it cannot land: logged first, a failed
+                # write read as a job that was queued.
+                eventlog.write(eventlog.DAEMON, f"enqueue repo={repo} kind={kind} "
+                                                f"paths={len(new_paths) or len(changed)}")
                 seen.pop(repo, None)
                 continue
             seen[repo] = changed

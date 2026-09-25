@@ -54,6 +54,17 @@ class TestTheLoopLeavesARecord(unittest.TestCase):
                         lines)
         self.assertIn("stop reason='cycles exhausted'", lines[-1])
 
+    def test_a_loop_ended_by_an_exception_still_records_why(self):
+        """`repos daemon stop` sends SIGTERM, which `__main__` turns into SystemExit. Logged
+        only on a normal return, the commonest stop left just the start line."""
+        def stopped(job):
+            raise SystemExit("SIGTERM")
+
+        jobs.enqueue("alpha", "refresh", [])
+        with self.assertRaises(SystemExit):
+            daemon.run(stopped, cycles=3, sleep=lambda s: None)
+        self.assertIn("stop reason='SystemExit: SIGTERM'", log_lines()[-1])
+
     def test_no_live_lease_is_recorded_as_the_reason_it_stopped(self):
         for path in (eventlog.path("leases")).glob("*.json"):
             path.unlink()
@@ -95,6 +106,17 @@ class TestTheLoopLeavesARecord(unittest.TestCase):
         self.assertEqual(len(errors), 1, errors)
         self.assertIn("ConnectionError: qdrant unreachable", errors[0])
 
+    def test_a_failure_whose_message_varies_is_still_recorded_once(self):
+        """An HTTP error embeds the response body; keyed on the whole message, every cycle
+        was a new failure (measured by review: 5 lines in 5 cycles)."""
+        count = iter(range(100))
+
+        def failing():
+            raise ConnectionError(f"qdrant said {next(count)}")
+
+        daemon.run(lambda job: None, cycles=5, sleep=lambda s: None, watch=failing)
+        self.assertEqual(len([ln for ln in log_lines() if "watch failed" in ln]), 1)
+
     def test_a_watcher_that_recovers_says_so_once(self):
         calls = {"n": 0}
 
@@ -118,7 +140,9 @@ class TestTheLoopLeavesARecord(unittest.TestCase):
     def test_a_log_that_cannot_be_written_does_not_stop_the_loop(self):
         jobs.enqueue("alpha", "index", ["/a.py"])
         ran = []
-        with unittest.mock.patch("core.eventlog.write", side_effect=OSError("disk full")):
+        # Broken from INSIDE `eventlog`, not by replacing `write`: the daemon relies on
+        # `write` keeping its promise, and this is the promise under test.
+        with unittest.mock.patch("core.eventlog.path", side_effect=OSError("disk full")):
             daemon.run(lambda job: ran.append(job), cycles=1, sleep=lambda s: None)
         self.assertEqual(len(ran), 1)
         self.assertEqual(jobs.load("alpha")["state"], jobs.DONE)
@@ -142,6 +166,31 @@ class TestTheWatcherRecordsWhatItDoes(unittest.TestCase):
         watch()
         self.assertTrue(any("enqueue repo=alpha kind=refresh" in ln for ln in log_lines()),
                         log_lines())
+
+
+class TestStatsReadsWhatTheRealDaemonWrites(unittest.TestCase):
+    """`stats` parses lines the daemon and the watcher write as plain strings. Its own tests
+    read a hand-typed fixture, so renaming an event (measured by review: `start` to
+    `started`) kept every test green and made `stats` report no start and no version. This
+    feeds the REAL writers' output to the REAL reader."""
+
+    def test_a_real_run_is_read_back_with_its_start_version_and_jobs(self):
+        from core import stats
+
+        a_state_dir()
+        lease.write("s1", "claude", pid=os.getpid())
+        jobs.enqueue("alpha", "refresh", [])
+
+        def failing():
+            raise ConnectionError("down")
+
+        daemon.run(lambda job: None, cycles=2, sleep=lambda s: None, watch=failing)
+        d = stats.summarize(Path(os.environ["QCTX_STATE_DIR"]))["daemon"]
+        self.assertEqual(d["version"], __version__, d)
+        self.assertIsNotNone(d["last_start"], d)
+        self.assertEqual(d["jobs"].get("done"), 1, d)
+        self.assertEqual(d["watcher_errors"], 1, d)
+        self.assertIn("ConnectionError: down", d["last_error"])
 
 
 class TestTheDaemonRecordsItsVersion(unittest.TestCase):

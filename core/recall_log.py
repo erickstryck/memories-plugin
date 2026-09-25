@@ -16,11 +16,9 @@ import re
 
 from . import eventlog
 
-HOSTS = ("claude-code", "hermes")
-
 _LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (?:\[([a-z-]+)\] )?(.+)$")
 _ROUND = re.compile(r"^round \d+: (?:(\d+) injected \+ (\d+) pointers|0 above the cut)"
-                    r".*? in ([\d.]+)s")
+                    r".*? in (\d+(?:\.\d+)?)s\b")
 #: What a failure line starts with, per dependency. The older hook's wording is the same up to
 #: the separator it used, so these prefixes read both.
 _FAILURES = (("embeddings failed", "embeddings"), ("Qdrant failed", "qdrant"),

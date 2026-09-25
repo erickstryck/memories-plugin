@@ -107,7 +107,8 @@ class VectorStore(Protocol):
         ...
 
     def set_payload(self, name: str, point_id, payload: dict) -> None:
-        """Replaces the payload WITHOUT touching the vector.
+        """Sets the given top-level payload keys WITHOUT touching the vector; keys not named
+        are kept (Qdrant's `POST points/payload` merges, it does not overwrite).
 
         It exists so that changing metadata does not require recomputing an
         embedding: beyond the waste, without it fixing a label was IMPOSSIBLE while

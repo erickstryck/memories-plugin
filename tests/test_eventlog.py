@@ -77,6 +77,20 @@ class TestEventlog(unittest.TestCase):
         self.assertEqual(len((self.dir / "recall.log").read_text().splitlines()), 1)
 
 
+class TestTheLogNeverRaises(unittest.TestCase):
+    def test_a_state_dir_that_cannot_be_resolved_is_a_lost_line_not_an_exception(self):
+        """`path()` once ran before the `try`, so the promise held only past it."""
+        import unittest.mock
+        with unittest.mock.patch("core.eventlog.path", side_effect=RuntimeError("no home")):
+            self.assertFalse(eventlog.write(eventlog.RECALL, "a line"))
+
+    def test_a_malformed_elapsed_is_not_a_line_and_not_an_exception(self):
+        """One such line took all of `qctx stats` down with a ValueError."""
+        for line in ("2026-09-25 10:00:00 round 1: 0 above the cut in 1.2.3s",
+                     "2026-09-25 10:00:00 [claude-code] round 9: 0 above the cut in .s"):
+            self.assertIsNone(recall_log.parse(line), line)
+
+
 class TestRecallLog(unittest.TestCase):
     def setUp(self):
         self.dir = a_state_dir()

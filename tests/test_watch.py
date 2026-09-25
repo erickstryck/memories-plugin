@@ -9,7 +9,7 @@ queue once it has been stable for one cycle.
 
 A SECOND SOURCE OF CHANGE, besides a file already in the archive being edited: a file added to
 `git` after the initial index, which `changed_paths` structurally cannot see (it only walks
-paths the archive ALREADY has). `FakeIndex.checkouts` and `indexed_paths()` exist so the tests
+paths the archive ALREADY has). `FakeIndex.checkouts` and `indexed_sources()` exist so the tests
 below can exercise that path (`_new_tracked_paths` in `core/indexer.py`) without a real git
 repository or a real Qdrant collection — see `TestWatchingPicksUpNewlyTrackedFiles`.
 """
@@ -132,7 +132,7 @@ class TestWatchingPicksUpNewlyTrackedFiles(unittest.TestCase):
     ALREADY has, so a file added to git after the initial index (`git add newfile.py`, no
     commit needed) was invisible to the watcher forever, silently. `_new_tracked_paths`
     reuses `scan.eligible` — the same selection `add-all` runs — against each checkout the
-    repo is registered under, and diffs it against `indexed_paths()`."""
+    repo is registered under, and diffs it against `indexed_sources()`."""
 
     def setUp(self):
         a_state_dir()
@@ -234,7 +234,7 @@ class TestTheScanIsNotRepaidEveryCycle(unittest.TestCase):
     newly `git add`ed file was invisible — but paid for it on EVERY cycle, forever. It is not
     a cheap call: `scan.eligible` shells out to `git ls-files` and then stats AND opens the
     first 8 KB of every tracked file to sniff binaries and minified bundles, and each call also
-    pulled a second full `indexed_paths()` scroll out of the archive. Measured by the reviewer:
+    pulled a second full `indexed_sources()` scroll out of the archive. Measured by the reviewer:
     ~5 ms for 114 files against 0.28 ms of stat, extrapolating to ~70-90 ms and up to 16 MB of
     reads per cycle per repository — against the spec's stated 16 ms watch budget.
 

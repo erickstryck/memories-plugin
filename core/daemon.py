@@ -645,7 +645,13 @@ def run(work, *, cycles: int | None = None, sleep=time.sleep, watch=None) -> str
     with nothing to do looked exactly alike.
     """
     _log(f"start pid={os.getpid()} version={__version__}")
-    reason = _loop(work, cycles, sleep, watch)
+    try:
+        reason = _loop(work, cycles, sleep, watch)
+    except BaseException as exc:
+        # SIGTERM too: `__main__` turns it into SystemExit, and `repos daemon stop` is how a
+        # daemon is normally ended, so without this the commonest stop left no stop line.
+        _log(f"stop reason={f'{type(exc).__name__}: {exc}'!r}")
+        raise
     _log(f"stop reason={reason!r}")
 
     return reason
@@ -671,11 +677,12 @@ def _loop(work, cycles, sleep, watch) -> str:
                 # A watcher that cannot enqueue must not end the daemon for every OTHER
                 # repository. There is no job here to mark failed, so the loop simply carries
                 # on: the change is still on disk, and the next cycle sees it again. Logged
-                # when the failure CHANGES, so an outage is one line and not one per cycle.
-                described = f"{type(exc).__name__}: {exc}"[:400]
-                if described != watch_error:
-                    _log(f"watch failed ({described})")
-                watch_error = described
+                # when the failure's TYPE changes, so an outage is one line and not one per
+                # cycle: an HTTP error embeds the response body, and keying on the whole message
+                # logged every cycle (measured by review: 5 lines in 5 cycles).
+                if type(exc).__name__ != watch_error:
+                    _log(f"watch failed ({type(exc).__name__}: {exc})"[:500])
+                watch_error = type(exc).__name__
         seen += 1
         if cycles is None or seen < cycles:
             sleep(CYCLE_S)
@@ -684,11 +691,8 @@ def _loop(work, cycles, sleep, watch) -> str:
 
 
 def _log(line: str) -> None:
-    """One line in `daemon.log`. Never raises: a log is not worth a daemon cycle."""
-    try:
-        eventlog.write(eventlog.DAEMON, line)
-    except Exception:                                   # noqa: BLE001 (see the docstring)
-        pass
+    """One line in `daemon.log`. `eventlog.write` never raises and says so; no second guard."""
+    eventlog.write(eventlog.DAEMON, line)
 
 
 def _run_one(job: dict, work) -> None:
@@ -783,6 +787,10 @@ if __name__ == "__main__":                              # `python -m core.daemon
     # THE DAEMON'S OWN ENTRY POINT. Kept here, beside the loop it starts, so `start()` never
     # has to name a file in another layer. Imported inside the guard because `core.indexer`
     # pulls the whole indexing stack and nothing that merely imports `core.daemon` needs it.
+    import signal
+
     from . import indexer
 
+    # `repos daemon stop` sends SIGTERM. Turned into SystemExit so `run` logs why it stopped.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit("SIGTERM"))
     print(run(indexer.work(), watch=indexer.watcher()))

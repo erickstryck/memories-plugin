@@ -91,12 +91,12 @@ class TestEveryStateWriterPublishesTheSameMode(unittest.TestCase):
         that was group-readable, which is the real sequence on a machine where earlier
         versions of this package already left one behind.
         """
-        from hooks import recall
+        from core import eventlog
 
         target = self.dir / "recall.log"
         target.write_text("x" * 100)
         os.chmod(target, 0o664)
-        self.assertTrue(recall.rotate(target, max_bytes=10), "it must actually rotate")
+        self.assertTrue(eventlog.rotate(target, max_bytes=10), "it must actually rotate")
         self.assertEqual(_mode(target), STATE_MODE)
 
     def test_the_config_save_publishes_600(self):

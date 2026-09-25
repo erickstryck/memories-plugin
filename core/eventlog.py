@@ -59,8 +59,8 @@ def write(name: str, line: str) -> bool:
     would then count as an event that never happened.
     """
     flat = " ".join(str(line).split())
-    target = path(name)
     try:
+        target = path(name)
         statefile.ensure_dir(target.parent)
         rotate(target)
         # O_CREAT WITH A MODE, because `open(..., "a")` creates at the umask. The mode only

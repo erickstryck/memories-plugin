@@ -551,6 +551,45 @@ class TestATouchedFileIsRestampedNotReembedded(unittest.TestCase):
         ix, path = self._touched()
         self.assertEqual([r["action"] for r in ix.refresh("alpha")], ["ok"])
 
+    def test_an_edit_between_the_digest_check_and_the_restamp_is_not_hidden(self):
+        """The restamp once stat'ed the file AFTER the digest was read. An edit landing in
+        between had its mtime stamped onto chunks holding the old content, and the watcher
+        never saw it again (1.0.1 did). The stat taken before the hash keeps it drifted."""
+        import core.repos as repos_mod
+
+        ix, path = self._touched()
+        real = repos_mod.source_changed
+
+        def edited_right_after_the_hash(*args, **kwargs):
+            reason = real(*args, **kwargs)
+            with open(path, "w") as f:
+                f.write("x = 2  # edited in the window\n")
+            later = time.time() + 20_000
+            os.utime(path, (later, later))
+            return reason
+
+        repos_mod.source_changed = edited_right_after_the_hash
+        try:
+            ix.refresh("alpha")
+        finally:
+            repos_mod.source_changed = real
+        self.assertEqual(ix.changed_paths("alpha"), [path],
+                         "the edit must still show, or nothing re-indexes it")
+
+    def test_the_restamp_sends_only_metadata(self):
+        """A restamp that wrote back the whole payload it read could put stale text over a
+        chunk another writer had just replaced. Only `metadata` goes out."""
+        ix, path = self._touched()
+        sent = []
+        real = ix.q.set_payload
+        ix.q.set_payload = lambda name, pid, payload: (sent.append(payload),
+                                                       real(name, pid, payload))
+        ix.refresh("alpha")
+        self.assertTrue(sent, "setup: the touch must be restamped")
+        self.assertEqual({k for p in sent for k in p}, {"metadata"})
+        doc = next(iter(ix.q.collections[ix.chunks_name]["points"].values()))["payload"]
+        self.assertIn("x = 1", doc.get("document", ""), "the chunk's text must survive")
+
     def test_every_chunk_of_a_multi_chunk_file_is_restamped(self):
         ix = an_index("alpha")
         path = a_file("".join(f"def f{i}():\n    return {i}\n\n" for i in range(600)))

@@ -1170,6 +1170,18 @@ class TestTheHermesHostLeavesARecord(_NoRealHermesHome):
         p.prefetch("ok")
         self.assertEqual([(ln["host"], ln["kind"]) for ln in self._lines()], [("hermes", "skip")])
 
+    def test_a_line_that_fails_to_BUILD_does_not_cost_the_block(self):
+        """The guard once wrapped only the write: a builder raising at the call site turned a
+        successful recall into an UNAVAILABLE block. The line is now built inside it."""
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        store = self._returning([FakeHit(id="m1", document="a durable fact", origin=CE)],
+                                Outcome(candidates=5, reranked=True))
+        with unittest.mock.patch("core.recall_log.round_line", side_effect=RuntimeError("x")):
+            block = self._provider(store).prefetch("how does the poll paginate?")
+        self.assertIn("a durable fact", block)
+        self.assertNotIn("UNAVAILABLE", block)
+
     def test_an_archive_that_failed_is_recorded_by_dependency(self):
         from core.qdrant import QdrantError
 
