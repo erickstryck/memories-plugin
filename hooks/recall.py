@@ -45,8 +45,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core  # noqa: E402
-from core import knobs, names  # noqa: E402
-from core import query  # noqa: E402
+from core import eventlog, knobs, names  # noqa: E402
+from core import query, recall_log  # noqa: E402
 from core import session_state as st  # noqa: E402
 from core import statefile  # noqa: E402
 from core.blocks import Budget, empty_block, recall_block, split_by_budget, unavailable_block  # noqa: E402
@@ -98,8 +98,9 @@ _pending_notes: list[str] = []
 # already writes down why ("a third copy of where state lives is how the three start\n# to disagree"), and this file was one of the copies. Still a module-level constant
 # because a hook is one short process and the directory cannot change under it.
 STATE_DIR = knobs.state_dir()
-LOG = STATE_DIR / "recall.log"
-LOG_MAX_BYTES = 256 * 1024
+LOG = STATE_DIR / eventlog.RECALL
+#: This host's name in the shared `recall.log`, which the hermes provider writes too.
+HOST = "claude-code"
 
 #: WHICH KNOBS CARRY A FLOOR, and why the others must not. `minimum=1` goes on every knob
 #: that can zero the RESULT SET, because a zero there makes this hook claim the archive holds
@@ -169,44 +170,22 @@ BUDGET = Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
                max_per_mem=MAX_PER_MEM, reinject_after=st.REINJECT_AFTER)
 
 
-def rotate(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
-    """Halves `path` when it has grown past `max_bytes`. True when it was rotated.
-
-    EXTRACTED FROM `log()` SO THE THRESHOLD CAN BE DRIVEN DIRECTLY, and because rotating is
-    where a careful file mode gets thrown away: the rewrite creates a NEW file, and the
-    hand-rolled `write_text` this replaced took the umask for it -- 0o664 on the real machine,
-    for a log that records what was recalled and when. `core.statefile` owns that mode.
-
-    THE PARAMETER IS `path` AND NOT `log`, which is not a style choice: this module's own
-    `log()` is a function, and a parameter of that name shadows it for the body of this one.
-
-    THE TAIL IS KEPT, NOT THE HEAD. What a reader wants from a rotated log is what happened
-    most recently; keeping the first half would answer a question nobody asks.
-    """
-    try:
-        if not path.exists() or path.stat().st_size <= max_bytes:
-            return False
-        statefile.write_text(path, path.read_text(errors="replace")[-max_bytes // 2:])
-
-        return True
-    except OSError:
-        return False
+def rotate(path: Path, max_bytes: int = eventlog.MAX_BYTES) -> bool:
+    """Halves `path` when it has grown past `max_bytes`. Kept as this module's name for the
+    rotation `core/eventlog.py` now owns, which both hosts and the daemon share."""
+    return eventlog.rotate(path, max_bytes)
 
 
 def log(msg: str) -> None:
-    try:
-        statefile.ensure_dir(STATE_DIR)
-        while _pending_notes:
-            _write_log(f"config: {_pending_notes.pop(0)}")
-        rotate(LOG)
-        _write_log(msg)
-    except Exception:
-        pass
+    """One line in the shared `recall.log`, prefixed with this host's name. Never raises:
+    `recall_log.record` answers whether the line landed, and a lost line costs nothing here.
 
-
-def _write_log(msg: str) -> None:
-    with LOG.open("a") as fh:
-        fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    The config notes gathered at import are flushed first, so they sit before the round they
+    were read for, which is where someone reading the log looks for them.
+    """
+    while _pending_notes:
+        recall_log.record(HOST, f"config: {_pending_notes.pop(0)}")
+    recall_log.record(HOST, msg)
 
 
 def extract_prompt(data: dict) -> str:
@@ -244,7 +223,7 @@ def main() -> None:
         raise
     except BaseException as exc:  # noqa: BLE001 — see docstring
         try:
-            log(f"unexpected failure ({type(exc).__name__}: {exc})")
+            log(recall_log.failure_line("unexpected", f"{type(exc).__name__}: {exc}"))
             emit(unavailable_block("the hook", type(exc).__name__))
         except Exception:
             pass  # if even that fails, silence is the only path left
@@ -274,7 +253,7 @@ def _run() -> None:
 
     reason = query.skip_reason(prompt)
     if reason:
-        log(f"skip ({reason}): {prompt[:60]!r}")
+        log(recall_log.skip_line(reason, prompt))
         return
 
     angles = query.angles(prompt)
@@ -307,7 +286,7 @@ def _run() -> None:
         # without it — a desktop launcher, a systemd unit, a different shell — loses
         # long-term memory entirely. Of every degradation here, this is the one with the
         # largest blast radius, and it was the one that said nothing.
-        log(f"incomplete config ({exc}) — no recall on this prompt")
+        log(recall_log.failure_line("config", str(exc)))
         emit(unavailable_block("configuration", str(exc)))
         return
 
@@ -323,7 +302,7 @@ def _run() -> None:
     if idle is not None:
         store.reranker = None
         suppressed = f"circuit breaker: the re-rank failed {idle:.0f}s ago"
-        log(f"re-rank in breaker: failed {idle:.0f}s ago — strict dense cut")
+        log(recall_log.breaker_line(idle))
 
     # Conditional on the second stage, and chosen AFTER the suppression above so a
     # breaker-disabled reranker counts as an absent one. Both values were read at module
@@ -339,18 +318,18 @@ def _run() -> None:
     try:
         hits, outcome = store.recall(angles, policy, top_k, suppressed=suppressed)
     except core.EmbeddingError as exc:
-        log(f"embeddings failed ({exc}) — no recall on this prompt")
+        log(recall_log.failure_line("embeddings", str(exc)))
         emit(unavailable_block("embeddings", type(exc).__name__))
         return
     except core.QdrantError as exc:
-        log(f"Qdrant failed ({exc}) — no recall on this prompt")
+        log(recall_log.failure_line("qdrant", str(exc)))
         emit(unavailable_block("Qdrant", type(exc).__name__))
         return
     elapsed = time.monotonic() - t0
 
     if outcome.rerank_error:
         breaker.arm()
-        log(f"re-rank failed ({outcome.rerank_error}) — breaker armed for {BREAKER_SECONDS:.0f}s")
+        log(recall_log.rerank_failed_line(outcome.rerank_error, BREAKER_SECONDS))
     elif outcome.by_rerank:
         breaker.clear()
 
@@ -380,23 +359,18 @@ def _run() -> None:
 
     if not hits:
         st.prune(state)
-        # The empty line used to omit CE/collapse, so an empty round could not be told
-        # apart afterwards: "the cross-encoder vetoed everything" and "there was no second
-        # stage" and "the judgement was discarded" all looked identical in the log. Those
-        # are the rounds most worth diagnosing.
-        why = (f"CE={outcome.reranked} collapsed={outcome.collapsed} "
-               f"dropped={outcome.dropped_above_floor}"
-               + (f" suppressed={outcome.suppressed!r}" if outcome.suppressed else "")
-               + (f" error={outcome.rerank_error!r}" if outcome.rerank_error else ""))
-        log(f"round {round_no}: 0 above the cut (best {outcome.best_dense:.3f}) "
-            f"in {elapsed:.1f}s | {len(angles)} angles | {why} | {prompt[:60]!r}")
+        # The empty line carries CE, collapse, dropped, suppression and the error, so the
+        # rounds most worth diagnosing can be told apart afterwards. `recall_log` owns it now,
+        # because the hermes host writes the same line to the same file.
+        log(recall_log.empty_line(round_no, outcome, elapsed=elapsed, angles=len(angles),
+                                  prompt=prompt))
         st.save(state_path, state)
         # SWEPT HERE TOO. The sweep used to sit only past this return, so a fresh install, an
         # empty collection, or a run of prompts that match nothing never swept — and those are
         # exactly the sessions that leave a state file behind without ever recalling anything.
         dead = st.sweep_if_due(STATE_DIR, round_no)
         if dead:
-            log(f"cleanup: {dead} dead session state(s) removed")
+            log(recall_log.cleanup_line(dead))
         emit(empty_block(outcome, len(angles)))
         return
 
@@ -410,11 +384,9 @@ def _run() -> None:
     # hosts share it" and only this host ever called it.
     dead = st.sweep_if_due(STATE_DIR, round_no)
     if dead:
-        log(f"cleanup: {dead} dead session state(s) removed")
-    scale = " (scale converted)" if outcome.scale_converted else ""
-    log(f"round {round_no}: {len(full_hits)} injected + {len(pointers)} pointers "
-        f"(out of {len(hits)} relevant / {outcome.candidates} candidates) in {elapsed:.1f}s | "
-        f"{len(angles)} angles | CE={outcome.by_rerank}{scale} | {prompt[:60]!r}")
+        log(recall_log.cleanup_line(dead))
+    log(recall_log.round_line(round_no, len(full_hits), len(pointers), len(hits), outcome,
+                              elapsed=elapsed, angles=len(angles), prompt=prompt))
 
     emit(recall_block(full_hits, pointers, len(angles), outcome, BUDGET))
 
