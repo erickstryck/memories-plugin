@@ -278,16 +278,21 @@ class _NoRealHermesHome(unittest.TestCase):
 
     Restoration goes through `addCleanup`, so it runs even when a test fails. `HERMES_HOME`
     locates the HOST: a value left behind here leaks into other test modules.
+
+    `QCTX_STATE_DIR` IS PINNED TOO, since `prefetch` writes the shared `recall.log`. Without it
+    every test here would append to the developer's real log, and `qctx stats` on that machine
+    would then report rounds that only ever happened inside the suite.
     """
 
     def setUp(self):
         super().setUp()
-        previous = os.environ.get("HERMES_HOME")
-        os.environ["HERMES_HOME"] = tempfile.mkdtemp()
-        if previous is None:
-            self.addCleanup(os.environ.pop, "HERMES_HOME", None)
-        else:
-            self.addCleanup(os.environ.__setitem__, "HERMES_HOME", previous)
+        for key in ("HERMES_HOME", "QCTX_STATE_DIR"):
+            previous = os.environ.get(key)
+            os.environ[key] = tempfile.mkdtemp()
+            if previous is None:
+                self.addCleanup(os.environ.pop, key, None)
+            else:
+                self.addCleanup(os.environ.__setitem__, key, previous)
 
 
 class TestPrefetch(_NoRealHermesHome):
@@ -504,10 +509,14 @@ class TestPrefetch(_NoRealHermesHome):
 
         p._store = Counting()
         # A plain FILE where a directory is expected: base.mkdir(...) fails with
-        # FileExistsError (an OSError), so _state_path degrades to None.
+        # FileExistsError (an OSError), so _state_path degrades to None. Set through
+        # QCTX_STATE_DIR, which `_state_path` prefers over the attribute: the base class pins
+        # it, and setting only the attribute would silently stop reaching the None branch.
         blocker = Path(tempfile.mkdtemp()) / "blocked"
         blocker.write_text("not a directory")
         p._state_dir = blocker
+        os.environ["QCTX_STATE_DIR"] = str(blocker)
+        self.assertIsNone(p._state_path("probe"), "setup: the None branch is not reached")
 
         out = p.prefetch("a real question the archive should be reachable for")
         self.assertEqual(calls, [1], "the search must run even without a state directory")
@@ -1111,6 +1120,133 @@ class TestCheckpointFailureDoesNotCostRecall(_NoRealHermesHome):
         self.assertIn("a durable fact", out, "the recall must survive a broken checkpoint")
         self.assertNotIn("UNAVAILABLE", out, "a checkpoint failure is not a recall failure")
         self.assertNotIn("memory checkpoint", out)
+
+
+class TestTheHermesHostLeavesARecord(_NoRealHermesHome):
+    """Measured on 2026-09-25: a hermes session's turns appeared nowhere. The claude-code hook
+    wrote one line per round to `recall.log` (latency, how much was injected, why a round came
+    back empty, when the breaker fired), and this host, the one used every day, wrote nothing.
+    It now writes the same lines, through the same `core.recall_log`, to the same file."""
+
+    def _lines(self) -> list:
+        from core import eventlog, recall_log
+        target = eventlog.path(eventlog.RECALL)
+        if not target.exists():
+            return []
+
+        return [recall_log.parse(line) for line in target.read_text().splitlines()]
+
+    def _provider(self, store):
+        p = MemoriesProvider()
+        p._cfg = object()
+        p._store = store
+
+        return p
+
+    def _returning(self, hits, outcome):
+        return type("S", (), {"reranker": None,
+                              "recall": lambda self, *a, **kw: (hits, outcome)})()
+
+    def test_a_round_with_memories_is_recorded_with_its_latency(self):
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        p = self._provider(self._returning(
+            [FakeHit(id="m1", document="a durable fact", origin=CE)],
+            Outcome(candidates=5, reranked=True)))
+        p.prefetch("how does the poll paginate?")
+        [line] = self._lines()
+        self.assertEqual((line["host"], line["kind"], line["injected"]), ("hermes", "round", 1))
+        self.assertIn("elapsed", line)
+
+    def test_an_empty_round_is_recorded(self):
+        from core.retrieval import Outcome
+        p = self._provider(self._returning([], Outcome(candidates=4, best_dense=0.31)))
+        p.prefetch("an absent subject entirely")
+        [line] = self._lines()
+        self.assertEqual((line["host"], line["kind"], line["injected"]), ("hermes", "round", 0))
+
+    def test_a_skipped_prompt_is_recorded(self):
+        p = self._provider(self._returning([], None))
+        p.prefetch("ok")
+        self.assertEqual([(ln["host"], ln["kind"]) for ln in self._lines()], [("hermes", "skip")])
+
+    def test_an_archive_that_failed_is_recorded_by_dependency(self):
+        from core.qdrant import QdrantError
+
+        class Down:
+            reranker = None
+
+            def recall(self, *a, **kw):
+                raise QdrantError("connection refused")
+
+        p = self._provider(Down())
+        with unittest.mock.patch.object(p, "_refresh_window"):
+            self.assertIn("UNAVAILABLE", p.prefetch("a real question about the archive"))
+        [line] = self._lines()
+        self.assertEqual((line["kind"], line["dependency"]), ("failure", "qdrant"))
+
+    def test_an_embedding_failure_is_recorded_as_such(self):
+        from core.embedding import EmbeddingError
+
+        class Down:
+            reranker = None
+
+            def recall(self, *a, **kw):
+                raise EmbeddingError("timed out")
+
+        p = self._provider(Down())
+        with unittest.mock.patch.object(p, "_refresh_window"):
+            p.prefetch("a real question about the archive")
+        [line] = self._lines()
+        self.assertEqual((line["kind"], line["dependency"]), ("failure", "embeddings"))
+
+    def test_an_unexpected_failure_is_recorded(self):
+        class Exploding:
+            reranker = None
+
+            def recall(self, *a, **kw):
+                raise RuntimeError("something nobody predicted")
+
+        p = self._provider(Exploding())
+        with unittest.mock.patch.object(p, "_refresh_window"):
+            p.prefetch("a real question about the archive")
+        [line] = self._lines()
+        self.assertEqual((line["kind"], line["dependency"]), ("failure", "unexpected"))
+
+    def test_a_rerank_failure_and_the_breaker_are_recorded(self):
+        from core.retrieval import Outcome
+        p = self._provider(self._returning([], Outcome(candidates=3, rerank_error="timeout")))
+        p.prefetch("a real question about the archive")
+        p.prefetch("another real question about the archive")
+        kinds = [(ln["kind"], ln.get("dependency")) for ln in self._lines()]
+        self.assertIn(("failure", "rerank"), kinds)
+        self.assertIn(("breaker", None), kinds, "the second turn ran under the breaker")
+
+    def test_a_log_that_cannot_be_written_changes_nothing_the_model_gets(self):
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        hits = [FakeHit(id="m1", document="a durable fact", origin=CE)]
+        outcome = Outcome(candidates=5, reranked=True)
+        # Separate sessions: in one session the second turn would reinject the memory as a
+        # pointer, and the two blocks would differ for a reason that has nothing to do with logs.
+        expected = self._provider(self._returning(hits, outcome)).prefetch(
+            "the same question", session_id="first")
+        with unittest.mock.patch("core.eventlog.write", return_value=False):
+            got = self._provider(self._returning(hits, outcome)).prefetch(
+                "the same question", session_id="second")
+        self.assertEqual(got, expected)
+
+    def test_a_log_that_raises_changes_nothing_either(self):
+        """`eventlog.write` promises never to raise; this holds the host to not depending on
+        that promise for the block it returns."""
+        from core.retrieval import CE, Outcome
+        from tests.test_blocks import FakeHit
+        p = self._provider(self._returning([FakeHit(id="m1", document="a durable fact",
+                                                    origin=CE)], Outcome(candidates=5)))
+        with unittest.mock.patch("core.recall_log.record", side_effect=OSError("disk full")):
+            out = p.prefetch("the same question")
+        self.assertIn("a durable fact", out)
+        self.assertNotIn("UNAVAILABLE", out)
 
 
 class TestConfigSchema(unittest.TestCase):
