@@ -146,10 +146,13 @@ So the read is refused before it happens, with a message that says what to do in
 criteria, whichever fires first, both relative to what is LEFT of the window rather than to
 the size of the file:
 
-| | blocks when | default | knob |
+| | blocks when | default | setting (environment) |
 |---|---|---|---|
-| final remainder | the read would leave less than 20% of the window free | `0.20` | `QCTX_BIGFILE_FLOOR_PCT` |
-| one file's share | the read costs more than 40% of what is free | `0.40` | `QCTX_BIGFILE_SHARE_PCT` |
+| final remainder | the read would leave less than 20% of the window free | `0.20` | `bigfile_floor_pct` (`QCTX_BIGFILE_FLOOR_PCT`) |
+| one file's share | the read costs more than 40% of what is free | `0.40` | `bigfile_share_pct` (`QCTX_BIGFILE_SHARE_PCT`) |
+
+Both are config settings (`qctx config set bigfile-floor-pct 0.15`), resolved like every
+other: the environment wins over the file, and the file over the default.
 
 **It does not index anything. It says what to index, and the model indexes**: a blocked
 read must not silently fire off hundreds of embedding chunks nobody asked for. If the file

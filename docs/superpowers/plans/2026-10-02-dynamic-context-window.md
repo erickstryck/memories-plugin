@@ -33,7 +33,8 @@ tabela de modelos sai.
 - Nada que funciona na v1.2.0 degrada. As únicas mudanças de comportamento aceitas são as da
   spec: sem registro e sem config, `claude-opus-5` deixa de valer 1.000.000 e passa a liberar;
   e os relatórios dos cutovers mudam de texto.
-- Ambiente dos testes: `TMPDIR=/tmp`, `unset QCTX_STATE_DIR`, `HOME=/home/erick`.
+- Ambiente dos testes: `TMPDIR=/tmp`, `unset QCTX_STATE_DIR`, e o `HOME` real do usuário
+  (um revisor já deixou o do shell trocado).
 - Um commit por tarefa, na `main`. Sem `Co-Authored-By`.
 
 ---
@@ -74,7 +75,7 @@ valores padrão vêm de `core.bigfile.FLOOR_PCT` e `SHARE_PCT`, um dono só para
   - `test_the_legacy_names_still_work` e `test_a_blank_canonical_name_falls_through`.
   - `test_a_non_number_falls_back_and_says_where` (`"banana"`, com `note` citando a fonte).
   - `test_outside_zero_to_one_falls_back_and_says_so` (`"1.5"`, `"-0.1"`).
-  - `test_zero_is_kept_because_zero_turns_the_criterion_off`.
+  - `test_the_bounds_zero_and_one_are_kept` (os extremos têm significado em `_blocks`).
   - `test_they_are_fractions_not_whole_numbers`: estão em `fraction_fields()`, não em
     `numeric_fields()`.
 - [ ] RED no CLI: `config set bigfile-floor-pct banana` e `1.5` são recusados sem tocar o

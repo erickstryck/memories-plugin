@@ -149,9 +149,12 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
   ambiente, arquivo, padrão.
 - `core.config` passa a tratar campos `float` como trata os `int`: valor que não é número
   volta para o padrão e avisa pelo canal `note`; o `config set` recusa.
-- Faixa válida: de 0 a 1. Zero desliga aquele critério (a semântica que `core/knobs.py`
-  já documenta para eles). Fora da faixa, o `config set` recusa e o loader volta ao padrão
-  com aviso.
+- Faixa válida: de 0 a 1, inclusive. Os extremos seguem a regra de `core/bigfile._blocks`:
+  um floor de 0 só recusa a leitura que estoura a janela; um share de 1 só recusa a que não
+  cabe no que está livre; um share de 0 recusa toda leitura que custa alguma coisa. Fora da
+  faixa, o `config set` recusa e o loader volta ao padrão com aviso. (Corrigido em
+  2026-10-02: a versão anterior dizia que zero desligava o critério, e isso é falso para os
+  dois.)
 - Os dois adaptadores deixam de ler essas variáveis no import e passam a usar o config, lido
   quando o guard roda (claude-code) ou com a configuração do provider (hermes).
 - `docs/usage.md` documenta os dois campos na tabela config ↔ env e na seção do guard.

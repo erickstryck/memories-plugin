@@ -499,6 +499,8 @@ class EveryFieldIsSet(unittest.TestCase):
             return "200000"
         if field == "checkpoint_interval":
             return "7"
+        if field.endswith("_pct"):
+            return "0.15"
         if field.endswith("_url"):
             return f"https://{field.replace('_', '-')}.example"
         if field.endswith("_collection"):
@@ -506,7 +508,7 @@ class EveryFieldIsSet(unittest.TestCase):
 
         return f"value-{field}"
 
-    def test_the_wizard_sets_all_sixteen(self):
+    def test_the_wizard_sets_every_field(self):
         from core import config, install
         asked = install.REQUIRED_FIELDS + install.OPTIONAL_FIELDS
         answers = "\n".join(self.value_for(f) for f in asked) + "\n"
@@ -707,7 +709,7 @@ class ConfigPass(unittest.TestCase):
         `cmd_setup` printed the same list twenty lines away. The design's pass 1 says
         this collection is asked "with the suggestions of `suggest_collections`"."""
         printed, _ = self.ask_config(
-            ["", "", "1"] + [""] * 10,
+            ["", "", "1"] + [""] * 12,
             suggestions=[{"collection": "claude_memory", "points": 812},
                          {"collection": "old_archive", "points": 12}])
         self.assertIn("claude_memory", printed)
@@ -715,19 +717,38 @@ class ConfigPass(unittest.TestCase):
         self.assertEqual(self.saved.get("memory_collection"), "claude_memory",
                          "choosing by index did not resolve to the suggestion")
 
+    def test_a_fraction_is_re_asked_until_it_is_one(self):
+        """The guard thresholds: a typo, or a percentage typed as 20, must not reach the file
+        and must not cost the answers already typed."""
+        with mock.patch.object(self.qctx, "_ask", side_effect=["20", "banana", "0.3"]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            got = self.qctx._ask_fraction("bigfile_floor_pct [0.2]: ", 0.2)
+        self.assertEqual(got, 0.3)
+        self.assertEqual(out.getvalue().count("between 0 and 1"), 2, out.getvalue())
+
+    def test_the_wizard_writes_the_thresholds_as_numbers(self):
+        answers = [""] * 15
+        order = list(self.qctx.core.install.OPTIONAL_FIELDS)
+        offset = 15 - len(order)
+        answers[offset + order.index("bigfile_floor_pct")] = "0.15"
+        answers[offset + order.index("bigfile_share_pct")] = "0"
+        self.ask_config(answers)
+        self.assertEqual(self.saved.get("bigfile_floor_pct"), 0.15)
+        self.assertEqual(self.saved.get("bigfile_share_pct"), 0.0)
+
     def test_a_key_that_is_already_in_a_credential_file_is_not_asked_as_missing(self):
         """It ran on every verification, so re-asking is not a small annoyance: it is
         the paste-a-secret-every-run reflex the design forbids, taught by the tool."""
         secrets_file = self.home / ".secrets"
         secrets_file.write_text("export QDRANT_SERVICE_API_KEY=abcdef\n")
-        _, prompts = self.ask_config([""] * 13)
+        _, prompts = self.ask_config([""] * 15)
         self.assertIn("already set as QDRANT_SERVICE_API_KEY", prompts[0])
         self.assertIn(str(secrets_file), prompts[0])
         self.assertIn("MISSING", prompts[1])          # the other key really is missing
 
     def test_a_key_in_the_environment_is_recognised_too(self):
         _, prompts = self.ask_config(
-            [""] * 13, env={"HOME": str(self.home), "SERVER_API_KEY": "abc"})
+            [""] * 15, env={"HOME": str(self.home), "SERVER_API_KEY": "abc"})
         self.assertIn("already set as SERVER_API_KEY in the environment", prompts[1])
 
 

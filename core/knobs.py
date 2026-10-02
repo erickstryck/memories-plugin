@@ -10,7 +10,9 @@ one debug line as the only symptom.
 The clamping variant (`clamped_num`, below) is shared too: `hooks/recall.py` and
 `hosts/hermes/__init__.py` each keep only a thin channel for its notes. `hooks/checkpoint.py`
 had a third copy until its one knob, the interval, became the `checkpoint_interval` setting
-that `core/config.py` resolves.
+that `core/config.py` resolves. The big-file guard's two thresholds went the same way: they
+are the `bigfile_floor_pct` and `bigfile_share_pct` settings, and neither guard reads them
+from the environment on its own any more.
 
 `legacy` is not decoration: every knob in this repo answers to a `QCTX_`-prefixed name and to
 the older bare one, so an operator who exported the old spelling keeps working.

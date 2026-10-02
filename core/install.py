@@ -46,7 +46,8 @@ REQUIRED_FIELDS = ("qdrant_url", "api_base_url", "qdrant_api_key", "api_key",
 #: :8003 and rerank on :8004.
 OPTIONAL_FIELDS = ("embed_url", "rerank_url", "embed_model", "rerank_model",
                    "docs_collection", "library_collection", "repos_collection",
-                   "repos_registry_collection", "context_window", "checkpoint_interval")
+                   "repos_registry_collection", "context_window", "checkpoint_interval",
+                   "bigfile_floor_pct", "bigfile_share_pct")
 
 #: Written from what the endpoint answered, never typed.
 DETECTED_FIELDS = ("vector_size",)

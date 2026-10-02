@@ -69,19 +69,11 @@ if REPO_ROOT not in sys.path:
 
 import core  # noqa: E402
 from core import bigfile, windows  # noqa: E402
-from core.knobs import env, env_num  # noqa: E402
+from core.knobs import env  # noqa: E402
 
 #: The exit code `agent/shell_hooks.py::BLOCK_EXIT_CODE` honours on `pre_tool_call`.
 BLOCK_EXIT_CODE = 2
 
-
-#: The two thresholds of `core.bigfile.decide`, read HERE and not there: the core stays pure
-#: and environment-free, and the adapter is what knows it is running on a host. The names are
-#: byte-for-byte the ones `hooks/bigfile.py` reads — a deployer who tuned the guard on one
-#: host expects the same variable to move the same number on the other, and the knob-parity
-#: scan in the test suite is what keeps that true.
-FLOOR_PCT = env_num("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT", "0.20", float)
-SHARE_PCT = env_num("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT", "0.40", float)
 
 #: The literal the user types to force a read through, and — being TEXT the user types —
 #: configurable: a deployer whose own tooling uses `--full` as a flag would otherwise unlock
@@ -249,8 +241,12 @@ def _run() -> str:
     budget = budget_from(db_path, session_id,
                          lambda model: windows.window_for(model, cfg, base))
 
+    # The two thresholds come from the config, which resolves them like every setting:
+    # environment (the names both hosts always answered to), then file, then default.
+    floor_pct, share_pct = cfg.bigfile_floor_pct, cfg.bigfile_share_pct
+
     # PASS ONE: no `indexed_ids`, no network. This is the path every read takes.
-    verdict = bigfile.decide(path, budget, floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
+    verdict = bigfile.decide(path, budget, floor_pct=floor_pct, share_pct=share_pct,
                              read_lines=_read_lines(tool_input),
                              read_bytes=READ_CHAR_CEILING, escape=ESCAPE_MARKER)
     if not verdict.block:
@@ -269,7 +265,7 @@ def _run() -> str:
     from core.inventory import indexed_ids
 
     verdict = bigfile.decide(path, budget, indexed_ids=indexed_ids(cfg),
-                             floor_pct=FLOOR_PCT, share_pct=SHARE_PCT,
+                             floor_pct=floor_pct, share_pct=share_pct,
                              read_lines=_read_lines(tool_input),
                              read_bytes=READ_CHAR_CEILING, escape=ESCAPE_MARKER)
 

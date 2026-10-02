@@ -749,7 +749,8 @@ class MemoriesProvider(_Base):
         """
         from dataclasses import fields as dc_fields
 
-        from core.config import DEFAULTS, ENV_ALIASES, SECRET_FIELDS, Config, numeric_fields
+        from core.config import (DEFAULTS, ENV_ALIASES, SECRET_FIELDS, Config, fraction_fields,
+                                 numeric_fields)
 
         described = {
             "qdrant_url": "Qdrant base URL, e.g. https://host/qdrant",
@@ -772,6 +773,10 @@ class MemoriesProvider(_Base):
                                "variant). 0 means unknown/use the table.",
             "checkpoint_interval": "Turns between the reminder to save durable memories. "
                                    "0 turns it off.",
+            "bigfile_floor_pct": "Big-file guard: refuse a read that would leave less than "
+                                 "this fraction of the context window free (0.2 = 20%).",
+            "bigfile_share_pct": "Big-file guard: refuse a read that alone would take more "
+                                 "than this fraction of the free context (0.4 = 40%).",
         }
         out = []
         for f in dc_fields(Config):
@@ -781,7 +786,8 @@ class MemoriesProvider(_Base):
                 "description": described[f.name],
                 "secret": secret,
                 "required": f.name in ("qdrant_url", "memory_collection"),
-                "type": "integer" if f.name in numeric_fields() else "text",
+                "type": ("integer" if f.name in numeric_fields()
+                         else "number" if f.name in fraction_fields() else "text"),
             }
             default = DEFAULTS.get(f.name)
             if default not in ("", None):

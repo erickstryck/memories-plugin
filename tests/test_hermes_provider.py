@@ -1142,7 +1142,13 @@ class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
         """A guard on the guard, per file: if the regex stopped matching one of them,
         everything below would pass over an empty list for that file and prove nothing."""
         per_file = {rel: {attr for attr, *_ in numeric_knobs(rel)} for rel in KNOB_SOURCES}
+        # The two file-read guards hold no numeric knob of their own any more: their
+        # thresholds became the config fields `bigfile_floor_pct` and `bigfile_share_pct`,
+        # which `core.config.load` resolves tolerantly (`tests/test_config_numbers.py`).
+        guards = ("hooks/bigfile.py", "hosts/hermes/bigfile.py")
         for rel, attrs in per_file.items():
+            if rel in guards:
+                continue
             self.assertTrue(attrs, f"no numeric knob derived from {rel}: the scan went "
                                    f"blind on that file")
         self.assertGreaterEqual(len(per_file["hosts/hermes/__init__.py"]), 9,
@@ -1153,14 +1159,12 @@ class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
         for expected in ("TOP_K", "TOP_K_STRICT", "MAX_CHARS", "BREAKER_SECONDS"):
             self.assertIn(expected, per_file["hooks/recall.py"],
                           "the hook's numeric knobs are not being scanned")
-        # The two file-read guards. Their thresholds are read at IMPORT time, above each
-        # adapter's own catch-all — which is exactly what makes them dangerous:
-        # `QCTX_BIGFILE_FLOOR_PCT=20%` raising there takes down a hook that runs before
-        # every file read, or, on hermes, the whole provider with one debug line.
-        for rel in ("hooks/bigfile.py", "hosts/hermes/bigfile.py"):
-            for expected in ("FLOOR_PCT", "SHARE_PCT"):
-                self.assertIn(expected, per_file[rel],
-                              f"{rel}: the guard's own thresholds are not being scanned")
+        # A second reader of the same variable is how the two hosts drift apart, so neither
+        # guard may read a threshold from the environment on its own again.
+        for rel in guards:
+            names = {canonical for _, canonical, *_ in all_knobs(rel)}
+            self.assertFalse(names & {"QCTX_BIGFILE_FLOOR_PCT", "QCTX_BIGFILE_SHARE_PCT"},
+                             f"{rel} reads a guard threshold itself; the config owns it")
 
     def test_the_escape_marker_is_a_knob_this_scan_can_SEE(self):
         """The first knob in this repo whose value is not a number, and the reason the
@@ -1457,6 +1461,16 @@ class TestConfigSchema(unittest.TestCase):
         self.assertIn("checkpoint_interval", numeric_fields())
         for name in numeric_fields():
             self.assertEqual(by_key[name]["type"], "integer", name)
+
+    def test_every_fraction_field_is_typed_number(self):
+        """The guard thresholds hold a fraction, so neither `integer` nor free text fits."""
+        from core.config import fraction_fields
+        by_key = {f["key"]: f for f in MemoriesProvider().get_config_schema()}
+        self.assertIn("bigfile_floor_pct", fraction_fields())
+        for name in fraction_fields():
+            self.assertEqual(by_key[name]["type"], "number", name)
+            self.assertEqual(by_key[name]["default"], {"bigfile_floor_pct": 0.20,
+                                                       "bigfile_share_pct": 0.40}[name])
 
     def test_the_schema_covers_every_configurable_field(self):
         from core.config import Config

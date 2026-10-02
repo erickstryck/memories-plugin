@@ -130,6 +130,16 @@ class Spy:
         return self.result
 
 
+def a_cfg(**overrides):
+    """A real `Config` holding the defaults, so a field the adapter starts reading is there.
+    A hand-built namespace would have to learn every new field, and the one it forgot turns
+    into an AttributeError that `main()` silently turns into an allow."""
+    import dataclasses
+    import core.config
+
+    return dataclasses.replace(core.config.load(core.config.NO_FILE, env={}), **overrides)
+
+
 def run_main(payload: str, ids_spy, loader=None, window: int = 1_000_000) -> str:
     """`main()` end to end on a fabricated payload, with NO network anywhere.
 
@@ -137,7 +147,7 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 1_000_000) -> str
     ordering regresses — the spy's call count is what reports the regression instead.
     """
     out = io.StringIO()
-    cfg = types.SimpleNamespace(context_window=window)
+    cfg = a_cfg(context_window=window)
     with unittest.mock.patch.object(adapter.core, "load", loader or (lambda: cfg)), \
          unittest.mock.patch.object(inventory, "indexed_ids", ids_spy), \
          unittest.mock.patch.object(sys, "stdin", io.StringIO(payload)), \
@@ -404,10 +414,34 @@ class TestTheTwoThresholdsAreRealKnobs(unittest.TestCase):
         self.assertEqual(self._decision(FLOOR_ONLY, **garbage), "deny")
         self.assertEqual(self._decision(SHARE_ONLY, **garbage), "deny")
 
+    def _with_config_file(self, fixture, values: dict, **env):
+        """The same decision, with the thresholds in the config FILE the hook reads."""
+        usage, size = fixture
+        full = hook_env(**env)
+        with open(full["QCTX_CONFIG"], "w") as fh:
+            json.dump(values, fh)
+        elapsed, out, code = run_hook(a_file_of(size), a_transcript([usage]), full)
+        self.assertEqual(code, 0, "the hook must exit 0 on every path")
+
+        return "deny" if out.strip() else "allow"
+
+    def test_the_config_file_moves_the_floor(self):
+        self.assertEqual(self._with_config_file(FLOOR_ONLY, {"bigfile_floor_pct": 0.001}),
+                         "allow")
+
+    def test_the_config_file_moves_the_share(self):
+        self.assertEqual(self._with_config_file(SHARE_ONLY, {"bigfile_share_pct": 0.9}),
+                         "allow")
+
+    def test_the_environment_beats_the_config_file(self):
+        self.assertEqual(self._with_config_file(FLOOR_ONLY, {"bigfile_floor_pct": 0.001},
+                                                QCTX_BIGFILE_FLOOR_PCT="0.20"), "deny")
+
     def test_both_passes_of_decide_are_given_the_knobs(self):
         """The silent regression this exists for: dropping `floor_pct=`/`share_pct=` from
-        either call leaves every test above green — the module defaults happen to match —
-        and the knobs quietly stop working. So assert the ARGUMENTS, not the outcome."""
+        either call leaves every test above green, because the module defaults happen to
+        match, and the knobs quietly stop working. So assert the ARGUMENTS, with values no
+        default could produce."""
         seen = []
         real = adapter.bigfile.decide
 
@@ -417,14 +451,14 @@ class TestTheTwoThresholdsAreRealKnobs(unittest.TestCase):
             return real(path, budget, **kw)
 
         spy = Spy(set())
+        cfg = a_cfg(context_window=1_000_000, bigfile_floor_pct=0.2001, bigfile_share_pct=0.4001)
         with unittest.mock.patch.object(adapter.bigfile, "decide", recording):
-            run_main(a_read_payload(a_file_of(A_BIG_FILE), a_transcript([ASSISTANT])), spy)
+            run_main(a_read_payload(a_file_of(A_BIG_FILE), a_transcript([ASSISTANT])), spy,
+                     loader=lambda: cfg)
         self.assertEqual(len(seen), 2, "the two-pass order is what this rides on")
         for call in seen:
-            self.assertIn("floor_pct", call, "decide() was called without the floor knob")
-            self.assertIn("share_pct", call, "decide() was called without the share knob")
-            self.assertEqual(call["floor_pct"], adapter.FLOOR_PCT)
-            self.assertEqual(call["share_pct"], adapter.SHARE_PCT)
+            self.assertEqual(call.get("floor_pct"), 0.2001, "the floor did not come from the config")
+            self.assertEqual(call.get("share_pct"), 0.4001, "the share did not come from the config")
 
 
 #: Violates ONLY `userType`: an internal turn that is otherwise a perfect user turn.
@@ -664,6 +698,7 @@ class TestABlockedReadIndexesNothing(unittest.TestCase):
     def _blocked_read(self):
         store, embedder = RecordingVectorStore(), FakeEmbedder()
         cfg = types.SimpleNamespace(context_window=1_000_000, vector_size=8,
+                                    bigfile_floor_pct=0.20, bigfile_share_pct=0.40,
                                     require_docs_collection=lambda: "t_docs",
                                     require_library_collection=lambda: "t_lib")
         payload = a_read_payload(a_file_of(A_BIG_FILE), a_transcript([ASSISTANT]))

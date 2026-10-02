@@ -192,6 +192,108 @@ class TestTheCLIRefusesWhatTheLoaderWouldHaveToTolerate(unittest.TestCase):
 
         self.assertEqual(written["qdrant_url"], "http://127.0.0.1:9999")
 
+    def test_a_fraction_field_refuses_a_value_that_is_not_a_number(self):
+        with self.assertRaisesRegex(core.ConfigError, "between 0 and 1"):
+            self._set("bigfile-floor-pct", "banana")
+
+        with open(self.path) as fh:
+            self.assertNotIn("bigfile_floor_pct", json.load(fh), "the bad value reached the file")
+
+    def test_a_fraction_field_refuses_a_value_outside_zero_to_one(self):
+        for value in ("1.5", "-0.1", "20"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(core.ConfigError, "between 0 and 1"):
+                    self._set("bigfile-share-pct", value)
+
+        with open(self.path) as fh:
+            self.assertNotIn("bigfile_share_pct", json.load(fh), "the bad value reached the file")
+
+    def test_a_fraction_field_accepts_a_fraction_and_writes_a_number(self):
+        written = self._set("bigfile-floor-pct", "0.15")
+
+        self.assertEqual(written["bigfile_floor_pct"], 0.15)
+        self.assertIsInstance(written["bigfile_floor_pct"], float)
+
+
+class TestTheGuardThresholdsAreConfigSettings(unittest.TestCase):
+    """The two numbers the big-file guard decides with: block when the free context is at or
+    below `bigfile_floor_pct` of the window, or when one read would take more than
+    `bigfile_share_pct` of what is free. They were environment variables only, read by each
+    adapter at import, so `qctx config set` could not reach them. They are `Config` fields
+    now, resolved like every other: environment, then file, then default."""
+
+    def test_the_defaults_are_the_ones_the_guard_had(self):
+        from core import bigfile
+        cfg = config.load(a_config_file(), env={})
+        self.assertEqual(cfg.bigfile_floor_pct, bigfile.FLOOR_PCT)
+        self.assertEqual(cfg.bigfile_share_pct, bigfile.SHARE_PCT)
+        self.assertEqual((cfg.bigfile_floor_pct, cfg.bigfile_share_pct), (0.20, 0.40))
+
+    def test_the_file_sets_them(self):
+        cfg = config.load(a_config_file(bigfile_floor_pct=0.15, bigfile_share_pct=0.5), env={})
+        self.assertEqual((cfg.bigfile_floor_pct, cfg.bigfile_share_pct), (0.15, 0.5))
+
+    def test_the_environment_beats_the_file(self):
+        path = a_config_file(bigfile_floor_pct=0.15)
+        cfg = config.load(path, env={"QCTX_BIGFILE_FLOOR_PCT": "0.05"})
+        self.assertEqual(cfg.bigfile_floor_pct, 0.05)
+
+    def test_the_legacy_names_still_work(self):
+        cfg = config.load(a_config_file(), env={"BIGFILE_FLOOR_PCT": "0.1",
+                                                "BIGFILE_SHARE_PCT": "0.9"})
+        self.assertEqual((cfg.bigfile_floor_pct, cfg.bigfile_share_pct), (0.1, 0.9))
+
+    def test_a_blank_canonical_name_falls_through_to_the_legacy_one(self):
+        cfg = config.load(a_config_file(), env={"QCTX_BIGFILE_SHARE_PCT": " ",
+                                                "BIGFILE_SHARE_PCT": "0.3"})
+        self.assertEqual(cfg.bigfile_share_pct, 0.3)
+
+    def test_a_non_number_falls_back_and_says_where(self):
+        notes = []
+        cfg = config.load(a_config_file(), env={"QCTX_BIGFILE_FLOOR_PCT": "20%"},
+                          note=notes.append)
+        self.assertEqual(cfg.bigfile_floor_pct, 0.20)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("QCTX_BIGFILE_FLOOR_PCT", notes[0])
+        self.assertIn("between 0 and 1", notes[0])
+
+    def test_outside_zero_to_one_falls_back_and_says_so(self):
+        for value in ("1.5", "-0.1", "nan", "inf"):
+            with self.subTest(value=value):
+                notes = []
+                path = a_config_file(bigfile_share_pct=value)
+                cfg = config.load(path, env={}, note=notes.append)
+                self.assertEqual(cfg.bigfile_share_pct, 0.40)
+                self.assertEqual(len(notes), 1, notes)
+                self.assertIn(str(path), notes[0])
+
+    def test_the_bounds_zero_and_one_are_kept(self):
+        """Both ends mean something in `core.bigfile._blocks`: a floor of 0 refuses only a
+        read that would overflow the window, a share of 1 refuses only a read that does not
+        fit in what is free, and a share of 0 refuses every read that costs anything."""
+        cfg = config.load(a_config_file(bigfile_floor_pct=0, bigfile_share_pct="1"), env={})
+        self.assertEqual((cfg.bigfile_floor_pct, cfg.bigfile_share_pct), (0.0, 1.0))
+
+    def test_a_valid_configuration_says_nothing(self):
+        notes = []
+        config.load(a_config_file(bigfile_floor_pct=0.3), env={}, note=notes.append)
+        self.assertEqual(notes, [])
+
+    def test_they_are_fractions_not_whole_numbers(self):
+        self.assertEqual(set(config.fraction_fields()),
+                         {"bigfile_floor_pct", "bigfile_share_pct"})
+        self.assertFalse(set(config.fraction_fields()) & set(config.numeric_fields()))
+
+    def test_every_fraction_field_survives_rubbish(self):
+        """Derived from the dataclass, like the whole-number fields above."""
+        fractions = [f.name for f in dataclasses.fields(config.Config)
+                     if f.type in (float, "float")]
+        self.assertTrue(fractions, "guard on the guard: the derivation found no fraction field")
+        for name in fractions:
+            with self.subTest(field=name):
+                cfg = config.load(a_config_file(**{name: "rubbish"}), env={})
+                self.assertEqual(getattr(cfg, name), config.DEFAULTS[name])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

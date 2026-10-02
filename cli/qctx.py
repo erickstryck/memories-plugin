@@ -152,6 +152,12 @@ def cmd_config_set(args, cfg):
             value = int(args.value)
         except (TypeError, ValueError):
             raise core.ConfigError(f"{args.key} must be a whole number, not {args.value!r}")
+    elif key in core.config.fraction_fields():
+        try:
+            value = core.config.as_fraction(args.value)
+        except (TypeError, ValueError):
+            raise core.ConfigError(f"{args.key} must be a fraction between 0 and 1, "
+                                   f"not {args.value!r}")
     else:
         value = args.value
     path = core.save({key: value})
@@ -705,6 +711,19 @@ def _ask_number(prompt: str, current) -> int | None:
                   f"or press Enter to keep {current}")
 
 
+def _ask_fraction(prompt: str, current) -> float | None:
+    """A fraction from 0 to 1, or nothing. It RE-ASKS, for the reason `_ask_number` does."""
+    while True:
+        entry = _ask(prompt).strip()
+        if not entry:
+            return None
+        try:
+            return core.config.as_fraction(entry)
+        except (TypeError, ValueError):
+            print(f"  ..    {entry!r} is not a fraction between 0 and 1 (0.2 means 20%): "
+                  f"type one, or press Enter to keep {current}")
+
+
 def _read_secret(prompt: str) -> str:
     """Echo off when there is a terminal, plain read when there is not.
 
@@ -798,6 +817,11 @@ def _ask_config(cfg, interactive: bool = True, suggestions=()) -> None:
     print("\n--- everything else (Enter keeps) ---")
     for field in core.install.OPTIONAL_FIELDS:
         current = getattr(cfg, field)
+        if field in core.config.fraction_fields():
+            fraction = _ask_fraction(f"{field} [{current}]: ", current)
+            if fraction is not None:
+                patch[field] = fraction
+            continue
         if isinstance(current, int):
             number = _ask_number(f"{field} [{current}]: ", current)
             if number is not None:

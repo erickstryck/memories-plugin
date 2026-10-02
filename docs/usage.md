@@ -236,6 +236,8 @@ Recognized variables (canonical first, legacy aliases accepted):
 | `vector_size` | `QCTX_VECTOR_SIZE`, `VECTOR_SIZE` |
 | `context_window` | `QCTX_CONTEXT_WINDOW` |
 | `checkpoint_interval` | `QCTX_CHECKPOINT_INTERVAL`, `REMEMBER_INTERVAL` |
+| `bigfile_floor_pct` | `QCTX_BIGFILE_FLOOR_PCT`, `BIGFILE_FLOOR_PCT` |
+| `bigfile_share_pct` | `QCTX_BIGFILE_SHARE_PCT`, `BIGFILE_SHARE_PCT` |
 
 The two API keys are the only settings that **cannot** go into the config file:
 `config set` refuses them and points at the environment variable instead. A plaintext
@@ -260,6 +262,21 @@ Like every other setting, `QCTX_CHECKPOINT_INTERVAL` in the environment wins ove
 and `QCTX_CHECKPOINT_DISABLED=1` turns the checkpoint off whatever the interval says. A
 value that is not a number falls back to 5 and says so on stderr; `config set` refuses one
 outright.
+
+### When the big-file guard refuses a read
+
+The guard refuses a file read when the context left after it would be less than
+`bigfile_floor_pct` of the window (0.20 by default), or when the read alone would take more
+than `bigfile_share_pct` of what is free (0.40 by default). Both are fractions from 0 to 1:
+
+```bash
+qctx config set bigfile-floor-pct 0.15   # refuse only when less than 15% would be left
+qctx config set bigfile-share-pct 0.5    # one read may take up to half of what is free
+```
+
+Both hosts read them from the config, on every read. A share of 1 refuses only a read that
+does not fit at all; a share of 0 refuses every read that costs anything. A value outside
+0 to 1 falls back to the default; `config set` and the install wizard refuse it outright.
 
 ### The case that breaks silently: a process with no shell
 

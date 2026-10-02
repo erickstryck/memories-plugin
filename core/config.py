@@ -16,6 +16,7 @@ import json
 import os
 
 from . import statefile
+from .bigfile import FLOOR_PCT, SHARE_PCT
 from .errors import CoreError
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
@@ -44,6 +45,8 @@ ENV_ALIASES = {
     "vector_size": ("QCTX_VECTOR_SIZE", "VECTOR_SIZE"),
     "context_window": ("QCTX_CONTEXT_WINDOW",),
     "checkpoint_interval": ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL"),
+    "bigfile_floor_pct": ("QCTX_BIGFILE_FLOOR_PCT", "BIGFILE_FLOOR_PCT"),
+    "bigfile_share_pct": ("QCTX_BIGFILE_SHARE_PCT", "BIGFILE_SHARE_PCT"),
 }
 
 DEFAULTS = {
@@ -63,6 +66,10 @@ DEFAULTS = {
     "vector_size": 1024,
     "context_window": 0,
     "checkpoint_interval": 5,
+    # The guard's own constants, so the numbers have one owner and `decide` called without
+    # a config still means what the config means by default.
+    "bigfile_floor_pct": FLOOR_PCT,
+    "bigfile_share_pct": SHARE_PCT,
 }
 
 
@@ -91,6 +98,12 @@ class Config:
     #: hosts read it from here, so `config set` reaches both and the file is the one place
     #: it can be set, under the environment's override like every other field.
     checkpoint_interval: int = 5
+    #: The big-file guard's two thresholds, as fractions. A read is refused when the context
+    #: left after it would be less than `bigfile_floor_pct` of the window, or when the read
+    #: alone would take more than `bigfile_share_pct` of what is free. Both hosts read them
+    #: from here; the rule that applies them is `core.bigfile._blocks`.
+    bigfile_floor_pct: float = FLOOR_PCT
+    bigfile_share_pct: float = SHARE_PCT
 
     def resolved_embed_url(self) -> str:
         """The full /embeddings URL.
@@ -210,6 +223,32 @@ def numeric_fields() -> tuple:
     return _NUMERIC_FIELDS
 
 
+#: The fields that hold a fraction, from 0 to 1, read off the dataclass for the same reason
+#: `_NUMERIC_FIELDS` is: a fraction field added later inherits the tolerance.
+_FRACTION_FIELDS = tuple(f.name for f in fields(Config) if f.type in (float, "float"))
+
+
+def fraction_fields() -> tuple:
+    """The config fields that must hold a fraction from 0 to 1. Public for the reason
+    `numeric_fields` is: the CLI and the wizard refuse at the door what `load` tolerates."""
+    return _FRACTION_FIELDS
+
+
+def as_fraction(value) -> float:
+    """`value` as a fraction from 0 to 1, or ValueError (TypeError for a non-scalar).
+
+    ONE rule for the three doors a fraction comes through: the loader, which falls back,
+    and `config set` and the wizard, which refuse. NaN fails the range test like any value
+    outside it, and so does infinity; a percentage typed as `20` is out of range too, which
+    is the typo this exists for.
+    """
+    number = float(value)
+    if not 0.0 <= number <= 1.0:
+        raise ValueError(f"{value!r} is not between 0 and 1")
+
+    return number
+
+
 def read_file(path: Path | None = None) -> dict:
     p = path or DEFAULT_CONFIG_PATH
     try:
@@ -267,6 +306,15 @@ def load(path: Path | None = None, env: dict | None = None, note=None) -> Config
                 note(f"{name}={values[numeric]!r}{where} is not a number, "
                      f"using {DEFAULTS[numeric]}")
             values[numeric] = DEFAULTS[numeric]
+    for fraction in _FRACTION_FIELDS:
+        try:
+            values[fraction] = as_fraction(values[fraction])
+        except (TypeError, ValueError):
+            if note:
+                name, where = source[fraction]
+                note(f"{name}={values[fraction]!r}{where} is not a fraction between 0 and 1, "
+                     f"using {DEFAULTS[fraction]}")
+            values[fraction] = DEFAULTS[fraction]
 
     return Config(**values)
 

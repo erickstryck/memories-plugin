@@ -146,6 +146,16 @@ class Spy:
         return self.result
 
 
+def a_cfg(**overrides):
+    """A real `Config` holding the defaults, so a field the adapter starts reading is there.
+    A hand-built namespace would have to learn every new field, and the one it forgot turns
+    into an AttributeError that `main()` silently turns into an allow."""
+    import dataclasses
+    import core.config
+
+    return dataclasses.replace(core.config.load(core.config.NO_FILE, env={}), **overrides)
+
+
 def run_main(payload: str, ids_spy, loader=None, window: int = 100_000):
     """(exit code, stdout) for `main()` on a fabricated payload, with NO network anywhere.
 
@@ -161,7 +171,7 @@ def run_main(payload: str, ids_spy, loader=None, window: int = 100_000):
     outside it; `unittest.mock.patch.dict` restores whatever was there once the run ends.
     """
     out = io.StringIO()
-    cfg = types.SimpleNamespace(context_window=window)
+    cfg = a_cfg(context_window=window)
     code = 0
     with unittest.mock.patch.object(adapter.core, "load", loader or (lambda: cfg)), \
          unittest.mock.patch.object(inventory, "indexed_ids", ids_spy), \
@@ -360,8 +370,9 @@ class TestTheOrderThatProtectsTheCommonPath(unittest.TestCase):
 
     def test_both_passes_of_decide_are_given_the_knobs(self):
         """The silent regression this exists for: dropping `floor_pct=`/`share_pct=` from
-        either call leaves every other test green — the module defaults happen to match —
-        and the knobs quietly stop working. So assert the ARGUMENTS, not the outcome."""
+        either call leaves every other test green, because the module defaults happen to
+        match, and the knobs quietly stop working. So assert the ARGUMENTS, with values no
+        default could produce."""
         chars, size = SHARE_ONLY
         db = a_session_using(chars)
         seen = []
@@ -372,13 +383,14 @@ class TestTheOrderThatProtectsTheCommonPath(unittest.TestCase):
 
             return real(path, budget, **kw)
 
+        cfg = a_cfg(context_window=100_000, bigfile_floor_pct=0.2001, bigfile_share_pct=0.4001)
         with unittest.mock.patch.object(adapter, "state_db_path", lambda: db), \
              unittest.mock.patch.object(adapter.bigfile, "decide", recording):
-            run_main(a_read_payload(a_file_of(size)), Spy(set()))
+            run_main(a_read_payload(a_file_of(size)), Spy(set()), loader=lambda: cfg)
         self.assertEqual(len(seen), 2, "the two-pass order is what this rides on")
         for call in seen:
-            self.assertEqual(call.get("floor_pct"), adapter.FLOOR_PCT)
-            self.assertEqual(call.get("share_pct"), adapter.SHARE_PCT)
+            self.assertEqual(call.get("floor_pct"), 0.2001, "the floor did not come from the config")
+            self.assertEqual(call.get("share_pct"), 0.4001, "the share did not come from the config")
 
 
 class TestMainFailsOpen(unittest.TestCase):
@@ -490,6 +502,30 @@ class TestTheTwoThresholdsAreRealKnobs(unittest.TestCase):
     def test_the_legacy_names_are_accepted_too(self):
         self.assertEqual(self._decision(FLOOR_ONLY, BIGFILE_FLOOR_PCT="0.001"), "allow")
         self.assertEqual(self._decision(SHARE_ONLY, BIGFILE_SHARE_PCT="0.9"), "allow")
+
+    def _with_config_file(self, fixture, values: dict, **env):
+        """The same decision, with the thresholds in the config FILE the guard reads."""
+        chars, size = fixture
+        db = a_session_using(chars)
+        full = guard_env(db, **env)
+        with open(full["QCTX_CONFIG"], "w") as fh:
+            json.dump(values, fh)
+        out, code = run_guard(a_file_of(size), db, env=full)
+        self.assertIn(code, (0, adapter.BLOCK_EXIT_CODE), f"unexpected exit {code}")
+
+        return "block" if out.strip() else "allow"
+
+    def test_the_config_file_moves_the_floor(self):
+        self.assertEqual(self._with_config_file(FLOOR_ONLY, {"bigfile_floor_pct": 0.001}),
+                         "allow")
+
+    def test_the_config_file_moves_the_share(self):
+        self.assertEqual(self._with_config_file(SHARE_ONLY, {"bigfile_share_pct": 0.9}),
+                         "allow")
+
+    def test_the_environment_beats_the_config_file(self):
+        self.assertEqual(self._with_config_file(FLOOR_ONLY, {"bigfile_floor_pct": 0.001},
+                                                QCTX_BIGFILE_FLOOR_PCT="0.20"), "block")
 
     def test_a_malformed_knob_falls_back_instead_of_killing_the_guard(self):
         """These are read ABOVE main()'s catch-all — and on this host an import-time raise
@@ -872,6 +908,7 @@ class TestABlockedReadIndexesNothing(unittest.TestCase):
         db = a_session_using(chars)
         store, embedder = RecordingVectorStore(), FakeEmbedder()
         cfg = types.SimpleNamespace(context_window=100_000, vector_size=8,
+                                    bigfile_floor_pct=0.20, bigfile_share_pct=0.40,
                                     require_docs_collection=lambda: "t_docs",
                                     require_library_collection=lambda: "t_lib")
         out, code = io.StringIO(), 0
