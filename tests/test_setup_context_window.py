@@ -199,5 +199,32 @@ class TheStatusLineState(unittest.TestCase):
         self.assertEqual(statusline.settings_path(), home / ".claude" / "settings.json")
 
 
+class IgnoredSettingsAreReported(unittest.TestCase):
+    """A value the loader cannot use falls back to the default; the spec promises that it
+    does so WITH a warning, and `setup` is where a person looks."""
+
+    def check_with(self, env: dict):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        path.write_text("{}")
+
+        return setup._check_ignored_settings(
+            lambda note: config.load(path=path, env=env, note=note))
+
+    def test_an_out_of_range_threshold_is_reported_with_the_value_used(self):
+        check = self.check_with({"QCTX_BIGFILE_SHARE_PCT": "1.5"})
+        self.assertFalse(check.ok)
+        self.assertTrue(check.warning)
+        self.assertIn("QCTX_BIGFILE_SHARE_PCT='1.5'", check.detail)
+        self.assertIn("using 0.4", check.detail)
+
+    def test_nothing_ignored_is_ok(self):
+        self.assertTrue(self.check_with({}).ok)
+
+    def test_diagnose_includes_it(self):
+        with mock.patch.object(statusline, "state", return_value=None):
+            names = [c["name"] for c in setup.diagnose(cfg_with())["checks"]]
+        self.assertIn("Ignored settings", names)
+
+
 if __name__ == "__main__":
     unittest.main()

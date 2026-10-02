@@ -130,6 +130,10 @@ def cmd_collections(args, cfg):
 
 
 def cmd_config_show(args, cfg):
+    # What the loader replaced with a default goes to stderr: the values shown are the ones
+    # in effect, and a default standing in for the user's own value is part of that answer.
+    for line in core.setup.ignored_settings():
+        print(f"note: {line}", file=sys.stderr)
     data = core.redacted(cfg)
     if args.json:
         output(data, True)

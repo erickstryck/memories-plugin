@@ -181,7 +181,8 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
   que cada host publicou e avisa quando o guard fica desligado por falta de informação, o
   que hoje nada avisa.
 - Ajustes do review de 2026-10-02: o `qctx setup` também avisa quando o último registro do
-  hermes é um palpite e nada está declarado. Para uma statusLine de terceiros ele sugere
+  hermes é um palpite e nada está declarado, e lista os valores que o loader ignorou (o
+  `qctx config show` os mostra no stderr). Para uma statusLine de terceiros ele sugere
   encadear `qctx statusline` nela ou declarar a janela, porque o `install` nunca a
   substitui; a nossa, quando o launcher dela não existe mais, aparece como desatualizada, e
   o `install --apply` a aponta para o launcher atual.

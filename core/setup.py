@@ -11,7 +11,7 @@ people give up.
 import time
 from dataclasses import dataclass, asdict
 
-from . import hostwindow, statusline
+from . import config, hostwindow, statusline
 from .config import Config, ConfigError
 from .embedding import Embedder
 from .errors import CoreError
@@ -197,6 +197,33 @@ def _check_context_window(cfg: Config, statusline_state: str | None = None) -> C
                  f"{COMMAND_PREFIX} config set context-window <n>", warning=True)
 
 
+def ignored_settings(load=None) -> list[str]:
+    """What the loader could not use and replaced with the default, one line each.
+
+    `core.config.load` falls back to the default for such a value and says so only through
+    its `note` channel; the hooks pass none for the guard's fields, so the fallback was
+    silent everywhere (a `QCTX_BIGFILE_SHARE_PCT=1.5` measured by review of 1.3.0). `setup`
+    and `config show` are where a person looks. Never raises: a file that cannot be read at
+    all is the command's own error, raised by the load that came before this one.
+    """
+    notes = []
+    try:
+        (load or config.load)(note=notes.append)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return notes
+
+
+def _check_ignored_settings(load=None) -> Check:
+    notes = ignored_settings(load)
+    if not notes:
+        return Check("Ignored settings", True, "none: every value set is in use")
+
+    return Check("Ignored settings", False, "; ".join(notes),
+                 "correct the value, or remove it to use the default", warning=True)
+
+
 def _statusline_state() -> str | None:
     """`core.statusline.state()`, or None when even reading the settings fails."""
     try:
@@ -292,7 +319,7 @@ def diagnose(cfg: Config) -> dict:
     check_q, q = _check_qdrant(cfg)
     check_emb, dim = _check_embed(cfg)
     checks = [check_q, check_emb, _check_rerank(cfg),
-              _check_context_window(cfg, _statusline_state())]
+              _check_context_window(cfg, _statusline_state()), _check_ignored_settings()]
     checks += _check_collections(cfg, q)
 
     blockers = [c for c in checks if not c.ok and not c.warning]

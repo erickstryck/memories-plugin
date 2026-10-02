@@ -240,8 +240,11 @@ def as_fraction(value) -> float:
     ONE rule for the three doors a fraction comes through: the loader, which falls back,
     and `config set` and the wizard, which refuse. NaN fails the range test like any value
     outside it, and so does infinity; a percentage typed as `20` is out of range too, which
-    is the typo this exists for.
+    is the typo this exists for. A boolean is refused too: JSON `true` would otherwise load
+    as 1.0, a share that never refuses anything.
     """
+    if isinstance(value, bool):
+        raise ValueError(f"{value!r} is not a fraction")
     number = float(value)
     if not 0.0 <= number <= 1.0:
         raise ValueError(f"{value!r} is not between 0 and 1")

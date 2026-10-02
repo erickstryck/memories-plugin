@@ -312,7 +312,8 @@ qctx config set bigfile-share-pct 0.5    # one read may take up to half of what 
 
 Both hosts read them from the config, on every read. A share of 1 refuses only a read that
 does not fit at all; a share of 0 refuses every read that costs anything. A value outside
-0 to 1 falls back to the default; `config set` and the install wizard refuse it outright.
+0 to 1 falls back to the default, and `qctx setup` and `qctx config show` name the value they
+ignored; `config set` and the install wizard refuse it outright.
 
 ### The case that breaks silently: a process with no shell
 

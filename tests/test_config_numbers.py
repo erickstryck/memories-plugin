@@ -295,5 +295,28 @@ class TestTheGuardThresholdsAreConfigSettings(unittest.TestCase):
                 self.assertEqual(getattr(cfg, name), config.DEFAULTS[name])
 
 
+class BooleansAreNotFractions(unittest.TestCase):
+    def test_a_boolean_is_refused(self):
+        """`true` in a JSON file would otherwise load as 1.0, a share that refuses nothing."""
+        for value in (True, False):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                config.as_fraction(value)
+
+
+class ConfigShowSaysWhatItIgnored(unittest.TestCase):
+    def test_an_out_of_range_threshold_is_named_on_stderr(self):
+        import subprocess
+        cli = Path(__file__).resolve().parent.parent / "cli" / "qctx.py"
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        path.write_text("{}")
+        env = dict(os.environ, QCTX_CONFIG=str(path), QCTX_BIGFILE_SHARE_PCT="1.5",
+                   QCTX_STATE_DIR=tempfile.mkdtemp())
+        done = subprocess.run([sys.executable, str(cli), "config", "show"],
+                              capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("QCTX_BIGFILE_SHARE_PCT='1.5'", done.stderr)
+        self.assertIn("using 0.4", done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
