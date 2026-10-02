@@ -24,10 +24,10 @@ hermes is not importable here, so these tests stand in for its modules. What the
 what the provider hands hermes and what it does with the answer; `TestTheFakesMatchHermes`
 holds the two copied hermes functions to the real ones.
 """
+import ast
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import types
@@ -427,13 +427,51 @@ class TestTheGuardReadsWhatTheProviderPublished(PublisherCase):
 
 HERMES_AGENT = Path(os.environ.get("QCTX_HERMES_AGENT_DIR")
                     or Path.home() / ".hermes" / "hermes-agent")
-HERMES_PYTHON = HERMES_AGENT / "venv" / "bin" / "python"
+HERMES_SOURCES = [HERMES_AGENT / name for name in
+                  ("hermes_state_gateway.py", "hermes_state.py", "hermes_cli/providers.py")]
 
 
-@unittest.skipUnless(os.environ.get("QCTX_INTEGRATION") == "1" and HERMES_PYTHON.exists(),
-                     "needs QCTX_INTEGRATION=1 and an installed hermes-agent")
+def hermes_functions(source: Path, *names: str, **globals_) -> dict:
+    """Compile the named functions from hermes' SOURCE, without importing hermes.
+
+    Importing `hermes_cli` runs hermes' launcher bootstrap (`hermes_bootstrap` calls
+    `venv_sync.prepare_launch`), which republishes hermes' launchers for the CURRENT HOME.
+    Under a throwaway HOME it points the user's real `hermes` command at a runtime under
+    /tmp: measured on 2026-10-02, when a probe did exactly that. Compiling the functions from
+    the source runs their behaviour and nothing else.
+    """
+    tree = ast.parse(source.read_text())
+    found = {node.name: node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef) and node.name in names}
+    missing = set(names) - set(found)
+    if missing:
+        raise AssertionError(f"{sorted(missing)} not found in {source}")
+    namespace = dict(globals_)
+    for name in names:
+        node = found[name]
+        node.decorator_list, node.returns = [], None
+        for arg in node.args.args + node.args.kwonlyargs:
+            arg.annotation = None
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+
+    return namespace
+
+
+def hermes_constant(source: Path, name: str):
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name
+                                                for t in node.targets):
+            return eval(compile(ast.Expression(node.value), str(source), "eval"),
+                        {"__builtins__": {}, "frozenset": frozenset, "set": set})
+    raise AssertionError(f"{name} not found in {source}")
+
+
+@unittest.skipUnless(os.environ.get("QCTX_INTEGRATION") == "1"
+                     and all(path.exists() for path in HERMES_SOURCES),
+                     "needs QCTX_INTEGRATION=1 and the hermes-agent sources")
 class TestTheFakesMatchHermes(unittest.TestCase):
-    """The two hermes functions copied above, against the real ones, over one table."""
+    """The two hermes functions copied above, against hermes' own code, over one table,
+    without starting hermes or importing a single hermes module."""
 
     ROWS = [
         {"model_config": NO_SWITCH, "billing_provider": "anthropic"},
@@ -452,21 +490,21 @@ class TestTheFakesMatchHermes(unittest.TestCase):
     NAMES = [["Eukrio", ""], ["Local vLLM", ""], ["custom:Mine", ""], ["Display", "my-key"]]
 
     def test_the_copies_answer_what_hermes_answers(self):
-        script = ("import json, sys\n"
-                  "sys.path.insert(0, sys.argv[1])\n"
-                  "from hermes_state import SessionDB\n"
-                  "from hermes_cli.providers import custom_provider_aliases\n"
-                  "rows, names = json.loads(sys.argv[2]), json.loads(sys.argv[3])\n"
-                  "print(json.dumps({'routes': [SessionDB.session_gateway_runtime(r) for r in rows],\n"
-                  "                  'aliases': [sorted(custom_provider_aliases(*n)) for n in names]}))\n")
-        done = subprocess.run([str(HERMES_PYTHON), "-c", script, str(HERMES_AGENT),
-                               json.dumps(self.ROWS), json.dumps(self.NAMES)],
-                              capture_output=True, text=True, timeout=60, cwd=str(HERMES_AGENT))
-        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
-        real = json.loads(done.stdout.strip().splitlines()[-1])
-        self.assertEqual(real["routes"], [session_gateway_runtime(r) for r in self.ROWS])
-        self.assertEqual(real["aliases"],
-                         [sorted(custom_provider_aliases(*n)) for n in self.NAMES])
+        state, gateway, providers = (HERMES_AGENT / "hermes_state.py",
+                                     HERMES_AGENT / "hermes_state_gateway.py",
+                                     HERMES_AGENT / "hermes_cli" / "providers.py")
+        real_runtime = hermes_functions(gateway, "session_gateway_runtime",
+                                        json=json)["session_gateway_runtime"]
+        real_aliases = hermes_functions(providers, "custom_provider_slug",
+                                        "custom_provider_aliases")["custom_provider_aliases"]
+        stub = types.ModuleType("hermes_state")
+        stub._BARE_BILLING_PROVIDERS = hermes_constant(state, "_BARE_BILLING_PROVIDERS")
+        with mock.patch.dict(sys.modules, {"hermes_state": stub}), \
+                mock.patch("subprocess.run", side_effect=AssertionError("started a process")):
+            routes = [real_runtime(dict(row)) for row in self.ROWS]
+            aliases = [sorted(real_aliases(*n)) for n in self.NAMES]
+        self.assertEqual(routes, [session_gateway_runtime(r) for r in self.ROWS])
+        self.assertEqual(aliases, [sorted(custom_provider_aliases(*n)) for n in self.NAMES])
 
 
 if __name__ == "__main__":
