@@ -7,12 +7,10 @@ raising here takes down a hook that runs before every file read, or — on herme
 pre-execs plugin files and swallows the failure at `logger.debug` — the whole provider, with
 one debug line as the only symptom.
 
-Deliberately WITHOUT the clamping variant that `hooks/recall.py`, `hooks/checkpoint.py` and
-`hosts/hermes/__init__.py` each carry (their `minimum=` argument, which prints a note to
-stderr and refuses to leave a caller with nothing to return). Those three still own their own
-copies. Adding an unused parameter here to "cover" them would ship a branch no test can
-honestly exercise, and this module would then look like the single owner while three files
-quietly disagreed with it. Migrating them is its own task, on a live path, with its own review.
+The clamping variant (`clamped_num`, below) is shared too: `hooks/recall.py` and
+`hosts/hermes/__init__.py` each keep only a thin channel for its notes. `hooks/checkpoint.py`
+had a third copy until its one knob, the interval, became the `checkpoint_interval` setting
+that `core/config.py` resolves.
 
 `legacy` is not decoration: every knob in this repo answers to a `QCTX_`-prefixed name and to
 the older bare one, so an operator who exported the old spelling keeps working.
@@ -55,8 +53,9 @@ def env(name: str, legacy: str, default: str) -> str:
 def as_num(value, default, kind=float):
     """`value` as a number, falling back to `default` when it is not one.
 
-    The same tolerance `env_num` gives the environment, for a value that has already been
-    resolved from somewhere else — a config FILE, in practice. Bare `int()` on a field a user
+    The tolerance `env_num` gives the environment. (`core/config.py` applies the same rule to
+    its numeric fields itself, because it also has to say WHICH value it fell back from, and
+    from where.) Bare `int()` on a field a user
     can type is how a single typo took the whole plugin down: every command died on the
     exception, including the one that repairs the file, and in the hermes host the ValueError
     is not a CoreError so the loader swallowed it and the memory provider vanished with one
@@ -81,8 +80,8 @@ def env_num(name: str, legacy: str, default: str, kind=float):
 def clamped_num(name: str, legacy: str, default: str, kind=int, minimum=None, *, note=None):
     """`env_num` with a floor, for the knobs where too small is a LIE rather than a setting.
 
-    ONE COPY, THREE HOSTS. This lived three times — `hooks/recall.py`, `hooks/checkpoint.py`
-    and `hosts/hermes/__init__.py` — and the copies had already drifted: measured with
+    ONE COPY FOR BOTH HOSTS. This lived three times (`hooks/recall.py`, `hooks/checkpoint.py`
+    and `hosts/hermes/__init__.py`) and the copies had already drifted: measured with
     `minimum=1`, a value of `0` gave 1 in recall and hermes and 0 in checkpoint, and `-1` gave
     1, 1 and -1. So the same typo silenced one surface and degraded another, which is the
     class of divergence `tests/test_host_equivalence.py` exists to prevent. The guards that

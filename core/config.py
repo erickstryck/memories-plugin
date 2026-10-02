@@ -220,6 +220,11 @@ def read_file(path: Path | None = None) -> dict:
         raise ConfigError(f"invalid config at {p}: {exc}") from exc
 
 
+#: Pass as `path` to resolve WITHOUT the file: the environment and the defaults only. For a
+#: caller that must still answer when the file is unreadable (the checkpoint hook).
+NO_FILE = False
+
+
 def load(path: Path | None = None, env: dict | None = None, note=None) -> Config:
     """The resolved configuration: environment, then file, then default.
 
@@ -229,13 +234,17 @@ def load(path: Path | None = None, env: dict | None = None, note=None) -> Config
     host. Without a `note` the fallback is silent, as it always was.
     """
     env = os.environ if env is None else env
-    from_file = read_file(path)
+    from_file = {} if path is NO_FILE else read_file(path)
     values = {}
     source = {}
     for field, aliases in ENV_ALIASES.items():
         value = None
         for name in aliases:
-            if env.get(name):
+            # BLANK IS UNSET, as `core.knobs.env` reads every other knob and as 1.1.0 read the
+            # checkpoint interval: a blank canonical name falls through to the legacy one.
+            # Measured by review, `QCTX_CHECKPOINT_INTERVAL="  "` beside REMEMBER_INTERVAL=4
+            # fired every 5 turns with a note on every prompt, where 1.1.0 fired every 4.
+            if (env.get(name) or "").strip():
                 value, source[field] = env[name], (name, "")
                 break
         if value is None:

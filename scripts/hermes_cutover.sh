@@ -115,7 +115,12 @@ fi
 # same settings with the environment layer removed, i.e. what a hermes that inherits no shell
 # — systemd, the gateway, cron — would see. Everything but the two API keys can live in
 # config.json, so a gap here is fixable and worth naming.
-probe_out="$(python3 - "$ROOT" <<'PY' 2>&1 || true
+#
+# STDERR IS NOT PART OF THE VERDICT. The four lines below are read by POSITION, and a note the
+# provider prints on stderr (a malformed number it falls back from) landed on line one, ahead
+# of the verdict: an available provider read as "UNAVAILABLE: 1" and `--apply` was refused.
+# The reasons travel on stdout, so nothing is lost; the window probe below already does this.
+probe_out="$(python3 - "$ROOT" <<'PY' 2>/dev/null || true
 import sys
 sys.path.insert(0, sys.argv[1])
 

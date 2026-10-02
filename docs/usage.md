@@ -255,7 +255,7 @@ qctx config set checkpoint-interval 0    # never
 ```
 
 Both hosts read the same setting. The claude-code hook applies it from the next prompt;
-hermes from its next session, since it reads its configuration when a session starts.
+hermes from its next session (`/new` and `/resume` included), when it reads the interval again.
 Like every other setting, `QCTX_CHECKPOINT_INTERVAL` in the environment wins over the file,
 and `QCTX_CHECKPOINT_DISABLED=1` turns the checkpoint off whatever the interval says. A
 value that is not a number falls back to 5 and says so on stderr; `config set` refuses one

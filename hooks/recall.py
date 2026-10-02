@@ -105,8 +105,7 @@ HOST = "claude-code"
 #: that can zero the RESULT SET, because a zero there makes this hook claim the archive holds
 #: nothing (see `env_num`). The same four carry it in hosts/hermes/__init__.py, with the same
 #: reasoning, so a deployer's mistake costs the same on both hosts. It deliberately does NOT
-#: go on QCTX_CHECKPOINT_INTERVAL (0 disables the nudge, a documented feature),
-#: QCTX_RECALL_BREAKER (0 disables the breaker, likewise), the three floors (thresholds: 0
+#: go on QCTX_RECALL_BREAKER (0 disables the breaker), the three floors (thresholds: 0
 #: lets everything through, not nothing) or QCTX_RECALL_QDRANT_BUDGET (a 0 timeout fails
 #: LOUDLY, and this hook turns that into an explicit unavailability block — degraded, never
 #: a lie).

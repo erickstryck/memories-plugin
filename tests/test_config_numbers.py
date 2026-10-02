@@ -107,6 +107,23 @@ class TestTheCheckpointIntervalIsAConfigSetting(unittest.TestCase):
         config.load(a_config_file(checkpoint_interval=7), env={}, note=notes.append)
         self.assertEqual(notes, [])
 
+    def test_a_blank_environment_value_is_unset_and_the_legacy_name_counts(self):
+        """As `core.knobs.env` reads a knob, and as 1.1.0 read this one. Measured by review:
+        a blank QCTX_CHECKPOINT_INTERVAL beside REMEMBER_INTERVAL=4 fired every 4 turns on
+        1.1.0, and every 5 with a note on every prompt before this."""
+        notes = []
+        cfg = config.load(a_config_file(), env={"QCTX_CHECKPOINT_INTERVAL": "  ",
+                                                "REMEMBER_INTERVAL": "4"}, note=notes.append)
+        self.assertEqual(cfg.checkpoint_interval, 4)
+        self.assertEqual(notes, [])
+
+    def test_the_note_for_a_value_in_the_file_names_the_file(self):
+        path = a_config_file(checkpoint_interval="5x")
+        notes = []
+        config.load(path, env={}, note=notes.append)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn(str(path), notes[0])
+
     def test_config_set_through_the_real_entry_point(self):
         """The wiring, not the handler: `config set` then `config show`, as typed."""
         import subprocess

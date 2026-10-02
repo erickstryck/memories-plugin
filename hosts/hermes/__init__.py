@@ -192,7 +192,6 @@ class MemoriesProvider(_Base):
     TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int, minimum=1)
     TOP_K_STRICT = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int, minimum=1)
 
-
     BUDGET = blocks.Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
                            max_per_mem=MAX_PER_MEM,
                            reinject_after=session_state.REINJECT_AFTER)
@@ -212,6 +211,10 @@ class MemoriesProvider(_Base):
         #: treats that as never due rather than asking `session_state.due(0, ...)`,
         #: which would say yes for any positive interval.
         self._turn = 0
+        #: The checkpoint interval for THIS session, refreshed on every session switch while
+        #: the rest of the configuration stays as loaded; None reads it off `_config()`.
+        #: See `on_session_switch`.
+        self._interval = None
         #: The last turn on which the checkpoint nudge fired. A WATERMARK, not a counter,
         #: because the nudge is OWED rather than exactly divisible — see `_with_checkpoint`.
         #: Rotated by `on_session_switch`: a value left from an earlier session sits above
@@ -580,10 +583,11 @@ class MemoriesProvider(_Base):
             # hook with its own counter, which advances once per event and cannot step over a
             # multiple. `due_since` is what makes the two hosts agree.
             # THE CONFIG'S VALUE, the one `qctx config set checkpoint-interval` writes and the
-            # claude-code hook reads too: one reader for both hosts, environment first.
-            # Loaded with the rest of the configuration when the session's provider checks it
-            # is available, so a change applies from the next session.
-            every = self._config().checkpoint_interval
+            # claude-code hook reads too: one reader for both hosts, environment first. Read
+            # with the configuration when the provider starts, and again at each session
+            # switch (`on_session_switch`), so a change applies from the next session.
+            every = self._interval if self._interval is not None \
+                else self._config().checkpoint_interval
             if not session_state.due_since(turn, self._checkpoint_at, every):
                 return block
             nudge = CHECKPOINT_PROCEDURE.format(count=turn, interval=every)
@@ -847,8 +851,22 @@ class MemoriesProvider(_Base):
         the write side going quiet reads as a model that stopped bothering to save, not as a
         broken provider. The recall state itself needs nothing here: it is keyed by session id
         on disk, so a new session simply reads a different file.
+
+        THE CHECKPOINT INTERVAL IS RE-READ, and only it. `/new`, `/resume` and the gateway
+        switch sessions inside one process, so "from the next session" (what docs/usage.md
+        promises for `config set checkpoint-interval`) has to mean this call, not a restart:
+        measured by review, the configuration cached by the first `is_available()` kept the
+        old interval across the switch. The rest stays as loaded, as it always has: dropping
+        it all made an unreadable file cost the new session its checkpoint and every tool
+        (measured with a corrupt config.json), and the tools would have moved to new settings
+        while the recall store, built from the old ones, did not. An unreadable file keeps
+        the interval this session already had.
         """
         self._checkpoint_at = 0
+        try:
+            self._interval = core.load(note=_note).checkpoint_interval
+        except Exception:                           # noqa: BLE001 (keep the last good value)
+            pass
 
     def on_pre_compress(self, messages: list) -> str:
         """No compression-time extraction. Empty string is the ABC's own default; defined

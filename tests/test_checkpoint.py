@@ -18,6 +18,10 @@ import unittest
 from pathlib import Path
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "checkpoint.py"
+#: A config path that does not exist. The hook reads the configuration, so a test that does
+#: not pin one reads the DEVELOPER's file: measured by review, a corrupt one turned six
+#: tests here red that had nothing to do with it.
+ABSENT_CONFIG = os.path.join(tempfile.mkdtemp(), "absent-config.json")
 
 
 def run_hook(session: str, interval: str, state_dir: str, times: int = 1) -> list[str]:
@@ -25,7 +29,8 @@ def run_hook(session: str, interval: str, state_dir: str, times: int = 1) -> lis
 
     The counter lives on disk, so repeated calls are what exercises the interval.
     """
-    env = dict(os.environ, QCTX_STATE_DIR=state_dir, QCTX_CHECKPOINT_INTERVAL=interval)
+    env = dict(os.environ, QCTX_STATE_DIR=state_dir, QCTX_CHECKPOINT_INTERVAL=interval,
+               QCTX_CONFIG=ABSENT_CONFIG)
     env.pop("QCTX_CHECKPOINT_DISABLED", None)
     outputs = []
     for _ in range(times):
@@ -55,7 +60,8 @@ class TestTheProtocolSurvivesAClosedStderr(unittest.TestCase):
         """Runs until the interval fires: the counter lives on disk, so the block comes on
         the Nth call, not the first. `5x` degrades to the coded default of 5."""
         state = tempfile.mkdtemp()
-        env = dict(os.environ, QCTX_STATE_DIR=state, QCTX_CHECKPOINT_INTERVAL="5x")
+        env = dict(os.environ, QCTX_STATE_DIR=state, QCTX_CHECKPOINT_INTERVAL="5x",
+                   QCTX_CONFIG=ABSENT_CONFIG)
         env.pop("QCTX_CHECKPOINT_DISABLED", None)
         payload = json.dumps({"prompt": "oi", "session_id": "s1"})
         out = ""
@@ -109,7 +115,7 @@ class TestCheckpointFires(unittest.TestCase):
 
     def test_disabled_produces_nothing(self):
         env = dict(os.environ, QCTX_STATE_DIR=self.tmp.name, QCTX_CHECKPOINT_INTERVAL="1",
-                   QCTX_CHECKPOINT_DISABLED="1")
+                   QCTX_CHECKPOINT_DISABLED="1", QCTX_CONFIG=ABSENT_CONFIG)
         proc = subprocess.run([sys.executable, str(HOOK)], input="{}",
                               capture_output=True, text=True, env=env)
         self.assertEqual(proc.stdout.strip(), "")
@@ -118,7 +124,8 @@ class TestCheckpointFires(unittest.TestCase):
     def test_a_malformed_interval_does_not_kill_the_hook(self):
         """Read at module load, before any guard could catch it. A single bad env var
         produced a traceback and exit 1 on every interaction of every session."""
-        env = dict(os.environ, QCTX_STATE_DIR=self.tmp.name, QCTX_CHECKPOINT_INTERVAL="5x")
+        env = dict(os.environ, QCTX_STATE_DIR=self.tmp.name, QCTX_CHECKPOINT_INTERVAL="5x",
+                   QCTX_CONFIG=ABSENT_CONFIG)
         env.pop("QCTX_CHECKPOINT_DISABLED", None)
         proc = subprocess.run([sys.executable, str(HOOK)], input='{"session_id":"bad"}',
                               capture_output=True, text=True, env=env)
@@ -127,7 +134,7 @@ class TestCheckpointFires(unittest.TestCase):
 
     def test_an_unwritable_state_dir_does_not_kill_the_hook(self):
         env = dict(os.environ, QCTX_STATE_DIR="/proc/impossible/state",
-                   QCTX_CHECKPOINT_INTERVAL="1")
+                   QCTX_CHECKPOINT_INTERVAL="1", QCTX_CONFIG=ABSENT_CONFIG)
         env.pop("QCTX_CHECKPOINT_DISABLED", None)
         proc = subprocess.run([sys.executable, str(HOOK)], input='{"session_id":"x"}',
                               capture_output=True, text=True, env=env)
@@ -143,23 +150,37 @@ class TestCheckpointFires(unittest.TestCase):
 class TestTheIntervalComesFromTheConfig(unittest.TestCase):
     """`qctx config set checkpoint-interval N` has to move THIS hook, on the next prompt."""
 
-    def _run(self, times: int, file_interval, env_interval=None) -> list:
+    def _env(self, file_text, env_interval=None) -> tuple:
         tmp = tempfile.mkdtemp()
         cfg = Path(tmp) / "config.json"
-        cfg.write_text(json.dumps({"checkpoint_interval": file_interval}))
+        cfg.write_text(file_text)
         env = dict(os.environ, QCTX_STATE_DIR=tmp, QCTX_CONFIG=str(cfg))
         for name in ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL",
                      "QCTX_CHECKPOINT_DISABLED"):
             env.pop(name, None)
         if env_interval is not None:
             env["QCTX_CHECKPOINT_INTERVAL"] = env_interval
-        fired = []
+
+        return env, cfg
+
+    def _prompt(self, env) -> tuple:
+        """(fired, stderr) for one prompt."""
+        proc = subprocess.run([sys.executable, str(HOOK)],
+                              input=json.dumps({"session_id": "cfg"}),
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        return "memory checkpoint" in proc.stdout, proc.stderr
+
+    def _run(self, times: int, file_interval=None, env_interval=None, file_text=None) -> list:
+        text = file_text if file_text is not None else \
+            json.dumps({"checkpoint_interval": file_interval})
+        env, _ = self._env(text, env_interval)
+        fired, self.stderr = [], ""
         for turn in range(1, times + 1):
-            proc = subprocess.run([sys.executable, str(HOOK)],
-                                  input=json.dumps({"session_id": "cfg"}),
-                                  capture_output=True, text=True, env=env)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            if "memory checkpoint" in proc.stdout:
+            hit, err = self._prompt(env)
+            self.stderr += err
+            if hit:
                 fired.append(turn)
 
         return fired
@@ -172,6 +193,32 @@ class TestTheIntervalComesFromTheConfig(unittest.TestCase):
 
     def test_zero_in_the_file_turns_it_off(self):
         self.assertEqual(self._run(5, file_interval=0), [])
+
+    def test_a_change_to_the_file_applies_on_the_next_prompt(self):
+        """Read on every run, not once per process: `config set` waits for nothing here."""
+        env, cfg = self._env(json.dumps({"checkpoint_interval": 3}))
+        self.assertEqual([self._prompt(env)[0] for _ in range(2)], [False, False])
+        cfg.write_text(json.dumps({"checkpoint_interval": 1}))
+        self.assertTrue(self._prompt(env)[0], "the new interval was not read")
+
+    def test_an_unreadable_config_file_still_leaves_the_environment_and_the_default(self):
+        """1.1.0 read only the environment here, so a broken config.json never touched the
+        checkpoint. Measured by review: on 1.1.0 a truncated file still fired every 5 turns,
+        or every turn with QCTX_CHECKPOINT_INTERVAL=1; reading the file silenced both."""
+        self.assertEqual(self._run(5, file_text="{not json"), [5])
+        self.assertEqual(self._run(3, file_text="{not json", env_interval="1"), [1, 2, 3])
+        self.assertIn("checkpoint:", self.stderr, "the broken file has to be named")
+
+    def test_a_malformed_field_this_hook_does_not_use_is_not_its_business(self):
+        """Reading the whole configuration reported a typo in `context_window` on every
+        prompt, from a hook that never reads that field."""
+        self._run(1, file_text=json.dumps({"context_window": "1M"}))
+        self.assertNotIn("context_window", self.stderr)
+
+    def test_a_malformed_interval_in_the_file_is_reported(self):
+        self.assertEqual(self._run(5, file_text=json.dumps({"checkpoint_interval": "5x"})),
+                         [5])
+        self.assertIn("checkpoint_interval='5x'", self.stderr)
 
 
 if __name__ == "__main__":

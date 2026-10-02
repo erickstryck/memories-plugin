@@ -173,6 +173,22 @@ class TestTheDocumentedAliasesMatchTheCode(unittest.TestCase):
                                  "accepts — a key the core would resolve reads as missing")
 
 
+class TestANoteOnStderrIsNotTheVerdict(CutoverCase):
+    """The availability probe is read by LINE POSITION, and it captured stderr with it. A
+    configuration note (a malformed number the core falls back from) landed on line one,
+    ahead of the verdict: measured by review, `context_window: "1M"` in the file made a
+    provider that IS available report "UNAVAILABLE: 1" and refused `--apply`."""
+
+    def test_a_malformed_number_in_the_file_still_reads_as_available(self):
+        data = json.loads(self.qctx_config.read_text())
+        data["context_window"] = "1M"
+        self.qctx_config.write_text(json.dumps(data))
+        out = self.run_script()
+        self.assertLine(out, "the plugin reports itself available")
+        self.assertNoLine(out, "UNAVAILABLE")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 class TestUsage(CutoverCase):
     def test_the_script_parses(self):
         out = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)

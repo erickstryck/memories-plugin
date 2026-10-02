@@ -55,8 +55,27 @@ def interval() -> int:
     `qctx config set checkpoint-interval N` takes effect on the next prompt. It used to be an
     environment variable read here and again in the hermes adapter, two copies of one rule;
     the config is now its only reader, and the environment still wins over the file.
+
+    ONLY THIS HOOK'S OWN FIELD IS REPORTED: it reads the whole configuration to get one
+    number, and a typo in a field it never uses (`context_window: "1M"`) is not its to report
+    on every prompt.
+
+    AN UNREADABLE FILE COSTS THE FILE, NOT THE CHECKPOINT. 1.1.0 read only the environment
+    here, so a broken config.json never touched it; measured by review, reading the file made
+    a truncated one silence the checkpoint even with QCTX_CHECKPOINT_INTERVAL set. The file is
+    named once and the value resolves without it, from the environment or the default.
     """
-    return config.load(note=_note).checkpoint_interval
+    def own(line: str) -> None:
+        if line.startswith(config.ENV_ALIASES["checkpoint_interval"]) \
+                or line.startswith("checkpoint_interval="):
+            _note(line)
+
+    try:
+        return config.load(note=own).checkpoint_interval
+    except Exception as exc:  # noqa: BLE001 (the file is the one thing that can fail here)
+        _note(f"{type(exc).__name__}: {exc} (using the environment and the defaults)")
+
+        return config.load(path=config.NO_FILE, note=own).checkpoint_interval
 
 # `knobs.state_dir()` and not a fourth copy of this expression: `core/bindings.py`
 # already writes down why ("a third copy of where state lives is how the three start\n# to disagree"), and this file was one of the copies. Still a module-level constant
@@ -80,10 +99,7 @@ def main() -> None:
     except BaseException as exc:  # noqa: BLE001 — see docstring
         # BY FILE DESCRIPTOR, like the config note above: `print(file=sys.stderr)` falls back
         # to stdout when fd 2 is closed, and this hook's block travels on stdout.
-        try:
-            os.write(2, f"checkpoint: {type(exc).__name__}: {exc}\n".encode())
-        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
-            pass
+        _note(f"{type(exc).__name__}: {exc}")
 
 
 def bump(counter: Path) -> int:

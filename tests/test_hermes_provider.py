@@ -839,7 +839,7 @@ class TestTheCheckpointIntervalComesFromTheConfig(unittest.TestCase):
     throwaway file instead of the operator's real one."""
 
     SCRIPT = (
-        "import sys, json; sys.path.insert(0, %r)\n"
+        "import sys, json, os; sys.path.insert(0, %r)\n"
         "from hosts.hermes import MemoriesProvider\n"
         "from core.retrieval import Outcome\n"
         "class NoHits:\n"
@@ -849,15 +849,25 @@ class TestTheCheckpointIntervalComesFromTheConfig(unittest.TestCase):
         "p = MemoriesProvider()\n"
         "print(json.dumps({'available': p.is_available()}))\n"
         "p._store = NoHits()\n"
-        "fired = []\n"
-        "for turn in range(1, 7):\n"
-        "    p.on_turn_start(turn, 'a real question about the archive')\n"
-        "    if 'memory checkpoint' in p.prefetch('a real question about the archive'):\n"
-        "        fired.append(turn)\n"
-        "print(json.dumps(fired))\n"
+        "def session(turns):\n"
+        "    fired = []\n"
+        "    for turn in range(1, turns + 1):\n"
+        "        p.on_turn_start(turn, 'a real question about the archive')\n"
+        "        if 'memory checkpoint' in p.prefetch('a real question about the archive'):\n"
+        "            fired.append(turn)\n"
+        "    return fired\n"
+        "print(json.dumps(session(6)))\n"
+        "then = os.environ.get('THEN_INTERVAL')\n"
+        "if then is not None:\n"
+        "    cfg = os.environ['QCTX_CONFIG']\n"
+        "    data = json.load(open(cfg)); data['checkpoint_interval'] = int(then)\n"
+        "    json.dump(data, open(cfg, 'w'))\n"
+        "    p.on_session_switch('the-next-session', reset=True)\n"
+        "    p._store = NoHits()\n"
+        "    print(json.dumps(session(6)))\n"
     ) % str(REPO)
 
-    def _fired(self, file_interval, env_interval=None) -> list:
+    def _run(self, file_interval, env_interval=None, then=None) -> tuple:
         tmp = tempfile.mkdtemp()
         cfg = Path(tmp) / "config.json"
         cfg.write_text(json.dumps({"qdrant_url": "http://127.0.0.1:9",
@@ -867,33 +877,112 @@ class TestTheCheckpointIntervalComesFromTheConfig(unittest.TestCase):
         env = dict(os.environ, QCTX_CONFIG=str(cfg), QCTX_STATE_DIR=tmp, HERMES_HOME=tmp,
                    QCTX_DAEMON_AUTOSTART_DISABLED="1")
         for name in ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL",
-                     "QCTX_CHECKPOINT_DISABLED"):
+                     "QCTX_CHECKPOINT_DISABLED", "THEN_INTERVAL"):
             env.pop(name, None)
         if env_interval is not None:
             env["QCTX_CHECKPOINT_INTERVAL"] = env_interval
+        if then is not None:
+            env["THEN_INTERVAL"] = str(then)
         out = subprocess.run([sys.executable, "-c", self.SCRIPT], capture_output=True,
                              text=True, env=env, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
         lines = out.stdout.strip().splitlines()
         self.assertEqual(json.loads(lines[0]), {"available": True}, out.stderr)
 
-        return json.loads(lines[-1])
+        return [json.loads(line) for line in lines[1:]], out.stderr
 
     def test_the_file_sets_the_cadence(self):
-        self.assertEqual(self._fired(2), [2, 4, 6])
+        self.assertEqual(self._run(2)[0], [[2, 4, 6]])
 
     def test_the_environment_still_wins_over_the_file(self):
-        self.assertEqual(self._fired(2, env_interval="3"), [3, 6])
+        self.assertEqual(self._run(2, env_interval="3")[0], [[3, 6]])
 
     def test_zero_in_the_file_turns_it_off(self):
-        self.assertEqual(self._fired(0), [])
+        self.assertEqual(self._run(0)[0], [[]])
+
+    def test_a_config_set_applies_from_the_next_session_in_the_same_process(self):
+        """`/new`, `/resume` and the gateway switch sessions inside ONE process, and the
+        provider object outlives them. Measured by review: the configuration cached at the
+        first `is_available()` kept the old interval across the switch."""
+        first, then = self._run(3, then=2)[0]
+        self.assertEqual(first, [3, 6])
+        self.assertEqual(then, [2, 4, 6], "the next session kept the old interval")
+
+    def test_a_malformed_interval_is_reported_on_this_hosts_channel(self):
+        fired, stderr = self._run("5x")
+        self.assertEqual(fired, [[5]])
+        self.assertIn("memories: checkpoint_interval='5x'", stderr)
+
+
+class TestASessionSwitchRereadsOnlyTheInterval(unittest.TestCase):
+    """The session switch re-reads the checkpoint interval, and ONLY that.
+
+    Measured on this suite with the developer's config.json corrupt: discarding the whole
+    cached configuration at the switch made the next read fail, so the new session lost the
+    checkpoint and every tool call answered "not configured", where 1.1.0 kept working on what
+    it had loaded. Re-reading everything would also have split the tools (new settings) from
+    the recall store (built with the old ones)."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.file = self.dir / "config.json"
+        patcher = unittest.mock.patch.object(core.config, "DEFAULT_CONFIG_PATH", self.file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = unittest.mock.patch.dict(os.environ, {"QCTX_STATE_DIR": str(self.dir)})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL",
+                     "QCTX_CHECKPOINT_DISABLED"):
+            os.environ.pop(name, None)
+
+    def _provider(self, interval):
+        from core.retrieval import Outcome
+
+        class NoHits:
+            reranker = None
+
+            def recall(self, queries, policy, top_k, suppressed=None):
+                return [], Outcome(candidates=1, best_dense=0.2)
+
+        p = MemoriesProvider()
+        p._cfg = a_config(checkpoint_interval=interval, memory_collection="before")
+        p._store = NoHits()
+
+        return p
+
+    def _session(self, p, turns=6) -> list:
+        fired = []
+        for turn in range(1, turns + 1):
+            p.on_turn_start(turn, "a real question about the archive")
+            if "memory checkpoint" in p.prefetch("a real question about the archive"):
+                fired.append(turn)
+
+        return fired
+
+    def test_an_unreadable_file_keeps_the_last_interval_and_the_configuration(self):
+        p = self._provider(2)
+        self.file.write_text("{not json")
+        p.on_session_switch("the-next-session", reset=True)
+        self.assertEqual(self._session(p), [2, 4, 6], "the new session lost the checkpoint")
+        self.assertEqual(p._config().memory_collection, "before",
+                         "the tools lost the configuration they were working with")
+
+    def test_a_new_interval_does_not_move_the_rest_of_the_configuration(self):
+        p = self._provider(3)
+        self.file.write_text(json.dumps({"checkpoint_interval": 2,
+                                         "memory_collection": "after"}))
+        p.on_session_switch("the-next-session", reset=True)
+        self.assertEqual(self._session(p), [2, 4, 6])
+        self.assertEqual(p._config().memory_collection, "before",
+                         "the tools moved while the recall store did not")
 
 
 class TestCheckpointIntervalIsRobust(unittest.TestCase):
-    """`CHECKPOINT_INTERVAL` is read at import time, before any per-call guard runs, and it
-    now feeds the SAME call that produces the recall block. A malformed value here is
-    worse than in the claude-code hook: it would take recall down with it instead of just
-    itself.
+    """The interval feeds the SAME call that produces the recall block, so a malformed value
+    here is worse than in the claude-code hook: it would take recall down with it instead of
+    just itself. It is read through the configuration the provider loads, and has to fall
+    back, not raise.
     """
 
     def _read_it(self, env):
