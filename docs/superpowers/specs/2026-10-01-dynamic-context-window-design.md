@@ -48,10 +48,36 @@ ocuparia mais de 40% do que resta) só se ajustam por variável de ambiente
   contexto. O claude-code calcula `context_window: {context_window_size, used_percentage,
   remaining_percentage, total_input_tokens, current_usage}`, mas só entrega esse objeto ao
   comando de statusLine. O transcript grava o modelo sem o sufixo (`claude-opus-5-5`).
-- **hermes**. O plugin roda dentro do processo do hermes, e
+- **hermes**. O provider de memória roda dentro do processo do hermes, e
   `agent/model_metadata.py:get_model_context_length(model, base_url, api_key,
   config_context_length, provider, custom_providers)` é a função que o hermes usa para o
-  próprio contexto.
+  próprio contexto. O guard do hermes, porém, é um shell hook (`hosts/hermes/bigfile.py`,
+  um subprocesso a cada leitura), que não importa o hermes.
+
+### Medido em 2026-10-02, rodando os dois hosts
+
+Evidência em `~/.hermes/cache/scratch/window-measurements.md` e `wm-evidence/`.
+
+- **claude-code 2.1.282, interativo sob PTY.** A statusLine roda quando o REPL monta, depois
+  dos hooks `SessionStart` e antes de qualquer prompt (+0,37 s do launch); depois, ~323 ms
+  após cada mensagem do assistente; e ~80 a 100 ms depois de um `/model`, já com o modelo e
+  o tamanho novos (`claude-sonnet-5` 1.000.000, `claude-haiku-4-5-20251001` 200.000). No modo
+  headless (`claude -p`) ela NUNCA roda. O payload real traz
+  `model: {id: "claude-opus-5-5[1m]", display_name}` e
+  `context_window: {context_window_size: 1000000, used_percentage, ...}`. `SessionStart` traz
+  o modelo, mas não o tamanho; o evento novo `PreModelSwitch` traz `to_model`, mas não o
+  tamanho. Um plugin não declara statusLine: ela é uma configuração do usuário.
+- **hermes.** O provider não recebe o modelo nem evento de troca de modelo. O hook
+  `pre_llm_call`, registrável pelo `register(ctx)` do provider, roda no começo de cada turno,
+  antes de qualquer tool call, com `session_id` e o modelo já trocado, e é chamado sem a
+  porta `has_hook` (o `pre_api_request` tem a porta, e registrá-lo faria toda requisição
+  montar uma cópia sanitizada do payload). A sessão guarda `billing_provider` e
+  `billing_base_url`, que o `/model` atualiza junto com `model`.
+- **`get_model_context_length`**, rodado no venv do hermes: `claude-opus-5-5` com provider
+  `anthropic` dá 1.000.000 (cache em disco do models.dev, 0,2 ms a quente, sem rede). Um
+  modelo desconhecido dá 256.000, o `DEFAULT_FALLBACK_CONTEXT`, que pelo valor não se
+  distingue de uma janela real de 256K. Com chave Anthropic que não é OAuth, a função faz um
+  GET sem cache em toda chamada; com `api_key` vazia ela pula esse passo.
 
 ## Design
 
@@ -60,9 +86,11 @@ ocuparia mais de 40% do que resta) só se ajustam por variável de ambiente
 `core/windows.py` passa a ser o único dono da ordem, e cada host só fornece as fontes que
 tem:
 
-1. o valor que o host informou para o modelo selecionado agora: no hermes,
-   `get_model_context_length`; no claude-code, o `context_window_size` gravado pela
-   statusLine para esta sessão;
+1. o valor que o host informou para o modelo selecionado agora, publicado por sessão: no
+   hermes, pelo provider, com `get_model_context_length`; no claude-code, pela statusLine,
+   com `context_window_size`. Um valor que o host só chutou (o fallback de 256.000 do
+   hermes) é publicado marcado como palpite e não conta como informado, porque um palpite
+   pequeno demais inverte o guard;
 2. o valor que o endpoint informou, do cache que já existe (só hermes);
 3. o `context_window` do config, se maior que 0;
 4. 0, e o guard libera a leitura, como hoje.
@@ -75,14 +103,21 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
 
 ### 2. Ponte pela statusLine (claude-code)
 
-- Um comando novo do plugin, `hooks/statusline.py`, recebe no stdin o JSON que o claude-code
-  manda para a statusLine. Grava `{context_window_size, model, at}` em
-  `<state>/context-<session_id>.json`, por `core.statefile` (escrita atômica, 0600), e
-  imprime uma linha curta, por exemplo `ctx 23% · 1M`.
+- Um comando novo, `qctx statusline`, recebe no stdin o JSON que o claude-code manda para a
+  statusLine, publica o registro da sessão e imprime uma linha curta, por exemplo
+  `ctx 23% · 1M`. Pelo lançador estável `qctx` (0,08 s para subir) e não por um caminho
+  dentro do plugin, porque o diretório do plugin muda a cada versão e a statusLine fica na
+  configuração do usuário.
+- O registro é um arquivo por sessão, `<state>/window-<session_id>.json` com
+  `{model, window, source, guess, at}`, escrito e lido por um módulo só, `core/hostwindow.py`,
+  com `core.statefile` (escrita atômica, 0600). Os dois hosts publicam por ele e o guard lê
+  por ele.
 - Nunca falha alto: qualquer erro imprime a linha mínima e sai 0, porque uma statusLine que
   quebra suja a tela do usuário.
-- O `qctx install` oferece instalar a statusLine em `~/.claude/settings.json`. Se já houver
-  uma, não a substitui sem perguntar. O `qctx install --check` diz se ela está instalada.
+- O `qctx install` instala a statusLine em `~/.claude/settings.json` pela seção do
+  claude-code que ele já roda (`scripts/cutover.sh`, que já edita esse arquivo de forma
+  atômica). Sem `--apply`, só relata. Se já houver uma statusLine que não é a do plugin, não
+  a substitui: relata e segue, e o guard daquele host cai no config.
 - O guard do claude-code lê o arquivo da sessão pelo `session_id` que já recebe no input do
   hook. Os arquivos de sessões mortas entram na varredura que já existe para os outros
   estados por sessão.
@@ -93,12 +128,14 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
   - claude-code: a statusLine roda ao abrir a sessão e de novo quando o modelo muda, e cada
     execução regrava `{model, context_window_size}`. O guard usa o último valor gravado para
     a sessão.
-  - hermes: o tamanho é resolvido quando a sessão começa (`initialize`) e de novo quando o
-    modelo da sessão muda. O guard compara o modelo atual com o último resolvido e só chama
-    `get_model_context_length` quando ele mudou.
-- A medir antes de implementar: em que momento a primeira statusLine roda (antes do primeiro
-  tool call?) e se ela roda logo após um `/model`; no hermes, como o provider fica sabendo
-  da troca de modelo.
+  - hermes: o provider registra `pre_llm_call`. A cada turno ele compara
+    `(modelo, provider, base_url)` da sessão com o último que resolveu e, só quando mudou,
+    chama `get_model_context_length` com os `custom_providers` do próprio hermes e
+    `api_key` vazia, e publica o registro. O primeiro turno de uma sessão é o início dela;
+    o turno depois de um `/model` é a troca.
+- **Limites, medidos e aceitos**: `claude -p` não tem statusLine, então ali o guard cai no
+  config e, sem ele, libera. No claude-code a statusLine descreve o modelo da conversa
+  principal; um subagente em outro modelo usa o tamanho dela.
 - **Consequência que precisa ficar visível**: sem a statusLine instalada, o claude-code não
   informa o tamanho do contexto a nenhum processo externo. Nesse caso o guard cai no config
   e, sem ele, libera. Na v1.2.0 a tabela cobria `claude-opus-5` nessa situação; por isso o
@@ -121,10 +158,12 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
 
 ### 5. Visibilidade
 
-- `qctx setup` mostra, por host, de onde veio o tamanho do contexto (host, endpoint,
-  dedução, config ou nenhum) e avisa quando o guard está desligado por falta de informação,
-  o que hoje nada avisa.
-- A linha de decisão do guard registra a fonte do tamanho do contexto.
+- `qctx setup` diz se a statusLine do claude-code está instalada, mostra o último registro
+  que cada host publicou e avisa quando o guard fica desligado por falta de informação, o
+  que hoje nada avisa.
+- A própria statusLine mostra o tamanho que o guard vai usar.
+- Sem linha de log por decisão: o guard não escreve log hoje, e uma linha por leitura seria
+  I/O no caminho que roda antes de toda leitura.
 
 ## Restrições
 
