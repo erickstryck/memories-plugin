@@ -49,6 +49,7 @@ import core.docs  # noqa: E402
 import core.install  # noqa: E402
 import core.setup  # noqa: E402
 import core.operations  # noqa: E402
+import core.statusline  # noqa: E402
 from core.config import ConfigError  # noqa: E402
 
 
@@ -1651,6 +1652,40 @@ def cmd_repos_status(args, cfg):
         print("  (a held file returns on its own once its content changes)")
 
 
+def statusline_command(env: dict) -> str:
+    """The command claude-code should run: the stable launcher, by absolute path.
+
+    The launcher and not a path inside the plugin, because the plugin directory changes
+    with every version while the settings entry stays. Absolute, because the shell
+    claude-code starts for it is not guaranteed the user's PATH.
+    """
+    launcher = (shutil.which(core.install.LAUNCHER_NAME, path=env.get("PATH", ""))
+                or str(core.install.target_dir(env) / core.install.LAUNCHER_NAME))
+
+    return f"{os.path.abspath(launcher)} statusline"
+
+
+def cmd_statusline(args, cfg):
+    if args.action != "install":
+        return core.statusline.main()
+    settings = Path(args.settings) if args.settings else Path.home() / ".claude" / "settings.json"
+    state, detail = core.statusline.install(settings, statusline_command(dict(os.environ)),
+                                            args.apply)
+    lines = {
+        "installed": f"  ok    statusLine: installed (`{detail}`)",
+        "added": f"  ok    statusLine: added `{detail}` to {settings}",
+        "missing": f"  ..    statusLine: would add `{detail}` to {settings} "
+                   f"(the big-file guard learns the window from it)",
+        "foreign": f"  ..    statusLine: {settings} already runs `{detail}`; left as it is, "
+                   f"so on claude-code the guard falls back to context_window",
+        "unreadable": f"  ..    statusLine: {detail}; nothing changed",
+        "failed": f"  FAIL  statusLine: could not write {detail}",
+    }
+    print(lines[state])
+
+    return 1 if state == "failed" else 0
+
+
 def cmd_stats(args, cfg):
     """Summarises `recall.log` and `daemon.log`. Reads two local files and nothing else, so it
     answers on a machine whose Qdrant is down, which is one of the reasons to run it."""
@@ -1785,6 +1820,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("stats", help="what both hosts and the daemon recorded, summarised"
                    ).set_defaults(fn=cmd_stats)
+
+    p = sub.add_parser("statusline",
+                       help="claude-code's status line: reads its payload on stdin and hands "
+                            "the context window to the big-file guard")
+    p.add_argument("action", nargs="?", choices=["install"],
+                   help="add the status line to claude-code's settings")
+    p.add_argument("--apply", action="store_true", help="with install: write the change")
+    p.add_argument("--settings", default=None,
+                   help="with install: the settings file (default ~/.claude/settings.json)")
+    p.set_defaults(fn=cmd_statusline)
 
     col = sub.add_parser("collections", help="inspect Qdrant collections")
     colsub = col.add_subparsers(dest="action", required=True)
@@ -1971,6 +2016,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # THE STATUS LINE RUNS BEFORE EVERYTHING ELSE, the config included. claude-code runs it
+    # after every assistant message and prints whatever it writes, so a config that does
+    # not parse must cost the guard its window at most, never a traceback on the screen.
+    if sys.argv[1:] == ["statusline"]:
+        raise SystemExit(core.statusline.main())
     args = build_parser().parse_args()
     # `--json` is accepted before OR after the subcommand, and the subparser copy is declared
     # with SUPPRESS so an absent flag leaves the top-level value alone. Neither position used

@@ -1096,7 +1096,7 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: tool slot on every turn for a question no conversation has.
     NOT_FOR_THE_MODEL = {"setup", "install", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_daemon", "repos_add_all", "repos_status",
-                         "repos_cancel", "repos_quarantine_clear", "stats"}
+                         "repos_cancel", "repos_quarantine_clear", "stats", "statusline"}
 
     def setUp(self):
         from hosts.hermes import tools

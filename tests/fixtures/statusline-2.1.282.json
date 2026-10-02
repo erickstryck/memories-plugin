@@ -1,0 +1,83 @@
+{
+ "_about": "Real statusLine payloads from claude-code 2.1.282, captured on 2026-10-02 by an interactive session under a PTY; only paths and ids were replaced. session_start is the run when the REPL mounts; after_model_switch is the run right after /model picked Haiku 4.5.",
+ "after_model_switch": {
+  "context_window": {
+   "context_window_size": 200000,
+   "current_usage": null,
+   "remaining_percentage": null,
+   "total_input_tokens": 0,
+   "total_output_tokens": 0,
+   "used_percentage": null
+  },
+  "cost": {
+   "total_api_duration_ms": 0,
+   "total_cost_usd": 0,
+   "total_duration_ms": 283096,
+   "total_lines_added": 0,
+   "total_lines_removed": 0
+  },
+  "cwd": "/tmp/x",
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "model": {
+   "display_name": "Haiku 4.5",
+   "id": "claude-haiku-4-5-20251001"
+  },
+  "output_style": {
+   "name": "default"
+  },
+  "prompt_id": "p-fixture",
+  "session_id": "s-statusline-fixture",
+  "thinking": {
+   "enabled": true
+  },
+  "transcript_path": "/tmp/x/s-statusline-fixture.jsonl",
+  "version": "2.1.282",
+  "workspace": {
+   "added_dirs": [],
+   "current_dir": "/tmp/x",
+   "project_dir": "/tmp/x"
+  }
+ },
+ "session_start": {
+  "context_window": {
+   "context_window_size": 1000000,
+   "current_usage": null,
+   "remaining_percentage": null,
+   "total_input_tokens": 0,
+   "total_output_tokens": 0,
+   "used_percentage": null
+  },
+  "cost": {
+   "total_api_duration_ms": 0,
+   "total_cost_usd": 0,
+   "total_duration_ms": 32931,
+   "total_lines_added": 0,
+   "total_lines_removed": 0
+  },
+  "cwd": "/tmp/x",
+  "effort": {
+   "level": "medium"
+  },
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "model": {
+   "display_name": "Opus 5.5 (1M context)",
+   "id": "claude-opus-5-5[1m]"
+  },
+  "output_style": {
+   "name": "default"
+  },
+  "session_id": "s-statusline-fixture",
+  "thinking": {
+   "enabled": true
+  },
+  "transcript_path": "/tmp/x/s-statusline-fixture.jsonl",
+  "version": "2.1.282",
+  "workspace": {
+   "added_dirs": [],
+   "current_dir": "/tmp/x",
+   "project_dir": "/tmp/x"
+  }
+ }
+}

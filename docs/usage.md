@@ -110,6 +110,7 @@ attempt decides afresh, and a file that still cannot be indexed is simply held a
 | `config detect` | ask the embedding endpoint its real dimension and store it |
 | `collections list` | what exists in Qdrant, and whether each matches your model |
 | `stats` | what both hosts and the daemon recorded: recall rounds and latency per host, failures by dependency, the breaker, the daemon's jobs and errors |
+| `statusline` | claude-code's status line: reads the payload claude-code sends, hands the context window to the big-file guard, prints `ctx 23% · 1M`. `statusline install [--apply]` adds it to `~/.claude/settings.json` |
 
 `install --check` covers the plumbing, Qdrant, the embedding and re-rank endpoints, the
 5 collections, whether a shell-less process would find the configuration, whether each of
