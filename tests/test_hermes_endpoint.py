@@ -140,6 +140,38 @@ custom_providers:
 """
 
 
+class TestTheKeyIsReadTheWayHermesReadsIt(unittest.TestCase):
+    """hermes expands `${VAR}` and `${env:VAR}` in its config, reads `api_key_env` as
+    `key_env`, and leaves any other `${source:...}` as written, which is no key at all
+    (hermes_cli/config.py `_env_expand_match`, runtime_provider_custom.py `_key_env_secret`)."""
+
+    def setUp(self):
+        _set_env(self, QCTX_STATE_DIR=tempfile.mkdtemp(), MY_KEY_VAR="secret-value")
+
+    def key_for(self, line: str) -> str:
+        return endpoint.from_hermes_config(a_hermes_home(
+            "model:\n  provider: custom\n  base_url: https://server.example/api/v1\n"
+            f"  {line}\nmemory:\n  provider: memories\n"))[1]
+
+    def test_an_env_prefixed_reference_resolves(self):
+        self.assertEqual(self.key_for("api_key: ${env:MY_KEY_VAR}"), "secret-value")
+
+    def test_api_key_env_is_key_env(self):
+        self.assertEqual(self.key_for("api_key_env: MY_KEY_VAR"), "secret-value")
+
+    def test_a_reference_to_another_source_is_no_key(self):
+        self.assertEqual(self.key_for("api_key: ${vault:secret/key}"), "")
+
+    def test_an_unset_variable_is_no_key(self):
+        self.assertEqual(self.key_for("api_key: ${env:QCTX_TEST_UNSET_VARIABLE}"), "")
+
+    def test_a_partly_interpolated_key_with_an_unset_variable_is_no_key(self):
+        self.assertEqual(self.key_for("api_key: sk-${QCTX_TEST_UNSET_VARIABLE}"), "")
+
+    def test_a_literal_key_is_used_as_it_is(self):
+        self.assertEqual(self.key_for("api_key: sk-literal"), "sk-literal")
+
+
 class TestTheActiveBlockIsWhatAnswers(unittest.TestCase):
     """A `custom_providers:` catalogue elsewhere in the file lists servers hermes is NOT
     currently using. It must never be able to answer for the endpoint actually in use,

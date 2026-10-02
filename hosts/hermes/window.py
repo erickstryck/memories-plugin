@@ -24,17 +24,20 @@ THE KEY GOES TO CUSTOM ROUTES ONLY, by the user's decision of 2026-10-02. A cust
 answers /models only with its key; without it hermes falls back to its own table of model
 names. Measured on the Eukrio route, Qwen3.8-27B: 131,072 without the key, going to the
 network on every call; 524,288 with it, which is what the endpoint reports, in 258 ms once
-and 0.8 ms after that. The key is read the way `hosts/hermes/endpoint.py` reads it, from the
-variable the entry names (`key_env`, or `api_key: ${VAR}`; a literal `api_key` as it is),
-and it is never stored, logged or put in a message. A known provider is asked without a
-key: with an Anthropic API key hermes makes an uncached HTTP request on every call, and
-without one it answers from its catalogue with no network (1,000,000 for claude-opus-5-5
-and 200,000 for claude-haiku-4-5-20251001, measured).
+and 0.8 ms after that. The key is read the way hermes reads it, by `endpoint.key_from`, the
+plugin's one copy of that rule: the variable `key_env` (or `api_key_env`) names, read through
+hermes' profile secret scope; or `api_key`, literal or holding `${VAR}` / `${env:VAR}`
+references. A reference that does not resolve leaves no key, and so does a `key_cmd`, which
+is never run. The `model:` block's key goes only to the `model:` block's own URL, the way
+hermes hands it over (#67453). The key is never stored, logged or put in a message. A known
+provider is asked without a key: with an Anthropic API key hermes makes an uncached HTTP
+request on every call, and without one it answers from its catalogue with no network
+(1,000,000 for claude-opus-5-5 and 200,000 for claude-haiku-4-5-20251001, measured).
 
 WHAT COUNTS AS A GUESS, published and then skipped by the guard: hermes' own fallback
-(`DEFAULT_FALLBACK_CONTEXT`), and any answer for a custom route that declares a key the
-environment does not hold, since the endpoint could not have given it. A pinned value is
-never a guess.
+(`DEFAULT_FALLBACK_CONTEXT`), and any answer for a custom route that declares a key this
+could not hand over, since the endpoint could not have given it. A pinned value is never a
+guess.
 
 ONLY WHEN THE ROUTE CHANGED: the first turn of a session, and the turn after a `/model`.
 Every other turn costs one read-only query and a dict lookup.
@@ -42,8 +45,8 @@ Every other turn costs one read-only query and a dict lookup.
 NEVER COSTS HERMES A TURN. Every failure is swallowed, and the hook returns None: hermes
 injects into the prompt whatever a `pre_llm_call` callback returns.
 """
+import importlib.util
 import os
-import re
 import sys
 from types import SimpleNamespace
 
@@ -62,9 +65,6 @@ _LAST: dict = {}
 _LAST_MAX = 512
 
 _ROW_SQL = "select model_config, billing_provider from sessions where id=? limit 1"
-
-#: `api_key: ${VAR}`, the form a hermes config uses to point at a secret.
-_REFERENCE = re.compile(r"^\$\{(\w+)\}$")
 
 
 def forget() -> None:
@@ -92,31 +92,39 @@ def _custom_providers(config: dict) -> list:
     return found if isinstance(found, list) else []
 
 
-def _bigfile():
-    """The guard module, for its read-only, short-timeout query of hermes' database.
+def _sibling(name: str):
+    """A module beside this one (`bigfile`, `endpoint`), imported once.
 
     Relative first, the way the loader makes siblings importable; by path otherwise, never
-    as `hosts.hermes.bigfile`, which would execute the provider package a second time
-    under another name."""
+    as `hosts.hermes.<name>`, which would execute the provider package a second time under
+    another name. The by-path module is kept in `sys.modules` under the name `_load_sibling`
+    in `__init__.py` gives it, and found there on the next turn instead of executing the
+    file again.
+    """
     try:
-        from . import bigfile
-
-        return bigfile
-    except ImportError:
-        import importlib.util
-        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bigfile.py")
-        spec = importlib.util.spec_from_file_location("memories_plugin_hermes_bigfile", path)
+        return importlib.import_module(f".{name}", __package__ or None)
+    except (ImportError, TypeError):
+        pass
+    key = f"memories_plugin_hermes_{name}"
+    module = sys.modules.get(key)
+    if module is None:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), f"{name}.py")
+        spec = importlib.util.spec_from_file_location(key, path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        sys.modules[key] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(key, None)
+            raise
 
-        return module
+    return module
 
 
 def _recorded_route(session_id: str) -> dict:
     """The route hermes records for this session, read with hermes' own reader; {} while
     the session has no row."""
-    bigfile = _bigfile()
+    bigfile = _sibling("bigfile")
     rows = bigfile._rows(bigfile.state_db_path(), _ROW_SQL, (session_id,))
     if not rows:
         return {}
@@ -140,17 +148,37 @@ def _custom_entry(provider: str, custom_providers: list):
     return None
 
 
-def _key_of(fields: dict) -> tuple[bool, str]:
-    """(declares a key, the key) of a custom entry or of the `model:` block."""
-    name = str(fields.get("key_env") or "").strip()
-    if name:
-        return True, os.environ.get(name, "")
-    raw = str(fields.get("api_key") or "").strip()
-    if not raw:
-        return False, ""
-    reference = _REFERENCE.match(raw)
+def _secret(name: str) -> str:
+    """One variable, read the way hermes reads a `key_env`: through the profile's secret
+    scope (`agent.secret_scope`), because a multiplexed gateway serves several profiles from
+    one process environment (#84079). When hermes refuses the read (no scope while
+    multiplexing, its fail-closed case) there is no key. Outside hermes, the environment."""
+    try:
+        from agent.secret_scope import get_secret_str
+    except Exception:  # noqa: BLE001
+        return os.environ.get(name, "")
+    try:
+        return str(get_secret_str(name, "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
 
-    return True, (os.environ.get(reference.group(1), "") if reference else raw)
+
+def _key_of(fields: dict) -> tuple[bool, str]:
+    """(declares a key, the key) of a custom entry or of the `model:` block.
+
+    A `key_cmd` is never run: hermes mints that credential per request, so a block that
+    names one and no key declares a key this cannot hand over."""
+    declares, key = _sibling("endpoint").key_from(
+        fields.get("key_env") or fields.get("api_key_env"), fields.get("api_key"), _secret)
+    if not declares and str(fields.get("key_cmd") or "").strip():
+        return True, ""
+
+    return declares, key
+
+
+def _same_url(a: str, b: str) -> bool:
+    """hermes' own comparison (`_model_cfg_key_env_for`): stripped, without a final slash."""
+    return str(a or "").strip().rstrip("/") == str(b or "").strip().rstrip("/")
 
 
 def route_of(session_id: str, model: str, config: dict, custom_providers: list):
@@ -166,7 +194,15 @@ def route_of(session_id: str, model: str, config: dict, custom_providers: list):
     else:
         return None
     if provider.strip().lower() == "custom":
-        declares, key = _key_of(section)              # the `model:` block's own endpoint
+        # The `model:` block's own endpoint, whose key is for its own URL only: hermes hands
+        # `model.key_env` over only when the URL IS `model.base_url` (#67453). A session
+        # recorded on another URL (a direct alias) is asked without it, and when the block
+        # declares a key, what that URL answers is a guess.
+        own = str(section.get("base_url") or "")
+        base_url = base_url or own
+        declares, key = _key_of(section)
+        if not own or not _same_url(base_url, own):
+            key = ""
 
         return provider, base_url, key, declares
     entry = _custom_entry(provider, custom_providers)

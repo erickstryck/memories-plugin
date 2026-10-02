@@ -204,8 +204,12 @@ changes:
   a `/model`, asks hermes' own `get_model_context_length` about the session's route, read with
   hermes' `SessionDB.session_gateway_runtime`. hermes' fallback of 256,000 is published as a
   guess and skipped. A custom endpoint answers only with its key, so a custom route is asked
-  with the key its `custom_providers` entry names (`key_env`); a known provider is asked
-  without one. The key is never stored.
+  with the key its `custom_providers` entry names, read the way hermes reads it
+  (`hosts/hermes/endpoint.py`, `key_from`): the variable in `key_env` or `api_key_env`,
+  through hermes' profile secret scope, or `api_key`, literal or with `${VAR}` /
+  `${env:VAR}`. The `model:` block's own key goes only to the `model:` block's own URL, as
+  hermes hands it over. A `key_cmd` is never run, and a route whose key could not be handed
+  over publishes a guess. A known provider is asked without a key. The key is never stored.
 
 `qctx setup` says which of these applies on the machine and what each host last reported, and
 `./scripts/hermes_cutover.sh` reports the same for hermes.

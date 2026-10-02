@@ -141,7 +141,11 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
     registro. A chave vai só nas rotas custom e é lida da variável que a entrada indica
     (`key_env`); os provedores conhecidos, como a Anthropic, são consultados sem chave
     (decisão do usuário em 2026-10-02). Uma rota custom que declara chave, mas cuja
-    variável está vazia, é publicada como palpite. Enquanto o hermes não registrou a rota
+    variável está vazia, é publicada como palpite. Ajustes do review de 2026-10-02: a chave
+    é lida como o hermes lê (`key_env` ou `api_key_env` pelo escopo de segredos do perfil,
+    ou `api_key` literal ou com `${VAR}`/`${env:VAR}`; um `key_cmd` nunca é executado e vira
+    palpite), e a chave do bloco `model:` só vai para a URL do próprio bloco, como o hermes
+    faz (#67453). Enquanto o hermes não registrou a rota
     (no primeiro turno de uma sessão nova), vale a rota do config, mas só para o modelo do
     config. Com outro modelo nada é publicado, e o turno seguinte tenta de novo. O primeiro
     turno de uma sessão é o início dela; o turno depois de um `/model` é a troca.

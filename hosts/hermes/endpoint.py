@@ -24,11 +24,15 @@ text, which is right only by the coincidence of one file's ordering, not by anyt
 format guarantees. So this reads `base_url` and the credential from INSIDE the top-level
 `model:` block only; a catalogue elsewhere cannot answer for the endpoint actually in use.
 
-TWO CREDENTIAL FORMS, BOTH NAMING A VARIABLE. The active block was measured using
-`api_key: ${VAR}` — `${...}` interpolation — where `key_env: VAR` never appears at all. Both
-are accepted; `key_env` is tried first since it already names the variable directly. A literal
-`api_key:` (no `${...}`) is used as the key as-is, because hermes itself would use it that way
-— but it is never logged, echoed, or placed in an exception message.
+THE CREDENTIAL IS READ THE WAY HERMES READS IT, by `key_from`, the plugin's one copy of that
+rule (`hosts/hermes/window.py` uses it too). The active block was measured using
+`api_key: ${VAR}` (`${...}` interpolation) where `key_env: VAR` never appears at all. `key_env`,
+or its alias `api_key_env`, is tried first since it names the variable directly; then
+`api_key`, whose `${VAR}` and `${env:VAR}` references are expanded. A reference that does not
+resolve (an unset variable, or another source such as `${vault:...}`, which hermes leaves as
+written) yields NO key rather than the placeholder: sent as a bearer, a placeholder is only a
+wrong key. A literal `api_key:` is used as it is, because hermes itself would use it that way,
+and it is never logged, echoed, or placed in an exception message.
 """
 import os
 import re
@@ -111,28 +115,55 @@ def _unquoted(value: str) -> str:
     return value
 
 
-def _credential(block: str) -> str:
-    """The credential the active block names, resolved from the environment — or a literal
-    `api_key:` value, used as-is because hermes itself would use it that way.
+#: One `${...}` reference, the shape hermes expands in its config (`_ENV_REF_RE`).
+_REFERENCE = re.compile(r"\$\{([^}]+)\}")
 
-    `key_env` is tried first: it already names the variable directly. `api_key: ${VAR}` is
-    the form measured in a real config, where `key_env` does not appear at all; `${...}` is
-    unwrapped and resolved the same way. Never logged, echoed, or placed in an exception
-    message — whichever form this returns.
+
+def key_from(key_env, api_key, lookup=None) -> tuple[bool, str]:
+    """(declares a key, the key) of one config block, read the way hermes reads it.
+
+    `key_env` names the variable (the caller passes `api_key_env` in its place when only the
+    alias is set). Otherwise `api_key` is a literal, or holds `${VAR}` / `${env:VAR}`
+    references, expanded the way hermes' `_env_expand_match` expands them. A reference that
+    does not resolve leaves no key at all: an unset variable, or another source such as
+    `${vault:...}`, which hermes leaves as written and no variable answers. `lookup` reads
+    one variable, the process environment by default. Never logged, echoed, or placed in an
+    exception message.
     """
-    key_env = re.search(r"^\s+key_env:\s*(\w+)\s*$", block, re.M)
-    if key_env:
-        return os.environ.get(key_env.group(1), "")
+    lookup = lookup or (lambda name: os.environ.get(name, ""))
+    name = str(key_env or "").strip()
+    if name:
+        return True, str(lookup(name) or "").strip()
+    raw = str(api_key or "").strip()
+    if not raw:
+        return False, ""
+    unresolved = []
 
-    api_key = re.search(r"^\s+api_key:\s*(\S+)\s*$", block, re.M)
-    if not api_key:
-        return ""
-    raw = _unquoted(api_key.group(1))
-    interpolated = re.fullmatch(r"\$\{(\w+)\}", raw)
-    if interpolated:
-        return os.environ.get(interpolated.group(1), "")
+    def expand(match) -> str:
+        inner = match.group(1).strip()
+        if inner.startswith("env:"):
+            inner = inner[len("env:"):].strip()
+        value = str(lookup(inner) or "") if inner else ""
+        if not value:
+            unresolved.append(match.group(0))
 
-    return raw       # a literal already in hermes' own config — never logged past this point
+        return value
+
+    key = _REFERENCE.sub(expand, raw)
+
+    return True, ("" if unresolved else key)
+
+
+def _scalar(block: str, name: str) -> str:
+    found = re.search(rf"^\s+{name}:\s*(\S+)\s*$", block, re.M)
+
+    return _unquoted(found.group(1)) if found else ""
+
+
+def _credential(block: str) -> str:
+    """The credential the active block names, by `key_from`, or ""."""
+    return key_from(_scalar(block, "key_env") or _scalar(block, "api_key_env"),
+                    _scalar(block, "api_key"))[1]
 
 
 def from_hermes_config(home: str | None = None) -> tuple[str, str]:

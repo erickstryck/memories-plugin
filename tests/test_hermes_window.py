@@ -25,6 +25,7 @@ what the provider hands hermes and what it does with the answer; `TestTheFakesMa
 holds the two copied hermes functions to the real ones.
 """
 import ast
+import importlib.util
 import json
 import os
 import sqlite3
@@ -99,9 +100,10 @@ def session_gateway_runtime(session_meta):
 class FakeHermes:
     """The hermes modules the provider imports, as far as it uses them."""
 
-    def __init__(self, answer=1_000_000, pin=None, config=None, raises=None, custom=None):
+    def __init__(self, answer=1_000_000, pin=None, config=None, raises=None, custom=None,
+                 secrets=None):
         self.calls = []
-        self.answer, self.pin, self.raises = answer, pin, raises
+        self.answer, self.pin, self.raises, self.secrets = answer, pin, raises, secrets
         self.config = config if config is not None else {
             "model": {"default": "claude-opus-5-5", "provider": "anthropic"}}
         self.custom_providers = custom if custom is not None else [EUKRIO, OPEN_LOCAL, BY_REFERENCE]
@@ -138,9 +140,21 @@ class FakeHermes:
         state.SessionDB = type("SessionDB", (), {
             "session_gateway_runtime": staticmethod(session_gateway_runtime)})
 
-        return {"agent": agent, "agent.model_metadata": metadata, "agent.agent_init": init,
-                "hermes_cli": cli, "hermes_cli.config": config,
-                "hermes_cli.providers": providers, "hermes_state": state}
+        modules = {"agent": agent, "agent.model_metadata": metadata, "agent.agent_init": init,
+                   "hermes_cli": cli, "hermes_cli.config": config,
+                   "hermes_cli.providers": providers, "hermes_state": state}
+        if self.secrets is not None:
+            scope = types.ModuleType("agent.secret_scope")
+
+            def get_secret_str(name, default=""):
+                if isinstance(self.secrets, Exception):
+                    raise self.secrets
+                return self.secrets.get(name, default)
+
+            scope.get_secret_str = get_secret_str
+            agent.secret_scope = modules["agent.secret_scope"] = scope
+
+        return modules
 
 
 def a_state_db(rows) -> str:
@@ -289,6 +303,109 @@ class TestTheKeyGoesOnlyToCustomRoutes(PublisherCase):
         written = b"".join(p.read_bytes() for p in Path(self.state).rglob("*") if p.is_file())
         self.assertTrue(written, "nothing was published")
         self.assertNotIn(KEY.encode(), written)
+
+    def entry_session(self, entry, env=None):
+        self.set_row("s1", NO_SWITCH, f"custom:{entry['name'].lower()}", "m")
+        hermes = FakeHermes(custom=[entry], answer=131_072)
+        with mock.patch.dict(os.environ, env or {}):
+            self.turn(hermes, model="m")
+
+        return hermes
+
+    def test_an_env_prefixed_reference_is_read_from_the_environment(self):
+        hermes = self.entry_session({"name": "Prefixed", "base_url": "https://p.example/v1",
+                                     "api_key": "${env:QCTX_TEST_P_KEY}"},
+                                    {"QCTX_TEST_P_KEY": "sk-p"})
+        self.assertEqual(hermes.calls[0]["api_key"], "sk-p")
+
+    def test_a_reference_this_cannot_read_is_never_sent_and_publishes_a_guess(self):
+        hermes = self.entry_session({"name": "Odd", "base_url": "https://o.example/v1",
+                                     "api_key": "${vault:secret/key}"})
+        self.assertEqual(hermes.calls[0]["api_key"], "")
+        self.assertTrue(hostwindow.read("s1").guess)
+
+    def test_api_key_env_names_the_variable_like_key_env(self):
+        hermes = self.entry_session({"name": "Aliased", "base_url": "https://a.example/v1",
+                                     "api_key_env": "QCTX_TEST_A_KEY"},
+                                    {"QCTX_TEST_A_KEY": "sk-a"})
+        self.assertEqual(hermes.calls[0]["api_key"], "sk-a")
+
+    def test_the_variable_is_read_through_hermes_secret_scope(self):
+        """A multiplexed gateway serves several profiles in one process, and hermes reads
+        a key_env through the profile's scope (#84079): the process environment holds
+        another profile's value."""
+        hermes = self.eukrio_session(FakeHermes(answer=524_288, secrets={KEY_ENV: "sk-scoped"}))
+        self.assertEqual(hermes.calls[0]["api_key"], "sk-scoped")
+
+    def test_hermes_refusing_the_read_leaves_no_key(self):
+        """Multiplexing with no profile scope, hermes fails closed (`UnscopedSecretError`):
+        the process environment would hold another profile's value."""
+        hermes = self.eukrio_session(FakeHermes(answer=131_072,
+                                                secrets=RuntimeError("no secret scope")))
+        self.assertEqual(hermes.calls[0]["api_key"], "")
+        self.assertTrue(hostwindow.read("s1").guess)
+
+    def test_a_key_command_is_never_run_and_publishes_a_guess(self):
+        hermes = self.entry_session({"name": "Cmd", "base_url": "https://c.example/v1",
+                                     "key_cmd": "pass show eukrio"})
+        self.assertEqual(hermes.calls[0]["api_key"], "")
+        self.assertTrue(hostwindow.read("s1").guess)
+
+
+class TheModelBlocksKeyStaysWithTheModelBlocksEndpoint(PublisherCase):
+    """A `model:` block that is itself a custom endpoint carries its own key. hermes hands
+    that key over only when the URL IS `model.base_url` (runtime_provider_custom.py,
+    #67453); a session recorded on another URL, a direct alias for instance, must not
+    receive it."""
+
+    CONFIG = {"model": {"default": "local-model", "provider": "custom",
+                        "base_url": "https://mine.example/v1", "key_env": KEY_ENV}}
+
+    def session_on(self, recorded_url):
+        if recorded_url:
+            route = {"provider": "custom", "base_url": recorded_url}
+            self.set_row("s1", json.dumps({**route, "gateway_runtime": route}), None,
+                         "local-model")
+        else:
+            self.set_row("s1", NO_SWITCH, None, "local-model")
+        hermes = FakeHermes(config=self.CONFIG, answer=65_536)
+        self.turn(hermes, model="local-model")
+
+        return hermes.calls[0]
+
+    def test_the_configured_endpoint_gets_its_key(self):
+        call = self.session_on(None)
+        self.assertEqual((call["base_url"], call["api_key"]), ("https://mine.example/v1", KEY))
+        self.assertFalse(hostwindow.read("s1").guess)
+
+    def test_a_recorded_route_without_a_url_is_the_configured_endpoint(self):
+        route = {"provider": "custom"}
+        self.set_row("s1", json.dumps({**route, "gateway_runtime": route}), None, "local-model")
+        hermes = FakeHermes(config=self.CONFIG, answer=65_536)
+        self.turn(hermes, model="local-model")
+        self.assertEqual((hermes.calls[0]["base_url"], hermes.calls[0]["api_key"]),
+                         ("https://mine.example/v1", KEY))
+
+    def test_the_same_endpoint_recorded_with_a_trailing_slash_gets_its_key(self):
+        self.assertEqual(self.session_on("https://mine.example/v1/")["api_key"], KEY)
+
+    def test_another_endpoint_never_gets_the_model_blocks_key(self):
+        call = self.session_on("https://api.other.example/v1")
+        self.assertEqual((call["base_url"], call["api_key"]), ("https://api.other.example/v1", ""))
+        self.assertTrue(hostwindow.read("s1").guess)
+
+
+class LoadedByPath(unittest.TestCase):
+    def test_a_sibling_is_loaded_once(self):
+        """Loaded by path (no package), the guard module used to be executed again on every
+        turn."""
+        path = REPO / "hosts" / "hermes" / "window.py"
+        spec = importlib.util.spec_from_file_location("qctx_test_window_by_path", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for name in ("bigfile", "endpoint"):
+            with self.subTest(name=name):
+                self.assertIs(module._sibling(name), module._sibling(name))
 
 
 class TestTheProviderPublishesWhatHermesResolved(PublisherCase):

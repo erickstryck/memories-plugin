@@ -282,7 +282,9 @@ one.
   alone; in that case, declare the window instead. `claude -p` runs no status line.
 - **hermes** reports through the plugin itself, with nothing to install. For a custom endpoint
   (a `custom_providers` entry), hermes can only learn the window with that endpoint's key, so
-  the plugin hands it the key the entry names (`key_env`); the key is never written anywhere.
+  the plugin hands it the key the entry names (`key_env`, or `api_key` written as `${VAR}`);
+  the key is never written anywhere. A `key_cmd` is never run, and a key that cannot be read
+  leaves that session's window as a guess, which the guard skips (`qctx setup` warns).
   The first turn of a new session on a model other than your configured default is not
   covered; the next one is.
 - **The last resort** is `qctx config set context-window <tokens>`. With no report and no
