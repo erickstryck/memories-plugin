@@ -2022,6 +2022,10 @@ def main() -> None:
     if sys.argv[1:] == ["statusline"]:
         raise SystemExit(core.statusline.main())
     args = build_parser().parse_args()
+    # Installing it needs no config either, and the cutover runs it on machines whose
+    # config may be half written.
+    if getattr(args, "fn", None) is cmd_statusline:
+        raise SystemExit(cmd_statusline(args, None))
     # `--json` is accepted before OR after the subcommand, and the subparser copy is declared
     # with SUPPRESS so an absent flag leaves the top-level value alone. Neither position used
     # it means the attribute may not exist at all, so it is filled in once here rather than

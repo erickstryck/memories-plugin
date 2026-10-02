@@ -219,6 +219,18 @@ class TestInstallingTheStatusLine(unittest.TestCase):
 
 
 class TestInstallingThroughTheCLI(unittest.TestCase):
+    def test_install_does_not_need_a_readable_config(self):
+        """The cutover calls it on machines whose config may be half written."""
+        settings = Path(tempfile.mkdtemp()) / "settings.json"
+        settings.write_text("{}\n")
+        bad = Path(tempfile.mkdtemp()) / "config.json"
+        bad.write_text("{not json")
+        done = subprocess.run([sys.executable, str(CLI), "statusline", "install",
+                               "--settings", str(settings)], capture_output=True, text=True,
+                              timeout=30, env=dict(os.environ, QCTX_CONFIG=str(bad)))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("would add", done.stdout)
+
     def test_install_reports_and_apply_writes(self):
         settings = Path(tempfile.mkdtemp()) / "settings.json"
         settings.write_text("{}\n")

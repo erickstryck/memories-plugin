@@ -213,6 +213,49 @@ class SkipSuiteVariable(unittest.TestCase):
         self.assertIn("suite unverified", done.stdout + done.stderr)
 
 
+class TheClaudeCutoverPlansTheStatusLine(unittest.TestCase):
+    """The claude-code cutover is where settings.json gets edited, so the statusLine the
+    big-file guard learns the window from is planned there too. A dry run only reports."""
+
+    def run_plan(self, settings: dict):
+        with TemporaryDirectory() as home:
+            claude = Path(home) / ".claude"
+            claude.mkdir()
+            path = claude / "settings.json"
+            path.write_text(json.dumps(settings, indent=2) + "\n")
+            before = path.read_bytes()
+            env = hermetic_env(home, CUTOVER_SKIP_SUITE="1",
+                               QCTX_STATE_DIR=Path(home) / "state",
+                               QCTX_CONFIG=Path(home) / "config.json")
+            done = subprocess.run(["bash", str(REPO / "scripts" / "cutover.sh")],
+                                  capture_output=True, text=True, env=env, timeout=120)
+
+            return done, path.read_bytes() == before
+
+    def test_a_dry_run_says_it_would_add_it_and_writes_nothing(self):
+        done, unchanged = self.run_plan({"model": "opus[1m]"})
+        self.assertIn("statusLine: would add", done.stdout, done.stdout + done.stderr)
+        self.assertIn("qctx statusline", done.stdout)
+        self.assertTrue(unchanged, "a dry run wrote to settings.json")
+
+    def test_ours_already_there_is_reported_ok(self):
+        done, unchanged = self.run_plan(
+            {"statusLine": {"type": "command", "command": "/x/qctx statusline"}})
+        self.assertIn("ok    statusLine: installed", done.stdout, done.stdout + done.stderr)
+        self.assertTrue(unchanged)
+
+    def test_someone_elses_is_left_alone_and_said_so(self):
+        done, unchanged = self.run_plan(
+            {"statusLine": {"type": "command", "command": "~/mine.sh"}})
+        self.assertIn("left as it is", done.stdout, done.stdout + done.stderr)
+        self.assertTrue(unchanged)
+
+    def test_the_plan_lists_it_among_what_changes(self):
+        done, _ = self.run_plan({})
+        self.assertIn("=== what changes ===", done.stdout, done.stdout + done.stderr)
+        self.assertIn("statusLine", done.stdout.split("=== what changes ===")[1])
+
+
 class WritingPass(unittest.TestCase):
     """The interactive pass, driven through stdin with --yes off."""
 

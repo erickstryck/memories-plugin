@@ -96,6 +96,16 @@ else
   ok "no superseded skills in ~/.claude/skills"
 fi
 
+# THE STATUS LINE is the one place claude-code hands out the context window of the model
+# selected now, which the big-file guard needs. A plugin cannot declare one, so it goes in
+# settings.json, by the launcher's path. Without --apply this only reports; a status line
+# somebody else configured is reported and left alone.
+if statusline_plan="$(python3 "$ROOT/cli/qctx.py" statusline install --settings "$SETTINGS" 2>&1)"; then
+  say "$statusline_plan"
+else
+  note "statusLine: could not be checked: $statusline_plan"
+fi
+
 if [ "$failed" -ne 0 ]; then
   say ""
   say "checks failed — nothing was changed."
@@ -108,6 +118,8 @@ say "  settings.json:"
 say "    - removes the manual UserPromptSubmit hooks (recall and checkpoint)"
 say "    + registers the local marketplace $ROOT"
 say "    + enables the memories-plugin plugin (which brings the same two hooks)"
+say "    + adds the statusLine that reports the context window to the big-file guard,"
+say "      unless a status line is already configured"
 say "  MCP server (memory becomes the CLI):"
 say "    - removes qdrant-memory from .mcp.json and from .claude.json (user scope)"
 say "  ~/.claude/skills:"
@@ -154,6 +166,14 @@ if jq -e . "$tmp" >/dev/null 2>&1; then
   mv "$tmp" "$SETTINGS"; ok "settings.json updated"
 else
   rm -f "$tmp"; fail "the settings.json transform did not produce valid JSON — nothing was swapped"
+fi
+
+# After the transform, so it edits the file the transform wrote; the backup above holds the
+# original. Its own step, like the ones below: a failure here must not undo the rest.
+if statusline_done="$(python3 "$ROOT/cli/qctx.py" statusline install --apply --settings "$SETTINGS" 2>&1)"; then
+  say "$statusline_done"
+else
+  fail "statusLine: $statusline_done"
 fi
 
 # INDEPENDENT steps: if one above fails, these still have to be able to run (or not run)
