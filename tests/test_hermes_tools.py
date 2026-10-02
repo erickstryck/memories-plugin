@@ -397,7 +397,7 @@ class TestTheConfigAToolCallRunsAgainst(unittest.TestCase):
     def _loading(self, cfg):
         """A `core.load` that records its calls. Overrides the module-level guard for this
         test only — deliberately, since this is the one behaviour that must call it."""
-        def load():
+        def load(**kwargs):
             self.loads.append(1)
 
             return cfg
@@ -425,7 +425,7 @@ class TestTheConfigAToolCallRunsAgainst(unittest.TestCase):
     def test_an_unconfigured_install_says_what_the_OPERATOR_has_to_do(self):
         """A ConfigError here is not the model's fault and it cannot fix it, so the message
         has to name the operator's action instead of the model's argument."""
-        def raising():
+        def raising(**kwargs):
             raise core.ConfigError("memory_collection is not configured (QCTX_...)")
 
         with unittest.mock.patch.object(core, "load", raising):

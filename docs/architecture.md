@@ -337,7 +337,8 @@ archive was not consulted. Without that warning, an absence of results is
 indistinguishable from "there is no precedent", and that is how something gets called
 unprecedented without anyone having looked.
 
-`checkpoint.py` injects the complete writing procedure every N interactions. The text
+`checkpoint.py` injects the complete writing procedure every N interactions, N being the
+`checkpoint_interval` setting both hosts read from `core/config.py`. The text
 is self-sufficient on purpose: a one-line reminder produces vague, duplicated,
 metadata-less memory, and the cost shows up months later.
 

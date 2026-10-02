@@ -72,6 +72,66 @@ class TestEveryNumericFieldIsCovered(unittest.TestCase):
                 self.assertEqual(getattr(cfg, name), int(config.DEFAULTS[name]))
 
 
+class TestTheCheckpointIntervalIsAConfigSetting(unittest.TestCase):
+    """How often the write procedure is handed to the model. It was an environment variable
+    only, read by each host on its own, so `qctx config set` could not reach it and the two
+    reads were two copies of one rule. It is a `Config` field now, resolved like every other:
+    environment, then file, then default."""
+
+    def test_the_file_sets_it(self):
+        cfg = config.load(a_config_file(checkpoint_interval=2), env={})
+        self.assertEqual(cfg.checkpoint_interval, 2)
+
+    def test_the_default_is_five(self):
+        self.assertEqual(config.load(a_config_file(), env={}).checkpoint_interval, 5)
+
+    def test_the_environment_wins_over_the_file_and_the_legacy_name_still_counts(self):
+        path = a_config_file(checkpoint_interval=2)
+        self.assertEqual(config.load(path, env={"QCTX_CHECKPOINT_INTERVAL": "3"})
+                         .checkpoint_interval, 3)
+        self.assertEqual(config.load(path, env={"REMEMBER_INTERVAL": "4"})
+                         .checkpoint_interval, 4)
+
+    def test_a_malformed_value_falls_back_and_SAYS_so(self):
+        """Falling back silently hides the typo: the hook's own test demands the note."""
+        notes = []
+        cfg = config.load(a_config_file(), env={"QCTX_CHECKPOINT_INTERVAL": "5x"},
+                          note=notes.append)
+        self.assertEqual(cfg.checkpoint_interval, 5)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("QCTX_CHECKPOINT_INTERVAL", notes[0])
+        self.assertIn("not a number", notes[0])
+
+    def test_a_valid_configuration_says_nothing(self):
+        notes = []
+        config.load(a_config_file(checkpoint_interval=7), env={}, note=notes.append)
+        self.assertEqual(notes, [])
+
+    def test_config_set_through_the_real_entry_point(self):
+        """The wiring, not the handler: `config set` then `config show`, as typed."""
+        import subprocess
+        import sys
+        cli = Path(__file__).resolve().parent.parent / "cli" / "qctx.py"
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL")}
+        env["QCTX_CONFIG"] = str(path)
+
+        def qctx(*args):
+            return subprocess.run([sys.executable, str(cli), *args], capture_output=True,
+                                  text=True, env=env, timeout=60)
+
+        done = qctx("config", "set", "checkpoint-interval", "10")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(path.read_text())["checkpoint_interval"], 10)
+        shown = json.loads(qctx("--json", "config", "show").stdout)
+        self.assertEqual(shown["checkpoint_interval"], 10)
+        refused = qctx("config", "set", "checkpoint-interval", "10x")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(json.loads(path.read_text())["checkpoint_interval"], 10,
+                         "a refused value reached the file")
+
+
 class TestTheCLIRefusesWhatTheLoaderWouldHaveToTolerate(unittest.TestCase):
     """`load` degrading and `config set` refusing are the two halves of one decision: be
     tolerant where a bad value is already on disk and you must still start, be strict at the

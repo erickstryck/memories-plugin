@@ -691,7 +691,7 @@ def _ask_number(prompt: str, current) -> int | None:
     """A whole number, or nothing. It RE-ASKS instead of raising.
 
     `int(entry)` on the last question threw an uncaught `ValueError` after up to
-    fourteen answers had been typed and before `core.save` had written any of them: one
+    fifteen answers had been typed and before `core.save` had written any of them: one
     typo cost the whole pass.
     """
     while True:
@@ -754,8 +754,8 @@ def _ask_config(cfg, interactive: bool = True, suggestions=()) -> None:
     with no answers has nothing to act on. Writing the defaults over a working config
     because nobody was there to object would be worse than the crash this replaced.
 
-    "Every configuration value is kept" is about the fourteen that are TYPED.
-    `vector_size` is the fifteenth and is never typed — `_detect_vector_size` runs one
+    "Every configuration value is kept" is about the fifteen that are TYPED.
+    `vector_size` is the sixteenth and is never typed: `_detect_vector_size` runs one
     line after this returns and writes whatever the endpoint answers, terminal or not,
     which is the whole reason the field is in `DETECTED_FIELDS`. The message says so,
     because a sentence the next line falsifies is worse than no sentence.
@@ -815,7 +815,7 @@ def _ask_config(cfg, interactive: bool = True, suggestions=()) -> None:
 
 
 def _detect_vector_size() -> None:
-    """The fifteenth field, and the only one the wizard must NOT ask for.
+    """The sixteenth field, and the only one the wizard must NOT ask for.
 
     A hand-typed dimension is a number that disagrees with the server the day the model
     changes, and the compatibility guard then blames the collection. `cmd_setup` has
@@ -824,7 +824,7 @@ def _detect_vector_size() -> None:
     was green over a field nothing could set.
 
     An unreachable endpoint is not an error here. The run already reports it as a
-    blocker, and raising at this point would throw away the fourteen answers just typed.
+    blocker, and raising at this point would throw away the fifteen answers just typed.
     """
     cfg = core.load()
     try:

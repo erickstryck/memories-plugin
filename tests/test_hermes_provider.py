@@ -263,6 +263,12 @@ class TestManifest(unittest.TestCase):
         self.assertTrue("register_memory_provider" in head or "MemoryProvider" in head)
 
 
+def a_config(**over):
+    """A real `Config`, so the provider reads its settings the way production does."""
+    from core import config
+    return config.Config(**{**config.DEFAULTS, **over})
+
+
 class _NoRealHermesHome(unittest.TestCase):
     """Base for every class here that calls `prefetch`, pinning `HERMES_HOME` at a temp dir.
 
@@ -757,9 +763,8 @@ class TestCheckpointCadence(_NoRealHermesHome):
     def _provider(self, interval):
         from core.retrieval import Outcome
         p = MemoriesProvider()
-        p._cfg = object()
+        p._cfg = a_config(checkpoint_interval=interval)
         p._state_dir = Path(tempfile.mkdtemp())
-        p.CHECKPOINT_INTERVAL = interval
 
         class FakeStore:
             def recall(self, queries, policy, top_k, suppressed=None):
@@ -826,6 +831,64 @@ class TestCheckpointCadence(_NoRealHermesHome):
         self.assertNotIn("memory checkpoint", out)
 
 
+class TestTheCheckpointIntervalComesFromTheConfig(unittest.TestCase):
+    """`qctx config set checkpoint-interval N` has to move hermes too, from its next session.
+
+    In a FRESH SUBPROCESS, for the reason `TestConfigSchema` gives: the config path is frozen
+    at import, so only a child started with `QCTX_CONFIG` in its environment reads a
+    throwaway file instead of the operator's real one."""
+
+    SCRIPT = (
+        "import sys, json; sys.path.insert(0, %r)\n"
+        "from hosts.hermes import MemoriesProvider\n"
+        "from core.retrieval import Outcome\n"
+        "class NoHits:\n"
+        "    reranker = None\n"
+        "    def recall(self, queries, policy, top_k, suppressed=None):\n"
+        "        return [], Outcome(candidates=1, best_dense=0.2)\n"
+        "p = MemoriesProvider()\n"
+        "print(json.dumps({'available': p.is_available()}))\n"
+        "p._store = NoHits()\n"
+        "fired = []\n"
+        "for turn in range(1, 7):\n"
+        "    p.on_turn_start(turn, 'a real question about the archive')\n"
+        "    if 'memory checkpoint' in p.prefetch('a real question about the archive'):\n"
+        "        fired.append(turn)\n"
+        "print(json.dumps(fired))\n"
+    ) % str(REPO)
+
+    def _fired(self, file_interval, env_interval=None) -> list:
+        tmp = tempfile.mkdtemp()
+        cfg = Path(tmp) / "config.json"
+        cfg.write_text(json.dumps({"qdrant_url": "http://127.0.0.1:9",
+                                   "api_base_url": "http://127.0.0.1:9",
+                                   "memory_collection": "probe_memories",
+                                   "checkpoint_interval": file_interval}))
+        env = dict(os.environ, QCTX_CONFIG=str(cfg), QCTX_STATE_DIR=tmp, HERMES_HOME=tmp,
+                   QCTX_DAEMON_AUTOSTART_DISABLED="1")
+        for name in ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL",
+                     "QCTX_CHECKPOINT_DISABLED"):
+            env.pop(name, None)
+        if env_interval is not None:
+            env["QCTX_CHECKPOINT_INTERVAL"] = env_interval
+        out = subprocess.run([sys.executable, "-c", self.SCRIPT], capture_output=True,
+                             text=True, env=env, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        lines = out.stdout.strip().splitlines()
+        self.assertEqual(json.loads(lines[0]), {"available": True}, out.stderr)
+
+        return json.loads(lines[-1])
+
+    def test_the_file_sets_the_cadence(self):
+        self.assertEqual(self._fired(2), [2, 4, 6])
+
+    def test_the_environment_still_wins_over_the_file(self):
+        self.assertEqual(self._fired(2, env_interval="3"), [3, 6])
+
+    def test_zero_in_the_file_turns_it_off(self):
+        self.assertEqual(self._fired(0), [])
+
+
 class TestCheckpointIntervalIsRobust(unittest.TestCase):
     """`CHECKPOINT_INTERVAL` is read at import time, before any per-call guard runs, and it
     now feeds the SAME call that produces the recall block. A malformed value here is
@@ -834,11 +897,14 @@ class TestCheckpointIntervalIsRobust(unittest.TestCase):
     """
 
     def _read_it(self, env):
+        """The interval the provider's own configuration carries, from a fresh process (the
+        config path is frozen at import), with a throwaway config file."""
         script = (
             "import sys; sys.path.insert(0, %r)\n"
             "from hosts.hermes import MemoriesProvider\n"
-            "print(MemoriesProvider().CHECKPOINT_INTERVAL)\n"
+            "print(MemoriesProvider()._config().checkpoint_interval)\n"
         ) % str(REPO)
+        env = dict(env, QCTX_CONFIG=str(Path(tempfile.mkdtemp()) / "config.json"))
         out = subprocess.run([sys.executable, "-c", script], capture_output=True,
                              text=True, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -892,7 +958,6 @@ _KNOB = re.compile(
 KNOB_SOURCES = {
     "hosts/hermes/__init__.py": "from hosts.hermes import MemoriesProvider as M\n",
     "hooks/recall.py": "import recall as M\n",
-    "hooks/checkpoint.py": "import checkpoint as M\n",
     "hooks/bigfile.py": "import bigfile as M\n",
     "hosts/hermes/bigfile.py": "from hosts.hermes import bigfile as M\n",
 }
@@ -993,13 +1058,12 @@ class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
                                    f"blind on that file")
         self.assertGreaterEqual(len(per_file["hosts/hermes/__init__.py"]), 9,
                                 f"only found {per_file['hosts/hermes/__init__.py']}")
-        for expected in ("TOP_K", "MAX_CHARS", "STRICT_FLOOR", "CHECKPOINT_INTERVAL"):
+        for expected in ("TOP_K", "MAX_CHARS", "STRICT_FLOOR"):
             self.assertIn(expected, per_file["hosts/hermes/__init__.py"])
         # The hook's own knobs, TOP_K above all: it is the knob this scan was extended for.
         for expected in ("TOP_K", "TOP_K_STRICT", "MAX_CHARS", "BREAKER_SECONDS"):
             self.assertIn(expected, per_file["hooks/recall.py"],
                           "the hook's numeric knobs are not being scanned")
-        self.assertIn("INTERVAL", per_file["hooks/checkpoint.py"])
         # The two file-read guards. Their thresholds are read at IMPORT time, above each
         # adapter's own catch-all — which is exactly what makes them dangerous:
         # `QCTX_BIGFILE_FLOOR_PCT=20%` raising there takes down a hook that runs before
@@ -1042,7 +1106,12 @@ class TestEveryNumericKnobToleratesAMalformedValue(unittest.TestCase):
         reviews — would be invisible to it while still killing the host. This forbids the
         shape itself, anywhere in the file.
         """
-        for rel in KNOB_SOURCES:
+        # EVERY file of both hosts, not only the ones with import-time knobs: the checkpoint
+        # hook left that list when its interval moved into `core.config`, and the rule this
+        # enforces (no raw environment value cast where it is read) still applies to it.
+        for rel in sorted({*KNOB_SOURCES, *(str(p.relative_to(REPO)) for p in
+                                           (*(REPO / "hooks").glob("*.py"),
+                                            *(REPO / "hosts" / "hermes").glob("*.py")))}):
             with self.subTest(source=rel):
                 self.assertEqual(bare_env_casts(rel), [],
                                  f"{rel} casts a raw environment read instead of going "
@@ -1098,9 +1167,8 @@ class TestCheckpointFailureDoesNotCostRecall(_NoRealHermesHome):
         from core.retrieval import CE, Outcome
         from tests.test_blocks import FakeHit
         p = MemoriesProvider()
-        p._cfg = object()
+        p._cfg = a_config(checkpoint_interval=1)
         p._state_dir = Path(tempfile.mkdtemp())
-        p.CHECKPOINT_INTERVAL = 1
 
         class FakeStore:
             def recall(self, queries, policy, top_k, suppressed=None):
@@ -1291,6 +1359,15 @@ class TestConfigSchema(unittest.TestCase):
         by_key = {f["key"]: f for f in MemoriesProvider().get_config_schema()}
         self.assertFalse(by_key["memory_collection"]["secret"])
         self.assertFalse(by_key["qdrant_url"]["secret"])
+
+    def test_every_numeric_field_is_typed_integer(self):
+        """Typed from `Config` itself: a hand-kept pair here left `checkpoint_interval` to be
+        offered to `hermes memory setup` as free text."""
+        from core.config import numeric_fields
+        by_key = {f["key"]: f for f in MemoriesProvider().get_config_schema()}
+        self.assertIn("checkpoint_interval", numeric_fields())
+        for name in numeric_fields():
+            self.assertEqual(by_key[name]["type"], "integer", name)
 
     def test_the_schema_covers_every_configurable_field(self):
         from core.config import Config

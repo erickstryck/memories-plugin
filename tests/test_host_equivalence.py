@@ -275,14 +275,20 @@ class TestBothHostsShareOneConfiguration(unittest.TestCase):
 
     def test_the_checkpoint_knobs_have_the_same_names_in_both_hosts(self):
         """The write side of the same claim: the cadence rides inside `prefetch` on
-        hermes and inside its own hook on claude-code, but the knob names and meanings —
-        QCTX_CHECKPOINT_INTERVAL, QCTX_CHECKPOINT_DISABLED — must be the ones a deployer
-        already knows from the claude-code side, not a second vocabulary for the same
-        setting."""
+        hermes and inside its own hook on claude-code, but the knob names and meanings
+        must be the ones a deployer already knows, not a second vocabulary.
+
+        The INTERVAL has one reader for both hosts now, `core.config` (it is the
+        `checkpoint_interval` setting), so its names are the config's and neither host may
+        read them on its own. What each host still reads itself, the DISABLED switch, must
+        carry the same name in both."""
         import re
+        from core import config
+        owned = set(config.ENV_ALIASES["checkpoint_interval"])
+        self.assertIn("QCTX_CHECKPOINT_INTERVAL", owned)
         pattern = re.compile(r'QCTX_CHECKPOINT_[A-Z_]+')
-        hook = set(pattern.findall((REPO / "hooks" / "checkpoint.py").read_text()))
-        host = set(pattern.findall(hermes_adapter_source()))
+        hook = set(pattern.findall((REPO / "hooks" / "checkpoint.py").read_text())) - owned
+        host = set(pattern.findall(hermes_adapter_source())) - owned
         self.assertTrue(hook, "no QCTX_CHECKPOINT_* names found in the hook")
         self.assertEqual(hook, host,
                          f"only in claude-code: {hook - host}; only in hermes: {host - hook}")
@@ -2257,8 +2263,9 @@ class TestTheCHECKPOINTIsNotLostOnASkippedTurn(unittest.TestCase):
             def recall(self, queries, policy, top_k, suppressed=None):
                 return [], Outcome(candidates=0, best_dense=0.0)
 
+        from core import config
         p = MemoriesProvider()
-        p._cfg = object()
+        p._cfg = config.Config(**config.DEFAULTS)
         p._store = NoHits()
         os.environ["QCTX_STATE_DIR"] = str(tmp)
         self.addCleanup(os.environ.pop, "QCTX_STATE_DIR", None)
@@ -2275,7 +2282,7 @@ class TestTheCHECKPOINTIsNotLostOnASkippedTurn(unittest.TestCase):
         per-session state". This was that task."""
         with tempfile.TemporaryDirectory() as tmp:
             p = self._provider(tmp)
-            interval = int(p.CHECKPOINT_INTERVAL)
+            interval = p._config().checkpoint_interval
             for turn in range(1, interval + 1):
                 p.on_turn_start(turn, HITS_PROMPT)
                 p.prefetch(HITS_PROMPT, session_id="a")
@@ -2294,7 +2301,7 @@ class TestTheCHECKPOINTIsNotLostOnASkippedTurn(unittest.TestCase):
     def test_a_due_turn_that_was_skipped_fires_on_the_next_one(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._provider(tmp)
-            interval = int(p.CHECKPOINT_INTERVAL)
+            interval = p._config().checkpoint_interval
             fired = []
             for turn in range(1, interval + 3):
                 p.on_turn_start(turn, HITS_PROMPT)
@@ -2312,7 +2319,7 @@ class TestTheCHECKPOINTIsNotLostOnASkippedTurn(unittest.TestCase):
         the whole point of having an interval."""
         with tempfile.TemporaryDirectory() as tmp:
             p = self._provider(tmp)
-            interval = int(p.CHECKPOINT_INTERVAL)
+            interval = p._config().checkpoint_interval
             fired = []
             for turn in range(1, interval * 2 + 2):
                 p.on_turn_start(turn, HITS_PROMPT)
@@ -2420,11 +2427,12 @@ class TestTheINDICATORCannotDescribeAnEarlierTurn(unittest.TestCase):
                              "the indicator still carried the previous turn's count")
 
 
-class TestTheThreeCopiesOfTheKNOBReaderAgree(unittest.TestCase):
-    """The tolerant numeric read exists three times: `hooks/recall.py::env_num`,
-    `hooks/checkpoint.py::env_num` and `hosts/hermes/__init__.py::_env_num`. The existing
-    guards derive the knob NAMES from the source of all three, which catches a knob spelled
-    differently — but nothing compares what the three DO with the same input.
+class TestTheCopiesOfTheKNOBReaderAgree(unittest.TestCase):
+    """The tolerant numeric read exists twice: `hooks/recall.py::env_num` and
+    `hosts/hermes/__init__.py::_env_num`. (`hooks/checkpoint.py` carried a third copy until
+    its one knob, the interval, became the `checkpoint_interval` setting.) The existing
+    guards derive the knob NAMES from the source of each, which catches a knob spelled
+    differently, but nothing compared what the copies DO with the same input.
 
     That is the half that matters for a user: the same `QCTX_RECALL_MAX_MEMORIES=0` must reach
     the same number on both hosts, or the same typo degrades one and silences the other. And
@@ -2442,26 +2450,19 @@ class TestTheThreeCopiesOfTheKNOBReaderAgree(unittest.TestCase):
              ("abc", 0, 1, 1), ("", 0, 1, 1), ("nonsense", -5, 1, 1))
 
     def test_every_reader_gives_the_same_answer_for_the_same_input(self):
-        import hooks.checkpoint as checkpoint
         import hooks.recall as recall
         import hosts.hermes as hermes
 
-        readers = {"recall": recall.env_num, "checkpoint": checkpoint.env_num,
-                   "hermes": hermes._env_num}
+        readers = {"recall": recall.env_num, "hermes": hermes._env_num}
         for raw, default, minimum, expected in self.CASES:
             with mock.patch.dict(os.environ, {"QCTX_AGREE_PROBE": raw}, clear=False):
                 answers = {}
                 for label, reader in readers.items():
-                    try:
-                        answers[label] = reader("QCTX_AGREE_PROBE", "LEGACY_PROBE",
-                                                str(default), int, minimum)
-                    except TypeError:
-                        # checkpoint's copy may not carry `minimum`; that IS a divergence.
-                        answers[label] = reader("QCTX_AGREE_PROBE", "LEGACY_PROBE",
-                                                str(default), int)
+                    answers[label] = reader("QCTX_AGREE_PROBE", "LEGACY_PROBE",
+                                            str(default), int, minimum)
                 with self.subTest(raw=raw):
                     self.assertEqual(set(answers.values()), {expected},
-                                     f"the three readers disagree on {raw!r}: {answers}")
+                                     f"the readers disagree on {raw!r}: {answers}")
 
 
 class TestTheBREAKERIsSharedEvenWithoutTheKnob(unittest.TestCase):

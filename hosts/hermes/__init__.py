@@ -157,7 +157,6 @@ class MemoriesProvider(_Base):
     # WHICH KNOBS CARRY A FLOOR, and why the others must not. `minimum=1` goes on every knob
     # that can zero the RESULT SET — the four below — because a zero there produces a false
     # claim that the archive holds nothing (see `_env_num`). It deliberately does NOT go on:
-    #   - CHECKPOINT_INTERVAL: 0 DISABLES the nudge, a documented and tested feature.
     #   - BREAKER_SECONDS: 0 disables the breaker (`core.breaker.Breaker`: `cooldown <= 0`),
     #     likewise deliberate.
     #   - the three floors: they are thresholds, so 0 lets everything through rather than
@@ -193,18 +192,6 @@ class MemoriesProvider(_Base):
     TOP_K = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "20", int, minimum=1)
     TOP_K_STRICT = _env_num("QCTX_RECALL_TOP_K", "RECALL_TOP_K", "8", int, minimum=1)
 
-    #: Turns between checkpoint nudges. Same env var as the claude-code hook
-    #: (QCTX_CHECKPOINT_INTERVAL, legacy REMEMBER_INTERVAL) — the equivalence test in
-    #: test_host_equivalence.py extracts both names from this file and requires them to
-    #: match hooks/checkpoint.py, because a setting that moves one host and not the other
-    #: is a configuration that only looks shared.
-    #:
-    #: Read tolerantly, through the same `_env_num` every other numeric knob above uses:
-    #: this is a class attribute computed at IMPORT time, before any guard runs, and on
-    #: this host it feeds `prefetch` — the same call that produces the recall block. A
-    #: bad value here is worse than in the hook, where it can only cost itself; here it
-    #: would take recall down with it if it raised.
-    CHECKPOINT_INTERVAL = _env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)
 
     BUDGET = blocks.Budget(max_memories=MAX_MEMORIES, max_chars=MAX_CHARS,
                            max_per_mem=MAX_PER_MEM,
@@ -237,7 +224,7 @@ class MemoriesProvider(_Base):
         """Whether the plugin is configured. NO network calls — the contract forbids them,
         and `is_available` gates initialization, so a slow probe here delays every start."""
         try:
-            cfg = core.load()
+            cfg = core.load(note=_note)
             cfg.require_qdrant()
             cfg.resolved_embed_url()
             cfg.require_memory_collection()
@@ -592,10 +579,14 @@ class MemoriesProvider(_Base):
             # turn is not a multiple either. claude-code cannot hit this: its checkpoint is a
             # hook with its own counter, which advances once per event and cannot step over a
             # multiple. `due_since` is what makes the two hosts agree.
-            if not session_state.due_since(turn, self._checkpoint_at,
-                                           self.CHECKPOINT_INTERVAL):
+            # THE CONFIG'S VALUE, the one `qctx config set checkpoint-interval` writes and the
+            # claude-code hook reads too: one reader for both hosts, environment first.
+            # Loaded with the rest of the configuration when the session's provider checks it
+            # is available, so a change applies from the next session.
+            every = self._config().checkpoint_interval
+            if not session_state.due_since(turn, self._checkpoint_at, every):
                 return block
-            nudge = CHECKPOINT_PROCEDURE.format(count=turn, interval=self.CHECKPOINT_INTERVAL)
+            nudge = CHECKPOINT_PROCEDURE.format(count=turn, interval=every)
             self._checkpoint_at = int(turn)
 
             return f"{block}\n\n{nudge}" if block else nudge
@@ -738,7 +729,7 @@ class MemoriesProvider(_Base):
         """
         if self._cfg is None:
             try:
-                self._cfg = core.load()
+                self._cfg = core.load(note=_note)
             except core.CoreError as exc:
                 self._reason = str(exc)
 
@@ -754,7 +745,7 @@ class MemoriesProvider(_Base):
         """
         from dataclasses import fields as dc_fields
 
-        from core.config import DEFAULTS, ENV_ALIASES, SECRET_FIELDS, Config
+        from core.config import DEFAULTS, ENV_ALIASES, SECRET_FIELDS, Config, numeric_fields
 
         described = {
             "qdrant_url": "Qdrant base URL, e.g. https://host/qdrant",
@@ -775,6 +766,8 @@ class MemoriesProvider(_Base):
             "context_window": "Model's context window in tokens; overrides the built-in "
                                "table when the bare model name is ambiguous (e.g. a 1M "
                                "variant). 0 means unknown/use the table.",
+            "checkpoint_interval": "Turns between the reminder to save durable memories. "
+                                   "0 turns it off.",
         }
         out = []
         for f in dc_fields(Config):
@@ -784,7 +777,7 @@ class MemoriesProvider(_Base):
                 "description": described[f.name],
                 "secret": secret,
                 "required": f.name in ("qdrant_url", "memory_collection"),
-                "type": "integer" if f.name in ("vector_size", "context_window") else "text",
+                "type": "integer" if f.name in numeric_fields() else "text",
             }
             default = DEFAULTS.get(f.name)
             if default not in ("", None):

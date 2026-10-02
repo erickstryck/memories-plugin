@@ -15,7 +15,7 @@ the portable core and the world.
 import json
 import os
 
-from . import knobs, statefile
+from . import statefile
 from .errors import CoreError
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
@@ -43,6 +43,7 @@ ENV_ALIASES = {
     "repos_registry_collection": ("QCTX_REPOS_REGISTRY_COLLECTION", "REPOS_REGISTRY_COLLECTION"),
     "vector_size": ("QCTX_VECTOR_SIZE", "VECTOR_SIZE"),
     "context_window": ("QCTX_CONTEXT_WINDOW",),
+    "checkpoint_interval": ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL"),
 }
 
 DEFAULTS = {
@@ -61,6 +62,7 @@ DEFAULTS = {
     "repos_registry_collection": "memories_repos_registry",
     "vector_size": 1024,
     "context_window": 0,
+    "checkpoint_interval": 5,
 }
 
 
@@ -85,6 +87,10 @@ class Config:
     repos_registry_collection: str
     vector_size: int
     context_window: int = 0
+    #: Turns between the write procedure being handed to the model; 0 turns it off. Both
+    #: hosts read it from here, so `config set` reaches both and the file is the one place
+    #: it can be set, under the environment's override like every other field.
+    checkpoint_interval: int = 5
 
     def resolved_embed_url(self) -> str:
         """The full /embeddings URL.
@@ -214,18 +220,27 @@ def read_file(path: Path | None = None) -> dict:
         raise ConfigError(f"invalid config at {p}: {exc}") from exc
 
 
-def load(path: Path | None = None, env: dict | None = None) -> Config:
+def load(path: Path | None = None, env: dict | None = None, note=None) -> Config:
+    """The resolved configuration: environment, then file, then default.
+
+    `note` is the CALLER's channel for a value that could not be used, the way it is in
+    `core/knobs.py`: the decision (fall back to the default) lives here, while where the
+    operator reads about it (a hook's stderr, a prefixed line from hermes) belongs to the
+    host. Without a `note` the fallback is silent, as it always was.
+    """
     env = os.environ if env is None else env
     from_file = read_file(path)
     values = {}
+    source = {}
     for field, aliases in ENV_ALIASES.items():
         value = None
         for name in aliases:
             if env.get(name):
-                value = env[name]
+                value, source[field] = env[name], (name, "")
                 break
         if value is None:
             value = from_file.get(field, DEFAULTS[field])
+            source[field] = (field, f" in {path or DEFAULT_CONFIG_PATH}")
         values[field] = value
     # TOLERANT, AND DERIVED FROM THE DATACLASS. These are values a person types, in a file or
     # in the environment, so a typo is ordinary — and bare `int()` here made one typo fatal to
@@ -235,7 +250,14 @@ def load(path: Path | None = None, env: dict | None = None) -> Config:
     # naming the two by hand is the same lesson this project already paid for once, when nine
     # knobs read through a tolerant helper and one did not: the odd one out is invisible.
     for numeric in _NUMERIC_FIELDS:
-        values[numeric] = knobs.as_num(values[numeric], DEFAULTS[numeric], int)
+        try:
+            values[numeric] = int(values[numeric])
+        except (TypeError, ValueError):
+            if note:
+                name, where = source[numeric]
+                note(f"{name}={values[numeric]!r}{where} is not a number, "
+                     f"using {DEFAULTS[numeric]}")
+            values[numeric] = DEFAULTS[numeric]
 
     return Config(**values)
 

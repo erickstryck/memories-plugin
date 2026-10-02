@@ -140,5 +140,39 @@ class TestCheckpointFires(unittest.TestCase):
         self.assertEqual(run_hook("beta", "2", self.tmp.name)[0].strip(), "")
 
 
+class TestTheIntervalComesFromTheConfig(unittest.TestCase):
+    """`qctx config set checkpoint-interval N` has to move THIS hook, on the next prompt."""
+
+    def _run(self, times: int, file_interval, env_interval=None) -> list:
+        tmp = tempfile.mkdtemp()
+        cfg = Path(tmp) / "config.json"
+        cfg.write_text(json.dumps({"checkpoint_interval": file_interval}))
+        env = dict(os.environ, QCTX_STATE_DIR=tmp, QCTX_CONFIG=str(cfg))
+        for name in ("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL",
+                     "QCTX_CHECKPOINT_DISABLED"):
+            env.pop(name, None)
+        if env_interval is not None:
+            env["QCTX_CHECKPOINT_INTERVAL"] = env_interval
+        fired = []
+        for turn in range(1, times + 1):
+            proc = subprocess.run([sys.executable, str(HOOK)],
+                                  input=json.dumps({"session_id": "cfg"}),
+                                  capture_output=True, text=True, env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            if "memory checkpoint" in proc.stdout:
+                fired.append(turn)
+
+        return fired
+
+    def test_the_file_sets_the_cadence(self):
+        self.assertEqual(self._run(4, file_interval=2), [2, 4])
+
+    def test_the_environment_still_wins_over_the_file(self):
+        self.assertEqual(self._run(3, file_interval=3, env_interval="1"), [1, 2, 3])
+
+    def test_zero_in_the_file_turns_it_off(self):
+        self.assertEqual(self._run(5, file_interval=0), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

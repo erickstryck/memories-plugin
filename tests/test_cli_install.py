@@ -280,7 +280,7 @@ class WritingPass(unittest.TestCase):
 
     def test_a_non_numeric_context_window_is_re_asked_not_a_crash(self):
         """`int(entry)` raised an uncaught ValueError on the LAST question, after
-        fourteen answers had been typed and before `core.save` had written any of
+        fifteen answers had been typed and before `core.save` had written any of
         them. The whole pass was lost to one typo."""
         answers = "\n".join([
             "https://q.example", "https://e.example/v1", "qkey", "skey", "mem",
@@ -497,6 +497,8 @@ class EveryFieldIsSet(unittest.TestCase):
             return f"{self.base}/embeddings"
         if field == "context_window":
             return "200000"
+        if field == "checkpoint_interval":
+            return "7"
         if field.endswith("_url"):
             return f"https://{field.replace('_', '-')}.example"
         if field.endswith("_collection"):
@@ -504,7 +506,7 @@ class EveryFieldIsSet(unittest.TestCase):
 
         return f"value-{field}"
 
-    def test_the_wizard_sets_all_fifteen(self):
+    def test_the_wizard_sets_all_sixteen(self):
         from core import config, install
         asked = install.REQUIRED_FIELDS + install.OPTIONAL_FIELDS
         answers = "\n".join(self.value_for(f) for f in asked) + "\n"
@@ -705,7 +707,7 @@ class ConfigPass(unittest.TestCase):
         `cmd_setup` printed the same list twenty lines away. The design's pass 1 says
         this collection is asked "with the suggestions of `suggest_collections`"."""
         printed, _ = self.ask_config(
-            ["", "", "1"] + [""] * 9,
+            ["", "", "1"] + [""] * 10,
             suggestions=[{"collection": "claude_memory", "points": 812},
                          {"collection": "old_archive", "points": 12}])
         self.assertIn("claude_memory", printed)
@@ -718,14 +720,14 @@ class ConfigPass(unittest.TestCase):
         the paste-a-secret-every-run reflex the design forbids, taught by the tool."""
         secrets_file = self.home / ".secrets"
         secrets_file.write_text("export QDRANT_SERVICE_API_KEY=abcdef\n")
-        _, prompts = self.ask_config([""] * 12)
+        _, prompts = self.ask_config([""] * 13)
         self.assertIn("already set as QDRANT_SERVICE_API_KEY", prompts[0])
         self.assertIn(str(secrets_file), prompts[0])
         self.assertIn("MISSING", prompts[1])          # the other key really is missing
 
     def test_a_key_in_the_environment_is_recognised_too(self):
         _, prompts = self.ask_config(
-            [""] * 12, env={"HOME": str(self.home), "SERVER_API_KEY": "abc"})
+            [""] * 13, env={"HOME": str(self.home), "SERVER_API_KEY": "abc"})
         self.assertIn("already set as SERVER_API_KEY in the environment", prompts[1])
 
 

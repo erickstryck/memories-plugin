@@ -12,7 +12,9 @@ nobody knows which one holds. Whoever reads the block has to be able to act with
 opening anything else.
 
 Configuration:
-    QCTX_CHECKPOINT_INTERVAL   interactions between checkpoints (default 5)
+    checkpoint_interval        interactions between checkpoints (default 5, 0 turns it off):
+                               `qctx config set checkpoint-interval N`, or the environment's
+                               QCTX_CHECKPOINT_INTERVAL, which wins over the file
     QCTX_CHECKPOINT_DISABLED   "1" turns it off
     QCTX_STATE_DIR             where to keep the counter
 """
@@ -23,44 +25,39 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import knobs, names  # noqa: E402
+from core import config, knobs, names  # noqa: E402
 from core import session_state as st  # noqa: E402
 from core import statefile  # noqa: E402
 from core.prompts import CHECKPOINT_PROCEDURE as PROCEDURE  # noqa: E402
 
 
-def env_num(name: str, legacy: str, default: str, kind=int, minimum=None):
-    """This host's channel for the shared clamped read in `core/knobs.py`.
+def _note(line: str) -> None:
+    """This hook's channel for a configuration value it could not use.
 
-    Read at module load, ABOVE `main`'s catch-all: this file had neither the tolerant read nor
-    a top-level guard, so `QCTX_CHECKPOINT_INTERVAL=5x` produced a traceback and a non-zero
-    exit on EVERY interaction of every session.
-
-    THE SHARED COPY ALSO FIXED A DIVERGENCE. This one carried no `minimum` and the other two
-    did, so with a floor of 1 a value of `0` gave 1 in recall and hermes and 0 here, and `-1`
-    gave 1, 1 and -1 — the same typo degrading one surface and silencing another. The
-    knob-name guards could not see it: identical names were never the question.
+    ALWAYS BY FILE DESCRIPTOR, never `print(file=sys.stderr)`. Two requirements meet here and
+    both are real: `test_a_malformed_interval_does_not_kill_the_hook` wants the typo visible
+    ("falling back silently hides the typo"), and the protocol this hook prints on stdout must
+    survive a closed fd 2, where `print(file=sys.stderr)` silently falls back to stdout and
+    corrupts the JSON, which no `try` can catch because writing SUCCEEDS. `os.write(2, ...)`
+    raises on a closed fd instead, so the note is dropped exactly when delivering it would
+    cost the block, and never misdelivered.
     """
-    def report(line: str) -> None:
-        # ALWAYS BY FILE DESCRIPTOR, never `print(file=sys.stderr)`. Two requirements meet here
-        # and both are real: `test_a_malformed_interval_does_not_kill_the_hook` wants the typo
-        # visible ("falling back silently hides the typo"), and the protocol this hook prints
-        # on stdout must survive a closed fd 2 — where `print(file=sys.stderr)` silently falls
-        # back to stdout and corrupts the JSON, which no `try` can catch because writing
-        # SUCCEEDS. `os.write(2, ...)` raises on a closed fd instead, so the note is dropped
-        # exactly when delivering it would cost the block, and never misdelivered.
-        #
-        # The comment here used to claim this hook writes no protocol on stdout. It does:
-        # `main` ends in `print(json.dumps(...))`.
-        try:
-            os.write(2, f"checkpoint: {line}\n".encode())
-        except OSError:        # noqa: BLE001 — a lost note is cheaper than a lost block
-            pass
-
-    return knobs.clamped_num(name, legacy, default, kind, minimum, note=report)
+    try:
+        os.write(2, f"checkpoint: {line}\n".encode())
+    except OSError:        # noqa: BLE001 (a lost note is cheaper than a lost block)
+        pass
 
 
-INTERVAL = env_num("QCTX_CHECKPOINT_INTERVAL", "REMEMBER_INTERVAL", "5", int)
+def interval() -> int:
+    """Interactions between checkpoints, resolved by `core.config` like every other setting.
+
+    READ ON EVERY RUN, not at import: a hook is one short process per prompt, so
+    `qctx config set checkpoint-interval N` takes effect on the next prompt. It used to be an
+    environment variable read here and again in the hermes adapter, two copies of one rule;
+    the config is now its only reader, and the environment still wins over the file.
+    """
+    return config.load(note=_note).checkpoint_interval
+
 # `knobs.state_dir()` and not a fourth copy of this expression: `core/bindings.py`
 # already writes down why ("a third copy of where state lives is how the three start\n# to disagree"), and this file was one of the copies. Still a module-level constant
 # because a hook is one short process and the directory cannot change under it.
@@ -126,14 +123,15 @@ def _run() -> None:
     counter = STATE_DIR / f"checkpoint-{session}.count"
 
     n = bump(counter)
+    every = interval()
 
-    if not st.due(n, INTERVAL):
+    if not st.due(n, every):
         return  # silent on the intermediate interactions
 
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": PROCEDURE.format(count=n, interval=INTERVAL),
+            "additionalContext": PROCEDURE.format(count=n, interval=every),
         }
     }))
 

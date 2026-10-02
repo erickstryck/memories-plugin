@@ -235,6 +235,7 @@ Recognized variables (canonical first, legacy aliases accepted):
 | `repos_registry_collection` | `QCTX_REPOS_REGISTRY_COLLECTION`, `REPOS_REGISTRY_COLLECTION` |
 | `vector_size` | `QCTX_VECTOR_SIZE`, `VECTOR_SIZE` |
 | `context_window` | `QCTX_CONTEXT_WINDOW` |
+| `checkpoint_interval` | `QCTX_CHECKPOINT_INTERVAL`, `REMEMBER_INTERVAL` |
 
 The two API keys are the only settings that **cannot** go into the config file:
 `config set` refuses them and points at the environment variable instead. A plaintext
@@ -242,6 +243,23 @@ secret ends up in backups and in dotfile sync.
 
 `memory_collection` starts out **empty** on purpose: with no explicit choice the CLI
 refuses to operate, so there is no accidental write path into the wrong archive.
+
+### How often the model is asked to save
+
+Every N turns both hosts hand the model the procedure for writing down what the
+conversation produced (the "memory checkpoint"). N is `checkpoint_interval`, 5 by default:
+
+```bash
+qctx config set checkpoint-interval 10   # every 10 turns
+qctx config set checkpoint-interval 0    # never
+```
+
+Both hosts read the same setting. The claude-code hook applies it from the next prompt;
+hermes from its next session, since it reads its configuration when a session starts.
+Like every other setting, `QCTX_CHECKPOINT_INTERVAL` in the environment wins over the file,
+and `QCTX_CHECKPOINT_DISABLED=1` turns the checkpoint off whatever the interval says. A
+value that is not a number falls back to 5 and says so on stderr; `config set` refuses one
+outright.
 
 ### The case that breaks silently: a process with no shell
 
