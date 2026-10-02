@@ -30,9 +30,13 @@ ocuparia mais de 40% do que resta) só se ajustam por variável de ambiente
 
 1. O plugin descobre sozinho, nos dois hosts, o tamanho do contexto do modelo selecionado,
    de forma dinâmica. O `context_window` do config passa a ser o último recurso.
-2. No claude-code, a combinação A + B: ponte pela statusLine (valor exato) e dedução pelo
-   modelo selecionado quando a ponte ainda não gravou nada.
-3. No hermes, a função do próprio host.
+2. Nenhuma tabela fixa de modelos e nenhuma dedução pelo nome. O modelo selecionado e o
+   tamanho do seu contexto são identificados quando a sessão começa e de novo quando o
+   modelo é trocado. Isso reverte a parte "B" escolhida antes (dedução pelo modelo e tabela
+   por família), por decisão do usuário: "não faz sentido ter gravado o modelo e o nome de
+   modo fixo".
+3. No claude-code, a ponte pela statusLine (valor exato, informado pelo próprio claude-code).
+   No hermes, a função do próprio host.
 4. Os dois limites do guard passam a ser ajustáveis por `qctx config set`, com 0,20 e 0,40
    como padrão.
 
@@ -56,14 +60,15 @@ ocuparia mais de 40% do que resta) só se ajustam por variável de ambiente
 `core/windows.py` passa a ser o único dono da ordem, e cada host só fornece as fontes que
 tem:
 
-1. o valor que o host informou: no hermes, `get_model_context_length`; no claude-code, o
-   `context_window_size` gravado pela statusLine para esta sessão;
+1. o valor que o host informou para o modelo selecionado agora: no hermes,
+   `get_model_context_length`; no claude-code, o `context_window_size` gravado pela
+   statusLine para esta sessão;
 2. o valor que o endpoint informou, do cache que já existe (só hermes);
-3. a dedução pelo modelo: o sufixo `[1m]` no modelo selecionado vale 1.000.000; depois a
-   tabela, agora por família (prefixo), de modo que `claude-opus-5-5` resolve pela linha de
-   `claude-opus-5`, que continua sendo um teto com a justificativa do docstring;
-4. o `context_window` do config, se maior que 0;
-5. 0, e o guard libera a leitura, como hoje.
+3. o `context_window` do config, se maior que 0;
+4. 0, e o guard libera a leitura, como hoje.
+
+A tabela `MODEL_WINDOWS` de `core/windows.py` é removida, e com ela o caminho por nome de
+modelo.
 
 Cada fonte é uma função pequena que devolve um número ou 0; a ordem é uma lista. Uma fonte
 que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxima responde.
@@ -82,13 +87,22 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
   hook. Os arquivos de sessões mortas entram na varredura que já existe para os outros
   estados por sessão.
 
-### 3. Dedução pelo modelo selecionado (claude-code)
+### 3. Quando a identificação acontece
 
-- O modelo selecionado é lido do `settings.json` (usuário, depois projeto). Se ele tiver
-  `[1m]`, vale 1.000.000.
-- Senão, entra a tabela por família, com o modelo do transcript.
-- A medir antes de implementar: se `/model` no meio da sessão grava no `settings.json`. Se
-  não grava, isso fica dito na documentação, e a statusLine cobre o caso.
+- **Início da sessão e troca de modelo**, nos dois hosts:
+  - claude-code: a statusLine roda ao abrir a sessão e de novo quando o modelo muda, e cada
+    execução regrava `{model, context_window_size}`. O guard usa o último valor gravado para
+    a sessão.
+  - hermes: o tamanho é resolvido quando a sessão começa (`initialize`) e de novo quando o
+    modelo da sessão muda. O guard compara o modelo atual com o último resolvido e só chama
+    `get_model_context_length` quando ele mudou.
+- A medir antes de implementar: em que momento a primeira statusLine roda (antes do primeiro
+  tool call?) e se ela roda logo após um `/model`; no hermes, como o provider fica sabendo
+  da troca de modelo.
+- **Consequência que precisa ficar visível**: sem a statusLine instalada, o claude-code não
+  informa o tamanho do contexto a nenhum processo externo. Nesse caso o guard cai no config
+  e, sem ele, libera. Na v1.2.0 a tabela cobria `claude-opus-5` nessa situação; por isso o
+  `qctx install` oferece a statusLine e o `qctx setup` avisa quando o guard está desligado.
 
 ### 4. Limites do guard no config
 
