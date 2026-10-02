@@ -378,6 +378,49 @@ class TestTheEnrichmentCannotBlowTheHookDeadline(unittest.TestCase):
         self.assertIn("docs_search", reason)
 
 
+def publish_into(state_dir: str, session: str, window: int, guess: bool = False) -> None:
+    """What the statusLine would have published for `session`, into a hook's state dir."""
+    from core import hostwindow
+    with unittest.mock.patch.dict(os.environ, {"QCTX_STATE_DIR": state_dir}):
+        assert hostwindow.publish(session, "claude-opus-5-5[1m]", window, "claude-code",
+                                  guess=guess)
+
+
+class TestTheWindowComesFromTheHostReport(unittest.TestCase):
+    """The window claude-code reported for THIS session decides, ahead of the config.
+
+    150,000 used and a read of ~40,000 tokens: refused in a 200k window (it would take more
+    than 40% of the 50,000 free), allowed in a 1M one. The config is set to 0 unless a test
+    is about the config, so only the report can be what decided.
+    """
+
+    def _decision(self, reported=None, declared="0", session="s1"):
+        env = hook_env(QCTX_CONTEXT_WINDOW=declared)
+        if reported:
+            publish_into(env["QCTX_STATE_DIR"], session, reported)
+        _, out, code = run_hook(a_file_of(4 * 40_000), a_transcript([a_usage(150_000)]), env)
+        self.assertEqual(code, 0, "the hook must exit 0 on every path")
+
+        return "deny" if out.strip() else "allow"
+
+    def test_a_200k_report_refuses_what_a_1m_report_allows(self):
+        self.assertEqual(self._decision(200_000), "deny")
+        self.assertEqual(self._decision(1_000_000), "allow")
+
+    def test_the_report_beats_the_config_in_both_directions(self):
+        self.assertEqual(self._decision(1_000_000, declared="200000"), "allow")
+        self.assertEqual(self._decision(200_000, declared="1000000"), "deny")
+
+    def test_the_config_still_answers_when_nothing_was_reported(self):
+        self.assertEqual(self._decision(None, declared="200000"), "deny")
+
+    def test_no_report_and_no_config_lets_the_read_through(self):
+        self.assertEqual(self._decision(None), "allow")
+
+    def test_a_report_for_another_session_is_not_used(self):
+        self.assertEqual(self._decision(200_000, session="another"), "allow")
+
+
 class TestTheTwoThresholdsAreRealKnobs(unittest.TestCase):
     """Both are read at IMPORT time and handed to `decide` — and until T6 puts this file
     under the knob scan, nothing else would notice if either stopped arriving there.

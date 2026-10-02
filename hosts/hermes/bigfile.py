@@ -238,8 +238,10 @@ def _run() -> str:
     from hosts.hermes.endpoint import from_hermes_config
 
     base, _key = from_hermes_config()
+    # The window the provider published for THIS session, when it did (`core.windows`).
     budget = budget_from(db_path, session_id,
-                         lambda model: windows.window_for(model, cfg, base))
+                         lambda model: windows.window_for(model, cfg, base,
+                                                          session_id=session_id))
 
     # The two thresholds come from the config, which resolves them like every setting:
     # environment (the names both hosts always answered to), then file, then default.

@@ -474,6 +474,50 @@ class TestTheBlockContractIsTheOneHermesHonours(unittest.TestCase):
         self.assertEqual((out, code), ("", 0))
 
 
+def publish_into(state_dir: str, session: str, window: int, guess: bool = False) -> None:
+    """What the hermes provider would have published for `session`, into a guard's state dir."""
+    from core import hostwindow
+    with unittest.mock.patch.dict(os.environ, {"QCTX_STATE_DIR": state_dir}):
+        assert hostwindow.publish(session, "claude-opus-5-5", window, "hermes", guess=guess)
+
+
+class TestTheWindowComesFromTheHostReport(unittest.TestCase):
+    """The window the hermes provider published for THIS session decides, ahead of the config.
+
+    60,000 tokens used and a default read capped at 25,000: refused in a 100k window (more
+    than 40% of the 40,000 free), allowed in a 1M one. The config is 0 unless a test is
+    about the config, so only the report can be what decided.
+    """
+
+    def _decision(self, reported=None, declared="0", session="s1", guess=False):
+        db = a_session_using(4 * 60_000)
+        env = guard_env(db, QCTX_CONTEXT_WINDOW=declared)
+        if reported:
+            publish_into(env["QCTX_STATE_DIR"], session, reported, guess=guess)
+        out, code = run_guard(a_file_of(400_000), db, env=env)
+        self.assertIn(code, (0, adapter.BLOCK_EXIT_CODE), f"unexpected exit {code}")
+
+        return "block" if out.strip() else "allow"
+
+    def test_a_100k_report_refuses_what_a_1m_report_allows(self):
+        self.assertEqual(self._decision(100_000), "block")
+        self.assertEqual(self._decision(1_000_000), "allow")
+
+    def test_the_report_beats_the_config_in_both_directions(self):
+        self.assertEqual(self._decision(1_000_000, declared="100000"), "allow")
+        self.assertEqual(self._decision(100_000, declared="1000000"), "block")
+
+    def test_a_guess_does_not_count_as_a_report(self):
+        self.assertEqual(self._decision(100_000, guess=True), "allow")
+        self.assertEqual(self._decision(1_000_000, declared="100000", guess=True), "block")
+
+    def test_no_report_and_no_config_lets_the_read_through(self):
+        self.assertEqual(self._decision(None), "allow")
+
+    def test_a_report_for_another_session_is_not_used(self):
+        self.assertEqual(self._decision(100_000, session="another"), "allow")
+
+
 class TestTheTwoThresholdsAreRealKnobs(unittest.TestCase):
     """Both are read at IMPORT time and handed to `decide`, and they must answer to the same
     variable names the claude-code hook answers to.

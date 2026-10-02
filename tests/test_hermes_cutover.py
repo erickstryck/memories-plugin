@@ -1129,28 +1129,48 @@ class TestTheBigFileGuardCheck(CutoverCase):
         out = self.run_script()
         self.assertLine(out, "approved in shell-hooks-allowlist.json")
 
-    def test_an_undeclared_context_window_says_which_ceiling_and_what_it_costs(self):
+    def test_a_model_name_alone_gives_no_window_and_says_what_that_costs(self):
+        """There is no table of model names any more: a name the old table knew resolves to
+        unknown like any other, and unknown ALLOWS. Reported, because a guard that never
+        fires and never says why is exactly what this feature promised not to be."""
         self.config_yaml.write_text(CONFIG_YAML.replace("MiniMax-M2.7", "claude-opus-5"))
         out = self.run_script()
-        self.assertLine(out, "context_window is not declared")
-        self.assertLine(out, "ceiling")
+        self.assertLine(out, "no context window is known yet for model 'claude-opus-5'")
+        self.assertLine(out, "allows every read")
         self.assertLine(out, "QCTX_CONTEXT_WINDOW")
+        self.assertNoLine(out, "ceiling")
 
-    def test_the_ceiling_it_prints_is_the_one_the_TABLE_holds(self):
-        """Not a number typed into the script. The table is the single owner of these, and
-        a copy in a shell script is the kind of divergence this repo has paid for."""
-        from core.windows import MODEL_WINDOWS
-        self.config_yaml.write_text(CONFIG_YAML.replace("MiniMax-M2.7", "claude-opus-5"))
-        out = self.run_script()
-        self.assertLine(out, str(MODEL_WINDOWS["claude-opus-5"]))
-
-    def test_a_model_the_table_does_not_know_is_reported_as_no_guard_at_all(self):
-        """The measured hermes case, and the reason this line exists: the table holds
-        claude names, `model.default` on this machine is `MiniMax-M2.7`, so `window_for`
-        returns 0, and 0 ALLOWS. Reported, because a guard that never fires and never says
-        why is exactly what this feature promised not to be."""
+    def test_a_model_nobody_knows_is_reported_as_no_guard_at_all(self):
         out = self.run_script()
         self.assertLine(out, "MiniMax-M2.7")
+        self.assertLine(out, "allows every read")
+
+    def _seed_report(self, window, model="claude-opus-5-5", guess=False):
+        """What the hermes provider publishes, under THIS test's own `QCTX_STATE_DIR`."""
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from core import hostwindow\n"
+            "assert hostwindow.publish('s1', %r, %r, 'hermes', guess=%r)\n"
+        ) % (str(REPO), model, window, guess)
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             env=self.env())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_a_window_hermes_reported_is_reported_first(self):
+        """The order of `core/windows.py`: the host's own report beats an endpoint's and a
+        declared number alike."""
+        base = self.with_endpoint()
+        self._seed_window_cache(base, "MiniMax-M2.7", 524288)
+        self._seed_report(1_000_000)
+        out = self.run_script(env=self.env(QCTX_CONTEXT_WINDOW="123456"))
+        self.assertLine(out, "window reported by hermes: 1000000 tokens for claude-opus-5-5")
+        self.assertNoLine(out, "window learned from the endpoint")
+        self.assertNoLine(out, "context window declared")
+
+    def test_a_guess_hermes_published_is_not_reported_as_a_window(self):
+        self._seed_report(256_000, model="mystery", guess=True)
+        out = self.run_script()
+        self.assertNoLine(out, "window reported by hermes")
         self.assertLine(out, "allows every read")
 
     def test_a_declared_context_window_is_reported_as_declared(self):
@@ -1217,22 +1237,19 @@ class TestTheBigFileGuardCheck(CutoverCase):
         self.assertLine(out, "STALE")
         self.assertNoLine(out, "is installed and inert")
 
-    def test_the_learned_window_outranks_the_ceiling_table(self):
-        """A model the ceiling table ALSO knows must still report the LEARNED value and not
-        the table's: `core/windows.py`'s own cascade consults the cache before the ceiling,
-        and this diagnostic has to agree with the guard it is describing."""
+    def test_the_learned_window_outranks_a_declared_one(self):
+        """`core/windows.py` consults the endpoint cache before the config now, and this
+        diagnostic has to agree with the guard it is describing."""
         base = self.with_endpoint()
-        self.config_yaml.write_text(
-            self.config_yaml.read_text().replace("MiniMax-M2.7", "claude-opus-5"))
-        self._seed_window_cache(base, "claude-opus-5", 999000)
-        out = self.run_script()
+        self._seed_window_cache(base, "MiniMax-M2.7", 999000)
+        out = self.run_script(env=self.env(QCTX_CONTEXT_WINDOW="123456"))
         self.assertLine(out, "window learned from the endpoint: 999000 tokens")
-        self.assertNoLine(out, "falls back to the ceiling")
+        self.assertNoLine(out, "context window declared")
 
     def test_no_endpoint_configured_the_cache_branch_is_silent(self):
         """Without a `base_url` there is nothing to key the cache on, and the diagnostic
-        must fall through to the ceiling/unknown branches exactly as it did before this
-        round's fix — the default fixture carries no endpoint."""
+        must fall through to the declared and unknown branches; the default fixture carries
+        no endpoint."""
         out = self.run_script()
         self.assertNoLine(out, "window learned from the endpoint")
 

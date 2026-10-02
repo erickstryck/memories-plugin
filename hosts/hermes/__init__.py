@@ -768,9 +768,9 @@ class MemoriesProvider(_Base):
             "repos_collection": "Collection holding repository chunks, grouped by repo",
             "repos_registry_collection": "Collection holding one entry per indexed repository",
             "vector_size": "Embedding dimension; `qctx config detect` measures it",
-            "context_window": "Model's context window in tokens; overrides the built-in "
-                               "table when the bare model name is ambiguous (e.g. a 1M "
-                               "variant). 0 means unknown/use the table.",
+            "context_window": "Context window in tokens, the last resort: used only when the "
+                              "host reports none for the session and no endpoint did either "
+                              "(e.g. claude -p). 0 means not declared.",
             "checkpoint_interval": "Turns between the reminder to save durable memories. "
                                    "0 turns it off.",
             "bigfile_floor_pct": "Big-file guard: refuse a read that would leave less than "

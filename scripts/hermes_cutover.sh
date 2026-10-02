@@ -686,32 +686,26 @@ PY
   fi
 fi
 
-# WHETHER THE WINDOW IS DECLARED, and this is the half that decides whether the guard can
-# do anything at all. `core/windows.py` holds CEILINGS per model NAME — the largest window
-# any variant of that name can have — because the same bare name ships as a 200k and a 1M
-# variant and nothing readable at hook time tells them apart. Erring large only makes the
-# guard sleep; erring small would make it block on a guess, the one failure this feature
-# must never produce. So: inert until configured is the accepted cost, and it is only
-# acceptable while it is VISIBLE. A silently inert guard is indistinguishable from a working
-# one, and the user finds out on the day it did not protect them.
+# WHERE THE GUARD'S WINDOW COMES FROM, in the order `core/windows.py` consults: what hermes
+# reported for a session (the provider publishes it per session, `core.hostwindow`), then
+# what an endpoint reported (the cache `hosts.hermes.endpoint.refresh_window` fills), then
+# `context_window` from the config, the last resort. With none of them the window is
+# unknown, and an unknown window allows every read. That cost is acceptable only while it is
+# VISIBLE: a silently inert guard is indistinguishable from a working one.
 #
-# THIS DIAGNOSTIC USED TO LIE. It checked the config and the ceiling table only, never the
-# cache `hosts.hermes.endpoint.refresh_window` fills — so after this feature shipped it kept
-# printing "no ceiling is known … the guard is installed and inert" whether the probe had
-# learned 524,288 or had learned nothing at all. That is the exact failure this feature
-# exists to remove, and the cache is the one place that tells the two apart, so this now
-# reports it too: what is cached for (endpoint, model), whether it is fresh, and its age.
+# There is no table of model names any more, so a model's name alone never yields a window
+# here either. This diagnostic must agree with the guard it describes.
 model_default="$(read_key model default)"
 window_out="$(python3 - "$ROOT" "$model_default" "$HERMES_HOME" <<'PY' 2>/dev/null || true
 import sys
+import time
 sys.path.insert(0, sys.argv[1])
 model = sys.argv[2] if len(sys.argv) > 2 else ""
 home = sys.argv[3] if len(sys.argv) > 3 else ""
 
 
 def declared(**kwargs):
-    """0 for anything unreadable: `load()` raises on a malformed number, and this line is a
-    report, not a gate."""
+    """0 for anything unreadable: this line is a report, not a gate."""
     try:
         import core
         return int(getattr(core.load(**kwargs), "context_window", 0) or 0)
@@ -719,9 +713,26 @@ def declared(**kwargs):
         return 0
 
 
+def reported():
+    """(window, model, age_hours) of the newest window hermes reported that was not a guess,
+    each "" when there is none. Read from the records the provider writes, never resolved
+    here."""
+    try:
+        from core import hostwindow
+        newest = hostwindow.newest("hermes")
+        if newest is None or newest[1].guess:
+            return "", "", ""
+        record = newest[1]
+
+        return (str(record.window), record.model,
+                f"{max(0.0, time.time() - record.at) / 3600:.1f}")
+    except Exception:                  # noqa: BLE001 - reported as "not reported"
+        return "", "", ""
+
+
 def cached():
     """(window, is_fresh, age_hours), each "" when nothing is cached or the endpoint itself
-    cannot be resolved. Reads the SAME cache `refresh_window` fills — never a value probed
+    cannot be resolved. Reads the SAME cache `refresh_window` fills, never a value probed
     here, so this diagnostic can never itself cost a network call."""
     try:
         from hosts.hermes.endpoint import from_hermes_config
@@ -740,54 +751,43 @@ def cached():
         return "", "", ""
 
 
-try:
-    from core.windows import MODEL_WINDOWS
-except Exception:                      # noqa: BLE001
-    MODEL_WINDOWS = {}
 print(declared())
 print(declared(env={}))
-print(int(MODEL_WINDOWS.get(model.strip(), 0)))
-print(", ".join(sorted(MODEL_WINDOWS)))
-for field in cached():
+for field in (*reported(), *cached()):
     print(field)
 PY
 )"
 win_shell="$(printf '%s\n' "$window_out" | sed -n 1p)"
 win_file="$(printf '%s\n' "$window_out" | sed -n 2p)"
-win_ceiling="$(printf '%s\n' "$window_out" | sed -n 3p)"
-win_table="$(printf '%s\n' "$window_out" | sed -n 4p)"
-win_cached="$(printf '%s\n' "$window_out" | sed -n 5p)"
-win_cached_fresh="$(printf '%s\n' "$window_out" | sed -n 6p)"
-win_cached_age_h="$(printf '%s\n' "$window_out" | sed -n 7p)"
+win_reported="$(printf '%s\n' "$window_out" | sed -n 3p)"
+win_reported_model="$(printf '%s\n' "$window_out" | sed -n 4p)"
+win_reported_age_h="$(printf '%s\n' "$window_out" | sed -n 5p)"
+win_cached="$(printf '%s\n' "$window_out" | sed -n 6p)"
+win_cached_fresh="$(printf '%s\n' "$window_out" | sed -n 7p)"
+win_cached_age_h="$(printf '%s\n' "$window_out" | sed -n 8p)"
 
-if [ "${win_shell:-0}" != 0 ]; then
-  ok "context window declared: $win_shell tokens — the guard measures every read against it"
-  if [ "${win_file:-0}" = 0 ]; then
-    warn "…but only in this shell. It is not a secret, so put it where a systemd/gateway"
-    say  "        hermes will find it:   qctx config set context-window $win_shell"
-  fi
+if [ -n "${win_reported:-}" ]; then
+  ok "window reported by hermes: $win_reported tokens for ${win_reported_model:-?}" \
+     "(${win_reported_age_h:-?}h ago); the guard follows each session's own model"
 elif [ -n "${win_cached:-}" ]; then
   if [ "${win_cached_fresh:-0}" = 1 ]; then
     ok "window learned from the endpoint: $win_cached tokens (${win_cached_age_h:-?}h ago, fresh)"
   else
     warn "window learned from the endpoint: $win_cached tokens (${win_cached_age_h:-?}h ago," \
-         "STALE — used anyway rather than falling back to a smaller ceiling)"
+         "STALE, used anyway rather than treated as unknown)"
   fi
-  say  "        Declare it explicitly to skip the probe on every prefetch:"
-  say  "            qctx config set context-window $win_cached"
-elif [ "${win_ceiling:-0}" != 0 ]; then
-  warn "context_window is not declared, no window has been learned from the endpoint yet, so"
-  say  "        the guard falls back to the ceiling for"
-  say  "        ${model_default:-<unset>}: $win_ceiling tokens, the LARGEST window any variant of that name"
-  say  "        can have. In a session smaller than that the guard stays nearly inert — it"
-  say  "        thinks there is room that is not there. Declare the real size to sharpen it:"
-  say  "            qctx config set context-window <tokens>   (or export QCTX_CONTEXT_WINDOW)"
+elif [ "${win_shell:-0}" != 0 ]; then
+  ok "context window declared: $win_shell tokens, used until hermes reports one per session"
+  if [ "${win_file:-0}" = 0 ]; then
+    warn "...but only in this shell. It is not a secret, so put it where a systemd/gateway"
+    say  "        hermes will find it:   qctx config set context-window $win_shell"
+  fi
 else
-  warn "context_window is not declared, no window has been learned from the endpoint yet, and"
-  say  "        no ceiling is known for model '${model_default:-<unset>}' — the window resolves"
-  say  "        to UNKNOWN, and an unknown window allows every read. The guard is installed"
-  say  "        and inert until the next prefetch probes the endpoint, or you declare it:"
-  say  "        The table knows: ${win_table:-<empty>}"
+  warn "no context window is known yet for model '${model_default:-<unset>}': hermes has not"
+  say  "        reported one, no endpoint reported one, and none is declared. An unknown window"
+  say  "        allows every read, so the guard is installed and inert until the provider"
+  say  "        reports the window on the next turn. To set one by hand (used only while"
+  say  "        hermes reports none):"
   say  "            qctx config set context-window <tokens>   (or export QCTX_CONTEXT_WINDOW)"
 fi
 

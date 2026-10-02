@@ -2142,17 +2142,23 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
                 self.assertIn(needle, section)
 
 
-class TestTheClaudeCodeSideDidNotChange(unittest.TestCase):
-    """The cascade added a step that only one host can fill. The other must resolve exactly
-    as it did before — a silent change there would move the guard's threshold for everyone
-    on the host that cannot even use the new step."""
+class TestBothHostsResolveTheWindowInOneOrder(unittest.TestCase):
+    """The host's report, then the endpoint cache (hermes only), then the config. claude-code
+    has no endpoint to offer, so for it the cache step must not exist at all: a value cached
+    under an empty endpoint would otherwise answer for every claude-code session."""
 
-    def test_resolving_without_an_endpoint_gives_the_table_value(self):
-        from core import windows
-        cfg = type("C", (), {"context_window": 0})()
-        self.assertEqual(windows.window_for("claude-opus-5", cfg), 1_000_000)
-        self.assertEqual(windows.window_for("claude-haiku-4-5", cfg), 200_000)
-        self.assertEqual(windows.window_for("nao-existe", cfg), 0)
+    def test_without_an_endpoint_only_the_report_and_the_config_count(self):
+        from core import hostwindow, windowcache, windows
+        with tempfile.TemporaryDirectory() as state, \
+                mock.patch.dict(os.environ, {"QCTX_STATE_DIR": state}):
+            windowcache.put("", "claude-opus-5", 42)
+            undeclared = type("C", (), {"context_window": 0})()
+            self.assertEqual(windows.window_for("claude-opus-5", undeclared), 0)
+            hostwindow.publish("s1", "claude-opus-5-5[1m]", 1_000_000, "claude-code")
+            self.assertEqual(windows.window_for("claude-opus-5", undeclared, session_id="s1"),
+                             1_000_000)
+            declared = type("C", (), {"context_window": 200_000})()
+            self.assertEqual(windows.window_for("anything", declared, session_id="s2"), 200_000)
 
 
 #: Every file the guard is made of, on both hosts. The property below is about the guard as

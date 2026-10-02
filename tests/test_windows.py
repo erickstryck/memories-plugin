@@ -1,128 +1,121 @@
 # tests/test_windows.py
+"""The order the big-file guard learns the context window in, and its one owner.
+
+The host's own report comes first, because only the host knows which model is selected NOW
+and how large its window is: the claude-code statusLine and the hermes provider publish it
+per session (`core.hostwindow`). An endpoint's report, from the cache the hermes hooks fill,
+comes next. The `context_window` in the config is the LAST resort, for a host that reports
+nothing (`claude -p` runs no statusLine). With none of them the window is unknown, 0, and
+the guard lets the read through.
+
+There is no table of model names any more, by the user's decision: a name alone resolves to
+0. And a host's GUESS (hermes' 256,000 fallback) does not count as a report.
+"""
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import windows
-from tests.test_hermes_tools import a_config
+from core import hostwindow, windowcache, windows  # noqa: E402
+from tests.test_hermes_tools import a_config  # noqa: E402
 
 
-class TestWindowFor(unittest.TestCase):
-    def test_a_known_model_resolves_from_the_table(self):
-        self.assertGreater(windows.window_for("claude-opus-5", a_config()), 0)
-
-    def test_an_unknown_model_is_zero_not_a_guess(self):
-        """Zero means "unknown", and the caller must then ALLOW the read. A plausible
-        default here would make the guard block on a guess, which is what the design
-        forbids: the window is not derivable from disk on either host."""
-        self.assertEqual(windows.window_for("some-model-nobody-shipped-yet", a_config()), 0)
-
-    def test_the_config_beats_the_table(self):
-        """The table is a ceiling, so the config is the only way to state a SMALLER window
-        — which is what someone genuinely on a 200k variant has to do to get the guard to
-        fire at all."""
-        cfg = a_config(context_window=200_000)
-        self.assertEqual(windows.window_for("claude-opus-5", cfg), 200_000)
-
-    def test_the_config_beats_the_table_for_an_unknown_model_too(self):
-        cfg = a_config(context_window=333_000)
-        self.assertEqual(windows.window_for("whatever", cfg), 333_000)
-
-    def test_a_nonsense_config_value_falls_back_to_the_table(self):
-        """The config is read tolerantly everywhere else in this plugin; a typo must not
-        turn the guard into a blocker calibrated on garbage."""
-        self.assertGreater(windows.window_for("claude-opus-5", a_config(context_window=-5)), 0)
-
-
-class TestTheTableHoldsCeilingsAndNotNominalWindows(unittest.TestCase):
-    """The 2026-08-16 amendment, pinned so it cannot be "fixed" back down.
-
-    The transcript records the BARE name — `claude-opus-5`, 82 times in the session that
-    found this, with `[1m]` appearing nowhere — so a 200k variant and a 1M variant are
-    indistinguishable at this layer. Erring large makes the guard SLEEP; erring small made
-    the real hook deny a 4 KB file. Only one of those is a failure mode this design accepts.
-    """
-
-    def test_a_name_with_a_1m_variant_carries_the_1m_ceiling(self):
-        """`claude-opus-5[1m]` and `sonnet-5[1m]` are both shipped model ids in the claude
-        v2.1.233 binary, so 1M is the largest window either bare name can mean."""
-        for model in ("claude-opus-5", "claude-sonnet-5"):
-            with self.subTest(model=model):
-                self.assertEqual(windows.window_for(model, a_config()), 1_000_000)
-
-    def test_a_name_that_can_never_be_1m_keeps_its_own_ceiling(self):
-        """Not symmetry-breaking for its own sake: the binary's own predicate for "cannot
-        ever be 1M" enumerates `claude-haiku-4-5` by name, which is what makes 200k a
-        ceiling here rather than another guess."""
-        self.assertEqual(windows.window_for("claude-haiku-4-5", a_config()), 200_000)
-
-    def test_an_unestablished_name_is_absent_rather_than_guessed(self):
-        """A ceiling nobody can establish is not written down at all — absent resolves to
-        0, and 0 allows."""
-        self.assertEqual(windows.window_for("claude-opus-6", a_config()), 0)
-
-
-class TestTheCascade(unittest.TestCase):
-    """Four steps, and each fixture satisfies EXACTLY ONE of them. A fixture that satisfies
-    two proves neither — the lesson this repo paid for twice."""
-
+class StateDirCase(unittest.TestCase):
     def setUp(self):
-        import tempfile
+        self._old = os.environ.get("QCTX_STATE_DIR")
         os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        self.addCleanup(self._restore)
 
-    def test_declared_beats_everything_including_a_cached_probe(self):
-        from core import windowcache
-        windowcache.put("http://x/v1", "claude-opus-5", 111_111)
-        cfg = type("C", (), {"context_window": 333_000})()
-        self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 333_000)
+    def _restore(self):
+        if self._old is None:
+            os.environ.pop("QCTX_STATE_DIR", None)
+        else:
+            os.environ["QCTX_STATE_DIR"] = self._old
 
-    def test_a_cached_probe_beats_the_ceiling_table(self):
-        """The table says 1,000,000 for this name. A real endpoint saying 204,800 is closer
-        to the truth than a ceiling, and the whole point of probing."""
-        from core import windowcache
-        windowcache.put("http://x/v1", "claude-opus-5", 204_800)
-        cfg = type("C", (), {"context_window": 0})()
-        self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 204_800)
 
-    def test_the_table_answers_when_nothing_was_probed(self):
-        cfg = type("C", (), {"context_window": 0})()
-        self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 1_000_000)
+class TestTheOrder(StateDirCase):
+    """Each fixture satisfies exactly the sources it names, so a test can only pass through
+    the step it is about. A fixture that satisfies two proves neither."""
 
-    def test_an_unknown_model_with_no_probe_is_still_zero(self):
-        cfg = type("C", (), {"context_window": 0})()
-        self.assertEqual(windows.window_for("MiniMax-M2.7", cfg, "http://x/v1"), 0)
+    def test_the_host_record_beats_the_config(self):
+        hostwindow.publish("s1", "claude-opus-5-5[1m]", 1_000_000, "claude-code")
+        cfg = a_config(context_window=200_000)
+        self.assertEqual(windows.window_for("claude-opus-5-5", cfg, session_id="s1"), 1_000_000)
 
-    def test_with_NO_endpoint_the_cache_is_not_consulted_at_all(self):
-        """claude-code has no endpoint to offer, and passing none must behave exactly as it
-        did before this cascade existed."""
-        from core import windowcache
-        windowcache.put("", "claude-opus-5", 42)
-        cfg = type("C", (), {"context_window": 0})()
-        self.assertEqual(windows.window_for("claude-opus-5", cfg), 1_000_000)
+    def test_the_host_record_beats_a_smaller_config_too(self):
+        """Not only the direction that makes the guard sleep: a session that switched to a
+        200k model is reported as 200k even with a 1M number declared by hand."""
+        hostwindow.publish("s1", "claude-haiku-4-5-20251001", 200_000, "claude-code")
+        cfg = a_config(context_window=1_000_000)
+        self.assertEqual(windows.window_for("claude-haiku-4-5", cfg, session_id="s1"), 200_000)
+
+    def test_the_host_record_beats_the_endpoint_cache(self):
+        windowcache.put("http://x/v1", "m", 204_800)
+        hostwindow.publish("s1", "m", 524_288, "hermes")
+        self.assertEqual(windows.window_for("m", a_config(), "http://x/v1", session_id="s1"),
+                         524_288)
+
+    def test_a_guess_is_skipped_for_the_cache_then_the_config_then_zero(self):
+        hostwindow.publish("s1", "m", 256_000, "hermes", guess=True)
+        windowcache.put("http://x/v1", "m", 204_800)
+        self.assertEqual(windows.window_for("m", a_config(), "http://x/v1", session_id="s1"),
+                         204_800)
+        self.assertEqual(windows.window_for("m", a_config(context_window=300_000), "",
+                                            session_id="s1"), 300_000)
+        self.assertEqual(windows.window_for("m", a_config(), "", session_id="s1"), 0)
+
+    def test_the_endpoint_cache_beats_the_config(self):
+        """The config is the last resort now; v1.2.0 let it override everything."""
+        windowcache.put("http://x/v1", "m", 204_800)
+        self.assertEqual(windows.window_for("m", a_config(context_window=333_000),
+                                            "http://x/v1"), 204_800)
+
+    def test_the_config_answers_when_no_host_reported_anything(self):
+        self.assertEqual(windows.window_for("whatever", a_config(context_window=333_000),
+                                            session_id="s1"), 333_000)
+
+    def test_a_record_of_another_session_is_not_used(self):
+        hostwindow.publish("other", "m", 1_000_000, "claude-code")
+        self.assertEqual(windows.window_for("m", a_config(), session_id="s1"), 0)
+
+    def test_no_session_id_means_no_record_is_consulted(self):
+        hostwindow.publish("default", "m", 1_000_000, "claude-code")
+        self.assertEqual(windows.window_for("m", a_config()), 0)
+
+    def test_a_model_name_alone_resolves_to_zero(self):
+        """No table: the name a transcript records says nothing about the window."""
+        for model in ("claude-opus-5", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5"):
+            with self.subTest(model=model):
+                self.assertEqual(windows.window_for(model, a_config()), 0)
+
+    def test_a_nonsense_config_value_is_no_declaration(self):
+        self.assertEqual(windows.window_for("m", a_config(context_window=-5)), 0)
 
     def test_a_cached_value_is_used_even_when_STALE(self):
-        from core import windowcache
         windowcache.put("http://x/v1", "MiniMax-M2.7", 204_800, ttl=-1)
-        cfg = type("C", (), {"context_window": 0})()
-        self.assertEqual(windows.window_for("MiniMax-M2.7", cfg, "http://x/v1"), 204_800)
+        self.assertEqual(windows.window_for("MiniMax-M2.7", a_config(), "http://x/v1"), 204_800)
+
+    def test_with_NO_endpoint_the_cache_is_not_consulted_at_all(self):
+        windowcache.put("", "m", 42)
+        self.assertEqual(windows.window_for("m", a_config()), 0)
 
 
-class TestTheResolverNeverReachesTheNetwork(unittest.TestCase):
+class TestTheResolverNeverReachesTheNetwork(StateDirCase):
     """The guard calls this before EVERY file read. A probe here would be a network call on
     the hot path, and the reason the cache exists at all."""
 
     def test_resolving_with_the_socket_broken_still_answers(self):
         import socket
-        import tempfile
-        os.environ["QCTX_STATE_DIR"] = tempfile.mkdtemp()
+        hostwindow.publish("s1", "m", 1_000_000, "claude-code")
         original = socket.socket.connect
         socket.socket.connect = lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("window_for reached the network"))
         try:
-            cfg = type("C", (), {"context_window": 0})()
-            self.assertEqual(windows.window_for("claude-opus-5", cfg, "http://x/v1"), 1_000_000)
+            self.assertEqual(windows.window_for("m", a_config(), "http://x/v1", session_id="s1"),
+                             1_000_000)
+            self.assertEqual(windows.window_for("m", a_config(), "http://x/v1"), 0)
         finally:
             socket.socket.connect = original
 

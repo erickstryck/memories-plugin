@@ -232,9 +232,10 @@ def decide(path: str, budget: Budget, *, indexed_ids: set | None = None,
         #
         # `used >= window` — we thought we knew it and the facts REFUTED us. A session
         # cannot consume more of the window than the window holds, so a `used` at or above
-        # it does not describe a full session; it proves the number came from
-        # `windows.MODEL_WINDOWS` guessing low for a variant that outgrew its bare name.
-        # Measured before this rule existed: a real 1M session read as 200_000/989,479,
+        # it does not describe a full session; it proves the number was wrong. It used to
+        # come from a table of model names guessing low for a variant that outgrew its bare
+        # name, and now can come from a stale report or a declared number left behind by a
+        # `/model`. Measured before this rule existed: a real 1M session read as 200_000/989,479,
         # `free` collapsed to 0, and the guard denied a 4 KB file — fail open inverted into
         # fail closed. Erring large costs a sleeping guard; erring small costs a cage.
         return Verdict(False, "", cost, free)

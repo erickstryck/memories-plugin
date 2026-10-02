@@ -177,7 +177,10 @@ def _run() -> None:
     # raises from inside it, before a Config exists — so a typo in an env var must not
     # become a file nobody can read. main()'s catch-all turns it into an allow.
     cfg = core.load()
-    budget = budget_from(transcript, lambda model: windows.window_for(model, cfg))
+    # The window the statusLine reported for THIS session, when it did (`core.windows`).
+    session_id = data.get("session_id") or ""
+    budget = budget_from(transcript,
+                         lambda model: windows.window_for(model, cfg, session_id=session_id))
 
     # The two thresholds come from the config, which resolves them like every setting:
     # environment (the names both hosts always answered to), then file, then default.
