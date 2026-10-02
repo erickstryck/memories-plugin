@@ -40,7 +40,11 @@ could not hand over, since the endpoint could not have given it. A pinned value 
 guess.
 
 ONLY WHEN THE ROUTE CHANGED: the first turn of a session, and the turn after a `/model`.
-Every other turn costs one read-only query and a dict lookup.
+Every other turn costs what it takes to recognise the route: hermes' `load_config`, which
+hands back a copy of the parsed config (265 us on a cache hit, by hermes' own docstring),
+its custom provider list, one read-only query, and a read of the published record. The
+sweep deletes a record untouched for a week while a long process keeps the memo below, so a
+record found missing is written again from the memo, without asking hermes.
 
 NEVER COSTS HERMES A TURN. Every failure is swallowed, and the hook returns None: hermes
 injects into the prompt whatever a `pre_llm_call` callback returns.
@@ -59,8 +63,9 @@ from core import hostwindow  # noqa: E402
 #: How the guard tells this host's reports apart from claude-code's.
 SOURCE = "hermes"
 
-#: Session id -> (model, provider, base_url) last published. Bounded: a gateway process
-#: serves sessions for days, and an entry costs a re-resolution at most. It holds no key.
+#: Session id -> ((model, provider, base_url), window, guess) last published. Bounded: a
+#: gateway process serves sessions for days, and an entry costs a re-resolution at most. It
+#: holds no key.
 _LAST: dict = {}
 _LAST_MAX = 512
 
@@ -259,13 +264,16 @@ def on_pre_llm_call(session_id: str = "", model: str = "", **_) -> None:
         if route is None:
             return None
         seen = (model, route[0], route[1])
-        if _LAST.get(session_id) == seen:
+        last = _LAST.get(session_id)
+        if last is not None and last[0] == seen:
+            if hostwindow.read(session_id) is None:        # swept: see the module docstring
+                hostwindow.publish(session_id, model, last[1], SOURCE, guess=last[2])
             return None
         window, guess = resolve(model, route, config, custom_providers)
         if hostwindow.publish(session_id, model, window, SOURCE, guess=guess):
             if len(_LAST) >= _LAST_MAX:
                 _LAST.clear()
-            _LAST[session_id] = seen
+            _LAST[session_id] = (seen, window, guess)
     except Exception:  # noqa: BLE001 -- see the module docstring
         pass
 

@@ -395,6 +395,29 @@ class TheModelBlocksKeyStaysWithTheModelBlocksEndpoint(PublisherCase):
         self.assertTrue(hostwindow.read("s1").guess)
 
 
+class TheRecordOutlivesTheSweep(PublisherCase):
+    def test_a_swept_record_is_written_again_without_asking_hermes(self):
+        """The sweep deletes records untouched for 7 days, and a long hermes process keeps
+        its route memo: without this, a session older than a week loses its window."""
+        hermes = FakeHermes(answer=1_000_000)
+        self.turn(hermes)
+        swept = list(Path(self.state).rglob(hostwindow.PATTERN))
+        self.assertTrue(swept)
+        for path in swept:
+            path.unlink()
+        self.turn(hermes)
+        record = hostwindow.read("s1")
+        self.assertIsNotNone(record, "the swept record was never written again")
+        self.assertEqual(record.window, 1_000_000)
+        self.assertEqual(len(hermes.calls), 1)
+
+    def test_the_memo_is_bounded(self):
+        with mock.patch.object(window, "_LAST_MAX", 3):
+            for n in range(5):
+                self.turn(FakeHermes(), session=f"b{n}")
+            self.assertLessEqual(len(window._LAST), 3)
+
+
 class LoadedByPath(unittest.TestCase):
     def test_a_sibling_is_loaded_once(self):
         """Loaded by path (no package), the guard module used to be executed again on every
