@@ -221,8 +221,12 @@ class TheClaudeCutoverPlansTheStatusLine(unittest.TestCase):
         with TemporaryDirectory() as home:
             claude = Path(home) / ".claude"
             claude.mkdir()
+            launcher = Path(home) / "bin" / "qctx"       # "{home}/bin/qctx" exists
+            launcher.parent.mkdir()
+            launcher.write_text("#!/bin/sh\n")
+            launcher.chmod(0o755)
             path = claude / "settings.json"
-            path.write_text(json.dumps(settings, indent=2) + "\n")
+            path.write_text(json.dumps(settings, indent=2).replace("{home}", home) + "\n")
             before = path.read_bytes()
             env = hermetic_env(home, CUTOVER_SKIP_SUITE="1",
                                QCTX_STATE_DIR=Path(home) / "state",
@@ -240,8 +244,14 @@ class TheClaudeCutoverPlansTheStatusLine(unittest.TestCase):
 
     def test_ours_already_there_is_reported_ok(self):
         done, unchanged = self.run_plan(
-            {"statusLine": {"type": "command", "command": "/x/qctx statusline"}})
+            {"statusLine": {"type": "command", "command": "{home}/bin/qctx statusline"}})
         self.assertIn("ok    statusLine: installed", done.stdout, done.stdout + done.stderr)
+        self.assertTrue(unchanged)
+
+    def test_ours_pointing_at_a_launcher_that_is_gone_is_reported_and_left_for_apply(self):
+        done, unchanged = self.run_plan(
+            {"statusLine": {"type": "command", "command": "/gone/bin/qctx statusline"}})
+        self.assertIn("no longer exists", done.stdout, done.stdout + done.stderr)
         self.assertTrue(unchanged)
 
     def test_someone_elses_is_left_alone_and_said_so(self):

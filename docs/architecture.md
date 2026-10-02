@@ -197,7 +197,10 @@ changes:
   the REPL mounts, before any prompt, after every assistant message and right after a
   `/model`. A plugin cannot declare a status line, so `qctx statusline install --apply` (and
   `scripts/cutover.sh --apply`) adds it to `~/.claude/settings.json`, never replacing one
-  somebody else configured. `claude -p` runs no status line, and a subagent on another model
+  somebody else configured. Ours is recognised by its launcher (`<path>/qctx statusline`,
+  the path quoted when it needs to be); when that launcher no longer exists the entry is
+  stale, and `--apply` points it at the current one. A settings file that is a symlink is
+  written through the link. `claude -p` runs no status line, and a subagent on another model
   is measured against the main conversation's window.
 - **hermes**: the guard is a shell hook that cannot import hermes, so the memory provider,
   which runs inside it, registers `pre_llm_call` and, on the first turn of a session and after

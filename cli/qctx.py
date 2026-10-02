@@ -1662,17 +1662,21 @@ def statusline_command(env: dict) -> str:
     launcher = (shutil.which(core.install.LAUNCHER_NAME, path=env.get("PATH", ""))
                 or str(core.install.target_dir(env) / core.install.LAUNCHER_NAME))
 
-    return f"{os.path.abspath(launcher)} statusline"
+    # Quoted, because claude-code hands the command to a shell: a launcher under a home with
+    # a space in its path would otherwise run as two words and fail with 127.
+    return f"{shlex.quote(os.path.abspath(launcher))} statusline"
 
 
 def cmd_statusline(args, cfg):
     if args.action != "install":
         return core.statusline.main()
     settings = Path(args.settings) if args.settings else core.statusline.settings_path()
-    state, detail = core.statusline.install(settings, statusline_command(dict(os.environ)),
-                                            args.apply)
+    command = statusline_command(dict(os.environ))
+    state, detail = core.statusline.install(settings, command, args.apply)
     lines = {
         "installed": f"  ok    statusLine: installed (`{detail}`)",
+        "stale": f"  ..    statusLine: `{detail}` runs a launcher that no longer exists; "
+                 f"--apply points it at `{command}`",
         "added": f"  ok    statusLine: added `{detail}` to {settings}",
         "missing": f"  ..    statusLine: would add `{detail}` to {settings} "
                    f"(the big-file guard learns the window from it)",
@@ -2016,14 +2020,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    # THE STATUS LINE RUNS BEFORE EVERYTHING ELSE, the config included. claude-code runs it
-    # after every assistant message and prints whatever it writes, so a config that does
-    # not parse must cost the guard its window at most, never a traceback on the screen.
-    if sys.argv[1:] == ["statusline"]:
-        raise SystemExit(core.statusline.main())
     args = build_parser().parse_args()
-    # Installing it needs no config either, and the cutover runs it on machines whose
-    # config may be half written.
+    # THE STATUS LINE RUNS BEFORE THE CONFIG IS LOADED. claude-code runs it after every
+    # assistant message and prints whatever it writes, so a config that does not parse must
+    # cost the guard its window at most, never a traceback on the screen. Installing it
+    # needs no config either, and the cutover runs it on machines whose config may be half
+    # written. (A shortcut that skipped the parser saved 5 ms of a 68 ms run, measured, and
+    # was a second copy of this dispatch.)
     if getattr(args, "fn", None) is cmd_statusline:
         raise SystemExit(cmd_statusline(args, None))
     # `--json` is accepted before OR after the subcommand, and the subparser copy is declared

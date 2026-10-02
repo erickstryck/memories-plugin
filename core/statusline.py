@@ -20,6 +20,7 @@ replaces a status line somebody else put there.
 """
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -28,8 +29,8 @@ from . import hostwindow
 #: How the guard tells this host's reports apart from hermes'.
 SOURCE = "claude-code"
 
-#: The tail that identifies our command, whatever path the launcher has on that machine.
-COMMAND_TAIL = "qctx statusline"
+#: The launcher our command runs, `<path>/qctx statusline`, whatever path it has there.
+LAUNCHER = "qctx"
 
 
 def _context(payload: dict) -> dict:
@@ -112,7 +113,7 @@ def state(settings: Path | None = None) -> str | None:
 
     None where claude-code is not set up on this machine (no `~/.claude`): a hermes-only
     machine must not be told to install a claude-code status line. Otherwise the state
-    `install` would start from (`installed`, `missing`, `foreign`, `unreadable`).
+    `install` would start from (`installed`, `stale`, `missing`, `foreign`, `unreadable`).
     """
     settings = Path(settings) if settings is not None else settings_path()
     if not settings.parent.is_dir():
@@ -121,24 +122,51 @@ def state(settings: Path | None = None) -> str | None:
     return install(settings, "", apply=False)[0]
 
 
+def _argv(command) -> list:
+    """`command` split the way the shell claude-code starts for it splits it; [] if it
+    cannot be."""
+    if not isinstance(command, str):
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
 def is_ours(command) -> bool:
-    return isinstance(command, str) and command.strip().endswith(COMMAND_TAIL)
+    """`<launcher> statusline`, the launcher by any path, quoted or not."""
+    argv = _argv(command)
+
+    return len(argv) == 2 and os.path.basename(argv[0]) == LAUNCHER and argv[1] == "statusline"
+
+
+def _launcher_gone(command: str) -> bool:
+    """Our command names its launcher by absolute path, and nothing runnable is there any
+    more (a moved home, a reinstall elsewhere): claude-code would print an error in its
+    place after every message, and the guard would never hear from it."""
+    launcher = _argv(command)[0]
+
+    return os.path.isabs(launcher) and not (os.path.isfile(launcher)
+                                            and os.access(launcher, os.X_OK))
 
 
 def install(settings: Path, command: str, apply: bool) -> tuple[str, str]:
     """Put our statusLine in `settings`, or say why not. Returns (state, detail):
 
       * `installed`: ours is already there (detail: the command found);
-      * `added`: it was missing and `apply` wrote it (detail: the command written);
+      * `added`: it was missing, or stale, and `apply` wrote it (detail: the command written);
       * `missing`: it is missing and this was a dry run (detail: what would be written);
+      * `stale`: ours is there but its launcher is gone, and this was a dry run (detail: the
+        command found);
       * `foreign`: another status line is configured, and it is left alone;
       * `unreadable`: the file is not a JSON object, and it is left alone;
       * `failed`: the write itself failed, and the file is as it was.
 
     The write goes to a temporary in the same directory and replaces the file in one step,
-    keeping its mode and every other key.
+    keeping its mode and every other key. A symlinked settings file (a dotfile manager's) is
+    written through the link: replacing the link would cut it off from the copy it manages.
     """
-    settings = Path(settings)
+    settings = Path(os.path.realpath(settings))
     try:
         text = settings.read_text()
     except FileNotFoundError:
@@ -157,15 +185,17 @@ def install(settings: Path, command: str, apply: bool) -> tuple[str, str]:
     current = data.get("statusLine")
     if current is not None:
         found = current.get("command") if isinstance(current, dict) else current
-        if is_ours(found):
-            return "installed", str(found)
-
-        return "foreign", str(found)
-
-    if not apply:
+        if not is_ours(found):
+            return "foreign", "(no command)" if found is None else str(found)
+        if not _launcher_gone(found):
+            return "installed", found
+        if not apply:
+            return "stale", found
+    elif not apply:
         return "missing", command
 
-    data["statusLine"] = {"type": "command", "command": command}
+    data["statusLine"] = {**(current if isinstance(current, dict) else {}),
+                          "type": "command", "command": command}
     mode = (settings.stat().st_mode & 0o777) if text is not None else 0o600
     temporary = settings.with_name(f".{settings.name}.qctx-{os.getpid()}.tmp")
     try:

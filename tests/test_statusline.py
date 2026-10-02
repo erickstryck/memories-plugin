@@ -12,6 +12,7 @@ interactive session; only paths and ids were replaced.
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -184,18 +185,77 @@ class TestInstallingTheStatusLine(unittest.TestCase):
         self.assertEqual([p.name for p in self.dir.iterdir()], ["settings.json"],
                          "a temporary was left behind")
 
+    def a_launcher(self) -> Path:
+        launcher = self.dir / "elsewhere" / "bin" / "qctx"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\n")
+        launcher.chmod(0o755)
+
+        return launcher
+
     def test_ours_already_there_is_installed(self):
-        before = self.write({"statusLine": {"type": "command",
-                                            "command": "/elsewhere/bin/qctx statusline"}})
+        command = f"{self.a_launcher()} statusline"
+        before = self.write({"statusLine": {"type": "command", "command": command}})
         self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=True),
-                         ("installed", "/elsewhere/bin/qctx statusline"))
+                         ("installed", command))
         self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_ours_pointing_at_a_launcher_that_is_gone_is_stale_and_apply_repoints_it(self):
+        before = self.write({"statusLine": {"type": "command", "padding": 2,
+                                            "command": "/gone/bin/qctx statusline"}})
+        self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=False),
+                         ("stale", "/gone/bin/qctx statusline"))
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=True),
+                         ("added", self.COMMAND))
+        self.assertEqual(json.loads(self.settings.read_text())["statusLine"],
+                         {"type": "command", "padding": 2, "command": self.COMMAND})
+
+    def test_a_launcher_path_that_is_a_directory_is_stale(self):
+        launcher = self.dir / "bin" / "qctx"
+        launcher.mkdir(parents=True)
+        self.write({"statusLine": {"type": "command", "command": f"{launcher} statusline"}})
+        self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=False)[0],
+                         "stale")
+
+    def test_a_symlinked_settings_file_keeps_its_link(self):
+        """Dotfile managers (stow, chezmoi, home-manager) link settings.json; replacing the
+        link with a regular file cuts it off from the copy they manage."""
+        target = self.dir / "dotfiles" / "claude-settings.json"
+        target.parent.mkdir()
+        target.write_text('{"model": "opus[1m]"}\n')
+        os.chmod(target, 0o644)
+        self.settings.symlink_to(target)
+        self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=True)[0], "added")
+        self.assertTrue(self.settings.is_symlink())
+        self.assertEqual(json.loads(target.read_text())["statusLine"]["command"], self.COMMAND)
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o644)
+
+    def test_the_temporary_is_written_beside_the_file_it_replaces(self):
+        """os.replace is atomic only within one filesystem."""
+        self.write({})
+        seen = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            seen.append((Path(src).parent, Path(dst).parent))
+            real_replace(src, dst)
+
+        with mock.patch.object(statusline.os, "replace", spy):
+            statusline.install(self.settings, self.COMMAND, apply=True)
+        here = Path(os.path.realpath(self.settings)).parent
+        self.assertEqual(seen, [(here, here)])
 
     def test_someone_elses_status_line_is_left_alone(self):
         before = self.write({"statusLine": {"type": "command", "command": "~/my-line.sh"}})
         self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=True),
                          ("foreign", "~/my-line.sh"))
         self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_a_status_line_without_a_command_is_named_as_such(self):
+        self.write({"statusLine": {}})
+        self.assertEqual(statusline.install(self.settings, self.COMMAND, apply=True),
+                         ("foreign", "(no command)"))
 
     def test_an_unreadable_settings_file_is_left_alone(self):
         self.settings.write_text("{not json")
@@ -213,7 +273,12 @@ class TestInstallingTheStatusLine(unittest.TestCase):
     def test_what_counts_as_ours(self):
         for command, ours in (("/x/qctx statusline", True), ("qctx statusline", True),
                               ("/x/qctx statusline  ", True), ("/x/qctx stats", False),
-                              ("/x/my-statusline", False), (None, False), (42, False)):
+                              ("/x/my-statusline", False), (None, False), (42, False),
+                              ("/x/other statusline", False),
+                              ("'/home/with space/.local/bin/qctx' statusline", True),
+                              ('"/a b/qctx" statusline', True),
+                              ("/x/qctx statusline --other", False),
+                              ("/x/qctx 'statusline", False)):
             with self.subTest(command=command):
                 self.assertEqual(statusline.is_ours(command), ours)
 
@@ -230,6 +295,29 @@ class TestInstallingThroughTheCLI(unittest.TestCase):
                               timeout=30, env=dict(os.environ, QCTX_CONFIG=str(bad)))
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("would add", done.stdout)
+
+    def test_a_launcher_path_with_a_space_is_quoted_and_runs(self):
+        home = Path(tempfile.mkdtemp()) / "home with space"
+        bin_dir = home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        launcher = bin_dir / "qctx"
+        launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+                            f"{shlex.quote(str(CLI))} \"$@\"\n")
+        launcher.chmod(0o755)
+        settings = home / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text("{}\n")
+        env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ.get('PATH', '')}",
+                   QCTX_STATE_DIR=tempfile.mkdtemp())
+        done = subprocess.run([sys.executable, str(CLI), "statusline", "install", "--apply",
+                               "--settings", str(settings)],
+                              capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        command = json.loads(settings.read_text())["statusLine"]["command"]
+        ran = subprocess.run(["sh", "-c", command], input=json.dumps(AT_START),
+                             capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual((ran.returncode, ran.stdout), (0, "ctx · 1M\n"), ran.stderr)
+        self.assertTrue(statusline.is_ours(command), command)
 
     def test_install_reports_and_apply_writes(self):
         settings = Path(tempfile.mkdtemp()) / "settings.json"

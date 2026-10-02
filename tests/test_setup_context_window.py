@@ -10,6 +10,7 @@ claude-code reports its window to one external process only, the statusLine comm
 on claude-code the question is whether `qctx statusline` is installed. hermes reports
 through the provider on every session, so there the question is what it last said.
 """
+import json
 import os
 import sys
 import tempfile
@@ -68,10 +69,40 @@ class TheCheckSaysWhereTheWindowComesFrom(StateDirCase):
         self.assertIn("statusline install --apply", check.fix_hint)
         self.assertIn("config set context-window", check.fix_hint)
 
+    def test_a_stale_status_line_warns_and_names_the_repair(self):
+        check = self.check("stale", context_window=0)
+        self.assertFalse(check.ok)
+        self.assertTrue(check.warning)
+        self.assertIn("no longer exists", check.detail)
+        self.assertIn("statusline install --apply", check.fix_hint)
+
     def test_another_status_line_is_named_and_counts_as_none(self):
         check = self.check("foreign", context_window=0)
         self.assertFalse(check.ok)
         self.assertIn("another status line", check.detail)
+        # `install --apply` never replaces somebody else's status line: not the repair.
+        self.assertNotIn("install --apply", check.fix_hint)
+        self.assertIn("qctx statusline", check.fix_hint)
+
+    def test_an_unreadable_settings_file_is_where_the_repair_starts(self):
+        check = self.check("unreadable", context_window=0)
+        self.assertFalse(check.ok)
+        self.assertIn("repair ~/.claude/settings.json", check.fix_hint)
+
+    def test_a_hermes_guess_warns_even_with_the_status_line_installed(self):
+        """claude-code being covered says nothing about hermes: its last report was a guess
+        and nothing is declared, so the hermes guard allows every read in that session."""
+        hostwindow.publish("s1", "claude-opus-5-5[1m]", 1_000_000, "claude-code")
+        hostwindow.publish("h1", "Qwen3.8-27B", 131_072, "hermes", guess=True)
+        check = self.check("installed", context_window=0)
+        self.assertFalse(check.ok, check.detail)
+        self.assertTrue(check.warning)
+        self.assertIn("on hermes", check.detail)
+        self.assertIn("config set context-window", check.fix_hint)
+
+    def test_a_hermes_guess_with_the_window_declared_is_ok(self):
+        hostwindow.publish("h1", "Qwen3.8-27B", 131_072, "hermes", guess=True)
+        self.assertTrue(self.check("installed", context_window=200_000).ok)
 
     def test_hermes_last_report_is_shown_and_counts(self):
         hostwindow.publish("h1", "Qwen3.8-27B", 524_288, "hermes")
@@ -150,8 +181,18 @@ class TheStatusLineState(unittest.TestCase):
         self.assertEqual((home / ".claude" / "settings.json").read_text(), '{"model": "opus[1m]"}\n')
 
     def test_ours_is_installed(self):
-        self.home('{"statusLine": {"type": "command", "command": "/x/qctx statusline"}}')
+        home = self.home()
+        launcher = home / "bin" / "qctx"
+        launcher.parent.mkdir()
+        launcher.write_text("#!/bin/sh\n")
+        launcher.chmod(0o755)
+        (home / ".claude" / "settings.json").write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": f"{launcher} statusline"}}))
         self.assertEqual(statusline.state(), "installed")
+
+    def test_ours_pointing_at_a_launcher_that_is_gone_is_stale(self):
+        self.home('{"statusLine": {"type": "command", "command": "/gone/bin/qctx statusline"}}')
+        self.assertEqual(statusline.state(), "stale")
 
     def test_the_settings_path_is_the_one_the_install_command_uses(self):
         home = self.home()

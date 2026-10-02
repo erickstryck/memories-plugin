@@ -279,7 +279,13 @@ one.
   ```
 
   It shows `ctx 23% · 1M` at the bottom of claude-code. A status line you already have is left
-  alone; in that case, declare the window instead. `claude -p` runs no status line.
+  alone: have your own status line command hand its input to `qctx statusline` as well, or
+  declare the window. If the `qctx` it runs moves, `qctx setup` says so and `install --apply`
+  points it at the new one. `claude -p` runs no status line.
+
+  Before going back to a version older than 1.3.0, remove the `statusLine` entry from
+  `~/.claude/settings.json`: older versions have no `qctx statusline`, and claude-code would
+  show the error in its place.
 - **hermes** reports through the plugin itself, with nothing to install. For a custom endpoint
   (a `custom_providers` entry), hermes can only learn the window with that endpoint's key, so
   the plugin hands it the key the entry names (`key_env`, or `api_key` written as `${VAR}`);

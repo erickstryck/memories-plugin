@@ -157,6 +157,7 @@ def _check_context_window(cfg: Config, statusline_state: str | None = None) -> C
         parts.append(f"claude-code: statusLine installed, last report {claude or 'none yet'}")
     elif statusline_state is not None:
         why = {"foreign": "another status line is configured",
+               "stale": "its statusLine runs a launcher that no longer exists",
                "unreadable": "its settings.json could not be read"}.get(statusline_state,
                                                                        "no statusLine")
         parts.append(f"claude-code: {why}, so claude-code reports no window")
@@ -169,9 +170,23 @@ def _check_context_window(cfg: Config, statusline_state: str | None = None) -> C
     detail = "; ".join(parts)
 
     if statusline_state not in (None, "installed") and not declared:
+        # `install --apply` repairs only a missing or stale one: it never replaces somebody
+        # else's status line, and it refuses a settings file it cannot parse.
+        repair = {"foreign": f"let your status line command hand its input to "
+                             f"`{COMMAND_PREFIX} statusline`",
+                  "unreadable": f"repair ~/.claude/settings.json, then "
+                                f"{COMMAND_PREFIX} statusline install --apply",
+                  }.get(statusline_state, f"{COMMAND_PREFIX} statusline install --apply")
         return Check("Context window", False,
                      f"{detail}; on claude-code the big-file guard allows every read",
-                     f"{COMMAND_PREFIX} statusline install --apply, or "
+                     f"{repair}, or {COMMAND_PREFIX} config set context-window <n>",
+                     warning=True)
+    if hermes and not hermes_counts and not declared:
+        # claude-code being covered says nothing about hermes: a guess is skipped, so the
+        # hermes session it came from has no window at all.
+        return Check("Context window", False,
+                     f"{detail}; on hermes the big-file guard allows every read in that session",
+                     f"export the variable its custom provider's key_env names, or "
                      f"{COMMAND_PREFIX} config set context-window <n>", warning=True)
     if declared or statusline_state == "installed" or claude_counts or hermes_counts:
         return Check("Context window", True, detail)
