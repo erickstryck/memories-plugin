@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from . import statefile
+from .hostwindow import PATTERN as _WINDOW_PATTERN
 
 #: Rounds before a memory is reinjected in full instead of as a one-line pointer.
 #: The context may have been compacted in between, so a pointer eventually stops being
@@ -101,8 +102,9 @@ def prune(state: dict, reinject_after: int = REINJECT_AFTER) -> int:
 #: against 29 `recall-*.json`, with the oldest counter three weeks older than the oldest
 #: recall file. The list lives HERE, next to the sweep, so a host that starts writing a third
 #: kind of per-session file adds it in one place rather than growing a directory in silence.
-#: It stays narrow on purpose: the log is not session state.
-SESSION_FILE_PATTERNS = ("recall-*.json", "checkpoint-*.count")
+#: It stays narrow on purpose: the log is not session state. The third kind is the context
+#: window a host reported (`core.hostwindow`), whose own module owns its glob.
+SESSION_FILE_PATTERNS = ("recall-*.json", "checkpoint-*.count", _WINDOW_PATTERN)
 
 
 def purge_dead(state_dir, days: float = 7.0, pattern=None) -> int:
