@@ -71,13 +71,19 @@ Evidência em `~/.hermes/cache/scratch/window-measurements.md` e `wm-evidence/`.
   `pre_llm_call`, registrável pelo `register(ctx)` do provider, roda no começo de cada turno,
   antes de qualquer tool call, com `session_id` e o modelo já trocado, e é chamado sem a
   porta `has_hook` (o `pre_api_request` tem a porta, e registrá-lo faria toda requisição
-  montar uma cópia sanitizada do payload). A sessão guarda `billing_provider` e
-  `billing_base_url`, que o `/model` atualiza junto com `model`.
+  montar uma cópia sanitizada do payload). A rota da sessão (provider e base_url) fica no
+  `model_config`, que o `/model` atualiza, e o próprio hermes a lê com
+  `SessionDB.session_gateway_runtime`. Já `billing_provider` e `billing_base_url` são
+  gravados uma vez, na primeira chamada contabilizada, e não acompanham o `/model`.
 - **`get_model_context_length`**, rodado no venv do hermes: `claude-opus-5-5` com provider
   `anthropic` dá 1.000.000 (cache em disco do models.dev, 0,2 ms a quente, sem rede). Um
   modelo desconhecido dá 256.000, o `DEFAULT_FALLBACK_CONTEXT`, que pelo valor não se
   distingue de uma janela real de 256K. Com chave Anthropic que não é OAuth, a função faz um
-  GET sem cache em toda chamada; com `api_key` vazia ela pula esse passo.
+  GET sem cache em toda chamada; com `api_key` vazia ela pula esse passo. Numa rota custom
+  que exige chave (Eukrio, `Qwen3.8-27B`), sem a chave a função cai na tabela por nome do
+  próprio hermes e devolve 131.072, indo à rede a cada chamada; com a chave, devolve
+  524.288, que é o valor informado pelo `/models` do endpoint (258 ms na primeira vez e
+  0,8 ms nas seguintes).
 
 ## Design
 
@@ -129,10 +135,16 @@ que falha (arquivo ausente, import do hermes indisponível) devolve 0 e a próxi
     execução regrava `{model, context_window_size}`. O guard usa o último valor gravado para
     a sessão.
   - hermes: o provider registra `pre_llm_call`. A cada turno ele compara
-    `(modelo, provider, base_url)` da sessão com o último que resolveu e, só quando mudou,
-    chama `get_model_context_length` com os `custom_providers` do próprio hermes e
-    `api_key` vazia, e publica o registro. O primeiro turno de uma sessão é o início dela;
-    o turno depois de um `/model` é a troca.
+    `(modelo, provider, base_url)` da sessão, lidos pelo `session_gateway_runtime` do
+    hermes, com o último que resolveu. Só quando isso muda, ele chama
+    `get_model_context_length` com os `custom_providers` do próprio hermes e publica o
+    registro. A chave vai só nas rotas custom e é lida da variável que a entrada indica
+    (`key_env`); os provedores conhecidos, como a Anthropic, são consultados sem chave
+    (decisão do usuário em 2026-10-02). Uma rota custom que declara chave, mas cuja
+    variável está vazia, é publicada como palpite. Enquanto o hermes não registrou a rota
+    (no primeiro turno de uma sessão nova), vale a rota do config, mas só para o modelo do
+    config. Com outro modelo nada é publicado, e o turno seguinte tenta de novo. O primeiro
+    turno de uma sessão é o início dela; o turno depois de um `/model` é a troca.
 - **Limites, medidos e aceitos**: `claude -p` não tem statusLine, então ali o guard cai no
   config e, sem ele, libera. No claude-code a statusLine descreve o modelo da conversa
   principal; um subagente em outro modelo usa o tamanho dela.

@@ -923,7 +923,11 @@ class MemoriesProvider(_Base):
 
 
 def _load_tools():
-    """Import the sibling `tools` module, in either of the two load modes.
+    return _load_sibling("tools")
+
+
+def _load_sibling(name: str):
+    """Import a sibling module (`tools`, `window`), in either of the two load modes.
 
     `from . import tools` is the normal path: the loader creates a synthetic namespace
     parent and registers the plugin module in `sys.modules` BEFORE exec, which is what
@@ -950,14 +954,13 @@ def _load_tools():
     `tools` package, so that would import the HOST's module and leave the model with no
     memory tools while everything appeared to load.
     """
+    import importlib
     try:
-        from . import tools as module
-
-        return module
-    except ImportError:
+        return importlib.import_module(f".{name}", __package__ or None)
+    except (ImportError, TypeError):
         import importlib.util
-        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tools.py")
-        spec = importlib.util.spec_from_file_location("memories_plugin_hermes_tools", path)
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), f"{name}.py")
+        spec = importlib.util.spec_from_file_location(f"memories_plugin_hermes_{name}", path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -1034,7 +1037,26 @@ def _register_skills(ctx) -> None:
             _note(f"skill {skill.name!r} not registered: {type(exc).__name__}: {exc}")
 
 
+def _register_window_hook(ctx) -> None:
+    """Attach the hook that publishes the session's context window for the big-file guard.
+
+    `pre_llm_call` is the one hook hermes calls with the session's current model, at the
+    start of every turn and before any tool call (`hosts/hermes/window.py` says why it is
+    the provider that does this and not the guard). A host without `register_hook` gets
+    the provider all the same; the guard then falls back to the endpoint cache and the
+    config, exactly as before.
+    """
+    register_hook = getattr(ctx, "register_hook", None)
+    if register_hook is None:
+        return
+    try:
+        register_hook("pre_llm_call", _load_sibling("window").on_pre_llm_call)
+    except Exception as exc:  # noqa: BLE001 -- never cost the provider
+        _note(f"context window hook not registered: {type(exc).__name__}: {exc}")
+
+
 def register(ctx) -> None:
     """Entry point the loader prefers. Also the string discovery greps for."""
     ctx.register_memory_provider(MemoriesProvider())
     _register_skills(ctx)
+    _register_window_hook(ctx)

@@ -211,19 +211,25 @@ fictício); modificar `cli/qctx.py` (subcomando e despacho antecipado); teste em
 
 **Interfaces:**
 - `on_pre_llm_call(session_id: str = "", model: str = "", **_) -> None`. Lê
-  `billing_provider` e `billing_base_url` da sessão por `hosts.hermes.bigfile._rows` e
-  `state_db_path` (só leitura, timeout curto). Se `(model, provider, base_url)` é igual ao
-  último que resolveu para aquela sessão, não faz nada. Senão chama
-  `agent.model_metadata.get_model_context_length(model, base_url=..., api_key="",
-  provider=..., config_context_length=<model.context_length do config do hermes, ou None>,
+  `model_config` e `billing_provider` da sessão por `hosts.hermes.bigfile._rows` e
+  `state_db_path` (só leitura, timeout curto) e obtém a rota com o
+  `SessionDB.session_gateway_runtime` do hermes. Sem rota registrada, usa a do config,
+  mas só para o modelo do config. Se `(model, provider, base_url)` é igual ao último que
+  resolveu para aquela sessão, não faz nada. Senão, chama
+  `agent.model_metadata.get_model_context_length(model, base_url=..., api_key=<a chave da
+  entrada, nas rotas custom; vazia nos provedores conhecidos>, provider=...,
+  config_context_length=<model.context_length do config do hermes, ou None>,
   custom_providers=get_compatible_custom_providers(load_config()))` e publica com
-  `source="hermes"` e `guess = (window == DEFAULT_FALLBACK_CONTEXT)`. Nunca levanta e devolve
-  `None`.
+  `source="hermes"`. Contam como palpite o `DEFAULT_FALLBACK_CONTEXT` e a resposta de uma
+  rota custom que declara chave mas não a tem; um valor fixado nunca é palpite. Nunca
+  levanta e devolve `None`. Revisado em 2026-10-02 por medição e por decisão do usuário:
+  com `api_key` vazia, a rota Eukrio dava 131.072 em vez de 524.288, e os `billing_*` não
+  acompanham o `/model`.
 - `register(ctx)` chama `_register_window_hook(ctx)`: `getattr(ctx, "register_hook", None)`;
   sem ele, nada; com falha, um `_note`.
 
 - [ ] RED com um módulo falso `agent.model_metadata` em `sys.modules` e um `state.db` de
-  fixture com as colunas `billing_*`: o primeiro turno publica 1.000.000 sem palpite; o
+  fixture com as colunas `model_config` e `billing_provider`: o primeiro turno publica 1.000.000 sem palpite; o
   mesmo modelo de novo não chama a função; outro modelo chama e republica; o fallback
   publica com `guess=True`; a função levantando não publica nem propaga; sem o módulo do
   hermes, nada acontece; os kwargs passados são os da interface; o callback devolve `None`;
@@ -234,7 +240,8 @@ fictício); modificar `cli/qctx.py` (subcomando e despacho antecipado); teste em
 - [ ] RED no cutover: o relatório deixa de citar teto por nome de modelo e passa a dizer que
   o provider publica o tamanho por sessão e que o `context_window` só vale quando o hermes
   não sabe.
-- [ ] GREEN e mutações (memo ignorado, palpite marcado como certo, `api_key` repassada).
+- [ ] GREEN e mutações (memo ignorado, palpite marcado como certo, chave repassada a um
+  provedor conhecido, rota lida do `billing_provider`, chave ausente fora do palpite).
 - [ ] Commit: `feat: the hermes provider publishes hermes' own context window per session`.
 
 ### Tarefa 7: Visibilidade e documentação
