@@ -8,8 +8,10 @@ Every check carries its FIX with it. A diagnostic that says "failed" without say
 what to do forces the reader to go hunting through documentation, and that is where
 people give up.
 """
+import time
 from dataclasses import dataclass, asdict
 
+from . import hostwindow, statusline
 from .config import Config, ConfigError
 from .embedding import Embedder
 from .errors import CoreError
@@ -106,25 +108,86 @@ def _check_rerank(cfg: Config) -> Check:
     return Check("Re-rank", True, detail)
 
 
-def _check_context_window(cfg: Config) -> Check:
-    """Not declared is not an error — it is a silence with a cost, so it is a WARNING.
+def _age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    if seconds < 86400:
+        return f"{seconds // 3600} h ago"
 
-    The big-file guard resolves the window from the model name when this is 0, and a model
-    outside the table resolves to 0 too — which allows every read. Whoever runs a 1M
-    variant is right not to declare it; whoever runs a 200k model, or any model the table
-    does not know, has a guard that is installed and inert.
+    return f"{seconds // 86400} d ago"
+
+
+def _last_report(source: str) -> tuple[str, bool]:
+    """(what `source` last published, for a person; whether the guard would use it)."""
+    found = hostwindow.newest(source)
+    if found is None:
+        return "", False
+    record = found[1]
+    said = (f"{record.model or '?'} {statusline.human(record.window)} "
+            f"({_age(time.time() - record.at)})")
+    if record.guess:
+        return f"{said}, a guess the guard ignores", False
+
+    return said, True
+
+
+def _check_context_window(cfg: Config, statusline_state: str | None = None) -> Check:
+    """Where the big-file guard gets each host's window, and whether it gets one at all.
+
+    `core/windows.py` resolves a session's window in one order: what the host reported for
+    that session, what an endpoint reported, `context_window` from the config, otherwise
+    nothing, which allows every read. There is no table of model names behind it, so a
+    session no host reports and nothing declares has a guard that is installed and inert:
+    a silence with a cost, hence a WARNING and not a blocker.
+
+    claude-code reports its window to one external process, the statusLine command, so
+    `statusline_state` (`core.statusline.state()`, None where claude-code is not set up)
+    decides that host. hermes reports through the provider, so its last report does.
     """
-    # `> 0`, and not truthiness: `core/windows.py` gates on `declared > 0`, so a
-    # negative number is resolved per model exactly like a zero. The two disagreeing
-    # about the same field is the failure this check exists to catch.
-    if cfg.context_window > 0:
-        return Check("Context window", True, f"{cfg.context_window} declared")
+    # `> 0`, and not truthiness: `core/windows.py` gates on `declared > 0`. The two
+    # disagreeing about the same field is the failure this check exists to catch.
+    declared = cfg.context_window if cfg.context_window > 0 else 0
+    claude, claude_counts = _last_report(statusline.SOURCE)
+    hermes, hermes_counts = _last_report("hermes")
+    parts = []
+    if statusline_state == "installed":
+        parts.append(f"claude-code: statusLine installed, last report {claude or 'none yet'}")
+    elif statusline_state is not None:
+        why = {"foreign": "another status line is configured",
+               "unreadable": "its settings.json could not be read"}.get(statusline_state,
+                                                                       "no statusLine")
+        parts.append(f"claude-code: {why}, so claude-code reports no window")
+    elif claude:
+        parts.append(f"claude-code: last report {claude}")
+    if hermes:
+        parts.append(f"hermes: last report {hermes}")
+    parts.append(f"context_window: {declared} declared, used only when no host reports one"
+                 if declared else "context_window: not declared")
+    detail = "; ".join(parts)
+
+    if statusline_state not in (None, "installed") and not declared:
+        return Check("Context window", False,
+                     f"{detail}; on claude-code the big-file guard allows every read",
+                     f"{COMMAND_PREFIX} statusline install --apply, or "
+                     f"{COMMAND_PREFIX} config set context-window <n>", warning=True)
+    if declared or statusline_state == "installed" or claude_counts or hermes_counts:
+        return Check("Context window", True, detail)
 
     return Check("Context window", False,
-                 "not declared — resolved per model, and a model outside the table "
-                 "resolves to 0, which allows every read",
-                 f"{COMMAND_PREFIX} config set context-window <n> — only if your model is "
-                 f"not a 1M variant", warning=True)
+                 f"{detail}; no host has reported a window, so the big-file guard allows "
+                 f"every read",
+                 f"{COMMAND_PREFIX} config set context-window <n>", warning=True)
+
+
+def _statusline_state() -> str | None:
+    """`core.statusline.state()`, or None when even reading the settings fails."""
+    try:
+        return statusline.state()
+    except Exception:  # noqa: BLE001 -- a diagnostic must not die on the thing it reports
+        return None
 
 
 def _check_collections(cfg: Config, q) -> list[Check]:
@@ -213,7 +276,8 @@ def diagnose(cfg: Config) -> dict:
     """Runs every check and returns the full picture."""
     check_q, q = _check_qdrant(cfg)
     check_emb, dim = _check_embed(cfg)
-    checks = [check_q, check_emb, _check_rerank(cfg), _check_context_window(cfg)]
+    checks = [check_q, check_emb, _check_rerank(cfg),
+              _check_context_window(cfg, _statusline_state())]
     checks += _check_collections(cfg, q)
 
     blockers = [c for c in checks if not c.ok and not c.warning]

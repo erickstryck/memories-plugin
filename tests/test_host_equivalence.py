@@ -2124,20 +2124,22 @@ class TestTheREADMEDescribesTheGuardThatSHIPPED(unittest.TestCase):
             + (REPO / "docs" / "install.md").read_text()
         self.assertNotIn(DIVERGENCE_HEADING, all_docs)
 
-    def test_it_says_how_to_declare_the_window_the_hosts_cannot_read(self):
-        """The accepted cost of the ceiling table is a guard that sleeps until this is set.
-        Accepted only because it is VISIBLE — which is this paragraph and the cutover
-        script's report."""
+    def test_it_says_how_to_declare_the_window_as_the_last_resort(self):
+        """With no host report and nothing declared the guard allows every read. That cost
+        is accepted only while it is VISIBLE: this paragraph, `qctx setup` and the cutover
+        script's report. (Until v1.3 this pinned the ceiling table's cost instead.)"""
         section = guard_section()
-        self.assertIn("context_window", section)
-        self.assertIn("QCTX_CONTEXT_WINDOW", section)
+        for needle in ("context_window", "QCTX_CONTEXT_WINDOW", "qctx config set context-window"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
 
     def test_it_says_where_the_window_comes_from_on_each_host(self):
         """The window resolution differs by host, and a reader who does not know that will
         declare `context_window` on a host that no longer needs it, or fail to declare it on
         the host that does."""
         section = guard_section()
-        for needle in ("context_window", "/models", "ceiling"):
+        for needle in ("context_window", "/models", "qctx statusline install --apply",
+                       "pre_llm_call", "There is no table of model names"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
 

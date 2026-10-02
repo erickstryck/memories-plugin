@@ -102,6 +102,25 @@ def main(stdin=None, stdout=None) -> int:
     return 0
 
 
+def settings_path() -> Path:
+    """claude-code's user settings, where a status line is configured."""
+    return Path.home() / ".claude" / "settings.json"
+
+
+def state(settings: Path | None = None) -> str | None:
+    """What `qctx setup` reports about the status line, read without writing anything.
+
+    None where claude-code is not set up on this machine (no `~/.claude`): a hermes-only
+    machine must not be told to install a claude-code status line. Otherwise the state
+    `install` would start from (`installed`, `missing`, `foreign`, `unreadable`).
+    """
+    settings = Path(settings) if settings is not None else settings_path()
+    if not settings.parent.is_dir():
+        return None
+
+    return install(settings, "", apply=False)[0]
+
+
 def is_ours(command) -> bool:
     return isinstance(command, str) and command.strip().endswith(COMMAND_TAIL)
 

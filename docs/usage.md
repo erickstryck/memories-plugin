@@ -264,6 +264,33 @@ and `QCTX_CHECKPOINT_DISABLED=1` turns the checkpoint off whatever the interval 
 value that is not a number falls back to 5 and says so on stderr; `config set` refuses one
 outright.
 
+### How the guard learns the context window
+
+The guard needs the window of the model each session is using. Both hosts report it on their
+own, when a session starts and whenever the model changes, and the guard reads what the host
+reported for that session. Your `context_window` setting is used only when no host reported
+one.
+
+- **claude-code** reports through its status line. Install it once:
+
+  ```bash
+  qctx statusline install           # shows what it would change
+  qctx statusline install --apply   # adds it to ~/.claude/settings.json
+  ```
+
+  It shows `ctx 23% · 1M` at the bottom of claude-code. A status line you already have is left
+  alone; in that case, declare the window instead. `claude -p` runs no status line.
+- **hermes** reports through the plugin itself, with nothing to install. For a custom endpoint
+  (a `custom_providers` entry), hermes can only learn the window with that endpoint's key, so
+  the plugin hands it the key the entry names (`key_env`); the key is never written anywhere.
+  The first turn of a new session on a model other than your configured default is not
+  covered; the next one is.
+- **The last resort** is `qctx config set context-window <tokens>`. With no report and no
+  declaration, the guard does not know the window and allows every read.
+
+`qctx setup` shows where the window comes from on your machine and what each host last
+reported.
+
 ### When the big-file guard refuses a read
 
 The guard refuses a file read when the context left after it would be less than

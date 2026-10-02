@@ -172,41 +172,43 @@ about it would unlock the guard by accident, which is the false positive a liter
 there to avoid. A blank value falls back to the default; a marker of spaces would match
 every message ever written.
 
-**Declare `context_window`, or the guard mostly sleeps.** Neither host exposes the window
-size where a hook can read it, and the model name does not settle it: the 1M and the 200k
-variants of a model ship under the same bare name. `core/windows.py` therefore holds a
-**ceiling** per name (the largest window any variant of that name can have) and treats
-`used >= window` as its guess being refuted, which falls back to "unknown window", which
-allows. Erring large only makes the guard sleep; erring small would make it block on a
-guess, which is the one failure this design refuses to produce. The consequence is honest
-and worth planning for: in a 200k session, or under any model the table does not know at
-all, the guard is nearly inert until you say
+**Where the window comes from.** The guard decides by percentage of what REMAINS, so it needs
+the window of the model the session is using now. `core/windows.py` resolves it in four
+steps, each consulted only when the one before it did not answer:
 
-```bash
-qctx config set context-window 200000      # or export QCTX_CONTEXT_WINDOW
-```
-
-`./scripts/hermes_cutover.sh` reports whether that value is declared, and what ceiling it
-would fall back to if not.
-
-**Where the window comes from, and why it differs by host.** The guard decides by percentage
-of what REMAINS, so it needs the window. It resolves in four steps, and each is consulted only
-when the one before it did not answer:
-
-1. `context_window` in your config; declaring it wins over everything.
-2. A window the model's endpoint reported, cached. **hermes only**, because it is the only
-   host that records which endpoint serves the model; the value is refreshed from `/models`
-   by the hook that already talks to the network, never by the guard itself.
-3. The **ceiling** table by model name, the LARGEST window any variant of that name can
-   have, because the transcript records the bare name and a 200k variant is indistinguishable
-   from a 1M one.
+1. What the HOST reported for this session (`core/hostwindow.py`, one record per session),
+   unless the host marked it as a guess.
+2. A window the model's endpoint reported, cached. **hermes only**: it is the only host that
+   records which endpoint serves the model, and the value is refreshed from `/models` by the
+   hook that already talks to the network, never by the guard itself.
+3. `context_window` from your config, the last resort:
+   `qctx config set context-window 200000`, or `export QCTX_CONTEXT_WINDOW=200000`.
 4. Zero, which ALLOWS: blocking on a window we are unsure of is the one failure this guard
    must not produce.
 
-On claude-code, step 2 never fires: the host hands the window to its status line and not to
-hooks, measured. So there the table decides, and it is right for a 1M variant and generous
-for a 200k one. **If you run a 200k session, declare `context_window`**, or the guard will
-believe there is five times more room than there is.
+There is no table of model names. A name says nothing reliable about the window (the
+transcript records `claude-opus-5-5` for a 1M session), and a fixed list cannot follow new
+models. Each host reports what it already knows, when a session starts and when the model
+changes:
+
+- **claude-code** computes the window of the model selected now and hands it to one external
+  process only, the status line command; the hook payloads carry neither the model nor the
+  window (measured on 2.1.282). So `qctx statusline` publishes what it receives. It runs when
+  the REPL mounts, before any prompt, after every assistant message and right after a
+  `/model`. A plugin cannot declare a status line, so `qctx statusline install --apply` (and
+  `scripts/cutover.sh --apply`) adds it to `~/.claude/settings.json`, never replacing one
+  somebody else configured. `claude -p` runs no status line, and a subagent on another model
+  is measured against the main conversation's window.
+- **hermes**: the guard is a shell hook that cannot import hermes, so the memory provider,
+  which runs inside it, registers `pre_llm_call` and, on the first turn of a session and after
+  a `/model`, asks hermes' own `get_model_context_length` about the session's route, read with
+  hermes' `SessionDB.session_gateway_runtime`. hermes' fallback of 256,000 is published as a
+  guess and skipped. A custom endpoint answers only with its key, so a custom route is asked
+  with the key its `custom_providers` entry names (`key_env`); a known provider is asked
+  without one. The key is never stored.
+
+`qctx setup` says which of these applies on the machine and what each host last reported, and
+`./scripts/hermes_cutover.sh` reports the same for hermes.
 
 **The price is the price of the READ, not of the file.** One call loads at most 2,000 lines
 (and on hermes at most 100,000 characters as well), so that is what it is charged. A 3.2 MB
@@ -271,9 +273,11 @@ core/       the portable core, no reference to a host or an agent
   setup.py      diagnostics and suggestions
   knobs.py      the tuning knobs from the environment, read at import
   names.py      turning a name into a filename; one owner of the expression
-  windows.py    the ceiling per model name: the largest window any variant can have
+  windows.py    a session's window: the host's report, an endpoint's, the config, in that order
   windowprobe.py  asking the serving endpoint how big its window is
   windowcache.py  the window an endpoint reported, remembered between processes
+  hostwindow.py  the window each host reported, one record per session
+  statusline.py  claude-code's status line: publishes the window it is handed, installs itself
   blocks.py     the injected block, in all four of its states; one renderer, both hosts
   session_state.py  what was already injected, and when the checkpoint is due
   prompts.py    the instructions and the checkpoint procedure, shared by both hosts

@@ -1668,7 +1668,7 @@ def statusline_command(env: dict) -> str:
 def cmd_statusline(args, cfg):
     if args.action != "install":
         return core.statusline.main()
-    settings = Path(args.settings) if args.settings else Path.home() / ".claude" / "settings.json"
+    settings = Path(args.settings) if args.settings else core.statusline.settings_path()
     state, detail = core.statusline.install(settings, statusline_command(dict(os.environ)),
                                             args.apply)
     lines = {
