@@ -53,6 +53,18 @@ def tracked_tree_into(destination: Path) -> None:
     assert extract.returncode == 0, extract.stderr.decode()[:400]
 
 
+def tracked_text_files():
+    """`(name, text)` for every tracked file with a text suffix. `git ls-files` names them, so an
+    untracked scratch file, which no clone would deliver, is never read."""
+    listed = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True,
+                            timeout=120)
+    assert listed.returncode == 0, listed.stderr
+    for name in listed.stdout.split():
+        path = REPO / name
+        if path.suffix in {".md", ".py", ".sh", ".yaml", ".json", ".txt"} and path.is_file():
+            yield name, path.read_text(errors="replace")
+
+
 class TestTheRepositoryRootIsAWorkingHermesPlugin(unittest.TestCase):
     """`hermes plugins install owner/repo` clones into `$HERMES_HOME/plugins/<name>/`, so the
     thing hermes imports is whatever sits at the repository ROOT. That is the only reason
@@ -364,17 +376,8 @@ class TestTheTreeDoesNotBLOCKItsOwnInstall(unittest.TestCase):
     SECRET_LITERAL = re.compile(
         r"""(?i)(?:api[_-]?key|token|secret|password)\s*[=:]\s*["'][A-Za-z0-9+/=_-]{20,}""")
 
-    def tracked_text_files(self):
-        listed = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True,
-                                timeout=120)
-        self.assertEqual(listed.returncode, 0, listed.stderr)
-        for name in listed.stdout.split():
-            path = REPO / name
-            if path.suffix in {".md", ".py", ".sh", ".yaml", ".json", ".txt"} and path.is_file():
-                yield name, path.read_text(errors="replace")
-
     def test_no_tracked_file_names_the_hermes_config_path_LITERALLY(self):
-        offenders = [n for n, text in self.tracked_text_files() if self.BLOCKING.search(text)]
+        offenders = [n for n, text in tracked_text_files() if self.BLOCKING.search(text)]
         self.assertEqual(offenders, [], "these would make the install BLOCKED, not merely flagged; "
                                         "write $HERMES_HOME/config.yaml instead:\n"
                                         + "\n".join(offenders))
@@ -382,10 +385,49 @@ class TestTheTreeDoesNotBLOCKItsOwnInstall(unittest.TestCase):
     def test_no_tracked_file_carries_a_secret_SHAPED_literal(self):
         """Even a fake one. The scanner cannot tell a fixture from a credential, and a test that
         proves secrets are not printed must not itself look like a leak."""
-        offenders = [n for n, text in self.tracked_text_files()
+        offenders = [n for n, text in tracked_text_files()
                      if self.SECRET_LITERAL.search(text)]
         self.assertEqual(offenders, [], "secret-shaped literals block the install:\n"
                                         + "\n".join(offenders))
+
+
+class TestNoTrackedFilePipesADownloadIntoAShell(unittest.TestCase):
+    """No tracked file pipes a download straight into a shell.
+
+    hermes' install scanner reads the clone's text files, tests and comments included, and flags
+    that shape as download-and-execute (`curl_pipe_shell`, `wget_pipe_shell`). Measured on
+    2026-10-06 against the installed scanner, plugin-guard-v9: the curl form is `high` in a
+    README, a doc, a module or a script (`medium` under `tests/`), and one `high` finding is
+    enough for the install to ask for confirmation. The pattern is `critical` in hermes' skills
+    guard and the plugin scan lowers it in a remap table of its own, so the verdict rests on a
+    table this repo does not control.
+
+    Added with the local stack, which needs Docker or Podman on the machine. Whatever tells the
+    reader how to get one links the vendor's instructions instead of pasting the shape.
+    """
+
+    #: A curl or wget, then on the same line a pipe into sh, bash, zsh or dash.
+    PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b")
+
+    def test_no_tracked_file_pipes_a_download_into_a_shell(self):
+        offenders = [n for n, text in tracked_text_files() if self.PIPE_TO_SHELL.search(text)]
+        self.assertEqual(offenders, [], "a download piped into a shell is flagged by the install "
+                                        "scanner; link the vendor's instructions instead:\n"
+                                        + "\n".join(offenders))
+
+    def test_the_pattern_catches_the_shape(self):
+        """The offending lines are assembled at run time, so this file never carries the shape
+        it forbids: it would be its own first offender, and a finding for the scanner."""
+        for line in ("cu" + "rl -fsSL https://x.example/i" + " | " + "sh",
+                     "wg" + "et -qO- https://x.example/i" + " | " + "bash"):
+            with self.subTest(line=line):
+                self.assertRegex(line, self.PIPE_TO_SHELL)
+
+    def test_a_checksum_pipe_is_not_a_shell(self):
+        """`sha256sum` starts with `sh`. The word boundary is what keeps a download checked
+        against its hash from reading as a download executed."""
+        self.assertNotRegex("cu" + "rl -fsSL https://x.example/i" + " | " + "sha256sum -c",
+                            self.PIPE_TO_SHELL)
 
 
 if __name__ == "__main__":

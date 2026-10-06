@@ -25,8 +25,9 @@ CORE = REPO / "core"
 
 #: The packages `core/` may never import. `cli` is here for the same reason as the hosts: the
 #: CLI is one host's entry point, and a core module reaching into it would make the other
-#: host's behaviour depend on a command line nobody ran.
-FORBIDDEN = {"hooks", "hosts", "cli", "agent"}
+#: host's behaviour depend on a command line nobody ran. `stack` sits above `core/`
+#: (`cli -> stack -> core`); `tests/test_stack_boundaries.py` holds the rest of that direction.
+FORBIDDEN = {"hooks", "hosts", "cli", "agent", "stack"}
 
 
 def imported_packages(path: Path) -> set:
