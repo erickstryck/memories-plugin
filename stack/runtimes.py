@@ -22,7 +22,7 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from . import StackError
 
@@ -31,7 +31,7 @@ from . import StackError
 _INFO_TIMEOUT = 30.0
 
 
-def _as_which(which):
+def _as_which(which: Callable | Mapping[str, str]):
     """The binary lookup as a callable `name -> path | None`. `shutil.which` is the production
     lookup; a mapping is a test double (`dict.get` already answers `None` for a missing name)."""
     if callable(which):
@@ -209,11 +209,14 @@ class Docker:
                               timeout=_INFO_TIMEOUT)
         # one JSON object per line
         result: dict[str, int] = {}
-        for line in out.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
+        try:
+            rows = [json.loads(line) for line in out.stdout.splitlines()
+                    if line.strip()]
+        except json.JSONDecodeError:
+            raise StackError(
+                "docker stats did not return JSON", step="runtime",
+                fix="check the containers are running and try again") from None
+        for row in rows:
             mem = parse_size(_before_slash(row.get("MemUsage", "")))
             if mem is not None:
                 result[row["Name"]] = mem
@@ -262,7 +265,10 @@ class Podman:
     def compose_provider(self) -> ProviderInfo:
         out = self.runner.run(["podman", "compose", "version"], timeout=_INFO_TIMEOUT)
         if not out.ok:
-            return self._standalone_or_problem()
+            # the wrapper itself failed: whether the fix is the socket or a missing
+            # provider is decided by the socket, so do not blame it when it is alive
+            return self._standalone_or_problem(
+                cause="socket" if not self.socket_alive(self._socket_path()) else "wrapper")
         banner = _BANNER.search(out.stderr)
         if banner:
             binary = os.path.basename(banner.group(1))
@@ -278,17 +284,27 @@ class Podman:
         engine = self.engine()
         return engine.socket if engine else None
 
-    def _standalone_or_problem(self, note: str | None = None) -> ProviderInfo:
+    def _standalone_or_problem(self, note: str | None = None,
+                               cause: str = "socket") -> ProviderInfo:
         if self.which("podman-compose") is not None:
             out = self.runner.run(["podman-compose", "version"], timeout=_INFO_TIMEOUT)
             if out.ok:
                 return ProviderInfo(Provider(("podman-compose",), "podman-compose",
                                              _compose_version(out.stdout)), note=note)
         socket = self._socket_path()
-        problem = ("no compose provider: `podman compose` needs the API socket at "
-                   f"{socket}" if socket else "no compose provider: `podman compose` failed")
-        fix = ("systemctl --user enable --now podman.socket" if self.host_system == "linux"
-               else "podman machine start")
+        if cause == "wrapper":
+            # a live socket cannot be the fault: the wrapper is missing or broken
+            problem = ("no compose provider: `podman compose` failed"
+                       f" (the API socket at {socket} answers)" if socket
+                       else "no compose provider: `podman compose` failed")
+            fix = ("check the docker-compose binary `podman compose` delegates to"
+                   if socket else "podman machine start")
+        else:
+            problem = ("no compose provider: `podman compose` needs the API socket at "
+                       f"{socket}" if socket
+                       else "no compose provider: `podman compose` failed")
+            fix = ("systemctl --user enable --now podman.socket" if self.host_system == "linux"
+                   else "podman machine start")
         return ProviderInfo(None, problem=problem, fix=fix, note=note)
 
     def compose(self, provider: Provider, project: str, file: Path, *args: str,
@@ -302,7 +318,12 @@ class Podman:
         out = self.runner.run(["podman", "stats", "--no-stream", "--format", "json", *names],
                               timeout=_INFO_TIMEOUT)
         # a JSON list of objects (lowercase keys), unlike docker's one-object-per-line
-        rows = json.loads(out.stdout)
+        try:
+            rows = json.loads(out.stdout)
+        except json.JSONDecodeError:
+            raise StackError(
+                "podman stats did not return JSON", step="runtime",
+                fix="check the containers are running and try again") from None
         result: dict[str, int] = {}
         for row in rows:
             mem = parse_size(_before_slash(row.get("mem_usage", "")))
@@ -328,7 +349,8 @@ def _before_slash(text: str) -> str:
     return text.split(" / ", 1)[0]
 
 
-def discover(runner: Runner, which=shutil.which, host_system: str = "linux") -> list:
+def discover(runner: Runner, which=shutil.which,
+             host_system: str = "linux") -> list["ContainerRuntime"]:
     """Docker before Podman, only the engines whose binary exists and answers `info`. A binary
     present but whose `info` does not answer is skipped, not an error: the other engine may work."""
     which = _as_which(which)
