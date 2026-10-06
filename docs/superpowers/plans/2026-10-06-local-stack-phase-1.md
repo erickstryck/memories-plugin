@@ -27,14 +27,14 @@ na seção final da spec. Este plano já parte delas. As que mudaram o desenho:
 
 | # | medição | consequência neste plano |
 |---|---|---|
-| M1 | um `containers.conf` com `[containers] devices` injeta `/dev/dri` em todo container; o perfil `cpu` sem `-dev` rodou na GPU (rerank 1,18 s, 204 MB) e com `-dev none` na CPU (7,06 s, 2,8 GB) | `server_command(role, None)` termina em `-dev none` (Tarefa 2) |
-| M2 | `api_base_url` sem `/v1` faz o plugin chamar `/embeddings`, que na `b11382` devolve lista crua e quebra o `Embedder` com `AttributeError` | `stack_urls` grava `/v1` e esvazia `embed_url` (Tarefa 8) |
-| M3 | o `podman info` disse `remoteSocket.exists: true` sem socket nenhum, e o `podman compose` (docker-compose) falhou | o socket é conferido por conexão; com ele parado e o `podman-compose` instalado, usa-se o `podman-compose` (Tarefa 3) |
-| M4 | o `podman-compose run` aloca TTY e devolve `\r\n` | a prova roda `compose run -T`, e o parser tolera `\r` (Tarefas 5 e 10) |
-| M5 | a linha `uma:` não sai com `--list-devices` | o padrão do menu é só a maior memória livre (Tarefa 5) |
-| M6 | os providers prefixam volume e nome de container com o projeto, cada um do seu jeito | `container_name: <projeto>-<serviço>` em todo serviço; o volume real é `<projeto>_memories-plugin-qdrant` (Tarefa 6) |
-| M7 | a primeira chamada custa 3 a 7 vezes a seguinte | a calibração aquece antes de medir (Tarefa 8) |
-| M8 | `--no-webui` é deprecado na `b11382` | `--no-ui` (Tarefa 2) |
+| M1 | um `containers.conf` com `[containers] devices` injeta `/dev/dri` em todo container; o perfil `cpu` sem `-dev` rodou na GPU (rerank 1,18 s, 204 MB) e com `-dev none` na CPU (7,06 s, 2,8 GB) | `server_command(role, None)` termina em `-dev none` (Task 2) |
+| M2 | `api_base_url` sem `/v1` faz o plugin chamar `/embeddings`, que na `b11382` devolve lista crua e quebra o `Embedder` com `AttributeError` | `stack_urls` grava `/v1` e esvazia `embed_url` (Task 8) |
+| M3 | o `podman info` disse `remoteSocket.exists: true` sem socket nenhum, e o `podman compose` (docker-compose) falhou | o socket é conferido por conexão; com ele parado e o `podman-compose` instalado, usa-se o `podman-compose` (Task 3) |
+| M4 | o `podman-compose run` aloca TTY e devolve `\r\n` | a prova roda `compose run -T`, e o parser tolera `\r` (Tasks 5 e 10) |
+| M5 | a linha `uma:` não sai com `--list-devices` | o padrão do menu é só a maior memória livre (Task 5) |
+| M6 | os providers prefixam volume e nome de container com o projeto, cada um do seu jeito | `container_name: <projeto>-<serviço>` em todo serviço; o volume real é `<projeto>_memories-plugin-qdrant` (Task 6) |
+| M7 | a primeira chamada custa 3 a 7 vezes a seguinte | a calibração aquece antes de medir (Task 8) |
+| M8 | `--no-webui` é deprecado na `b11382` | `--no-ui` (Task 2) |
 
 Medidas de referência, para os textos e os testes de integração: CPU com todas as threads, embed
 de 6000 caracteres 0,97 s e rerank de 20 x 2400 7,0 s, com ~1,83 GB e ~2,78 GB de RSS; Intel B70
@@ -108,26 +108,26 @@ por Vulkan, 0,21 s e 1,07 s, com ~200 MB de RSS por container.
 ## Review Focus
 
 1. **Engine que injeta GPU em todo container** (o `containers.conf` de M1): o perfil `cpu` tem de
-   continuar CPU. Testes: `test_cpu_service_is_pinned_to_no_device` (Tarefa 6) e
-   `test_cpu_plan_pins_no_device_even_when_the_engine_injects_gpus` (Tarefa 10).
+   continuar CPU. Testes: `test_cpu_service_is_pinned_to_no_device` (Task 6) e
+   `test_cpu_plan_pins_no_device_even_when_the_engine_injects_gpus` (Task 10).
 2. **Config e ambiente que já apontam para outro lugar:** um `embed_url` antigo no arquivo vence o
    `api_base_url`, e `QDRANT_URL`/`SERVER_BASE_URL` no rc vencem o arquivo. Testes:
-   `test_an_existing_embed_url_is_cleared_by_the_patch` (Tarefa 10) e os de `env_overrides`
-   (Tarefa 8).
+   `test_an_existing_embed_url_is_cleared_by_the_patch` (Task 10) e os de `env_overrides`
+   (Task 8).
 3. **Instalação interrompida:** `.part` deixado por um Ctrl-C e `stack.json` em fase `compose`.
    Rodar de novo retoma o download e não duplica containers. Testes:
-   `test_a_part_file_resumes_from_its_size` (Tarefa 7) e
-   `test_an_interrupted_install_provisions_again` (Tarefa 12).
+   `test_a_part_file_resumes_from_its_size` (Task 7) e
+   `test_an_interrupted_install_provisions_again` (Task 12).
 4. **`stack.json` corrompido:** o `status` tem de dizer isso com a correção, e o `remove` tem de
-   conseguir limpar. Testes: `test_a_corrupt_file_names_itself_and_the_remove_fix` (Tarefa 9) e
-   `test_remove_cleans_even_with_a_corrupt_state` (Tarefa 11).
+   conseguir limpar. Testes: `test_a_corrupt_file_names_itself_and_the_remove_fix` (Task 9) e
+   `test_remove_cleans_even_with_a_corrupt_state` (Task 11).
 5. **Portas:** só uma das três ocupada, e a candidata `+10000` também ocupada. Testes:
    `test_only_the_busy_port_moves` e `test_the_next_free_port_is_taken_when_plus_10000_is_busy`
-   (Tarefa 10).
+   (Task 10).
 
 ---
 
-### Tarefa 1: o pacote, o erro e as fronteiras
+### Task 1: o pacote, o erro e as fronteiras
 
 Primeiro porque todo módulo seguinte levanta `StackError` e mora sob as regras de importação que
 esta tarefa trava.
@@ -185,7 +185,7 @@ Em `tests/test_core_is_portable.py`: `FORBIDDEN = {"hooks", "hosts", "cli", "age
 - [ ] **Step 4:** os dois módulos de teste e `tests.test_core_is_portable` passam.
 - [ ] **Step 5:** commit `feat(stack): package root, StackError and the import boundaries`.
 
-### Tarefa 2: o catálogo
+### Task 2: o catálogo
 
 **Files:**
 - Create: `stack/catalog.py`
@@ -258,7 +258,7 @@ def test_flags_beat_env_beat_catalog(self):
 - [ ] **Step 4:** testes passam.
 - [ ] **Step 5:** commit `feat(stack): the catalogue of images, models and server flags`.
 
-### Tarefa 3: runtimes e o provider de compose
+### Task 3: runtimes e o provider de compose
 
 Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 
@@ -333,14 +333,14 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 - [ ] **Step 4:** testes passam.
 - [ ] **Step 5:** commit `feat(stack): Docker and Podman behind one runtime contract`.
 
-### Tarefa 4: os fatos do host
+### Task 4: os fatos do host
 
 **Files:**
 - Create: `stack/facts.py`
 - Test: `tests/test_stack_facts.py`
 
 **Interfaces:**
-- Consumes: `Runner`, `Completed`, `normalize_arch` (Tarefa 3).
+- Consumes: `Runner`, `Completed`, `normalize_arch` (Task 3).
 - Produces:
   - `@dataclass(frozen=True) class Gpu: vendor: str; card: str`;
   - `@dataclass(frozen=True) class NvidiaFacts: gpus: tuple[str, ...] = (); icd: bool = False;
@@ -379,7 +379,7 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): host facts from injected primitives`.
 
-### Tarefa 5: os perfis de backend
+### Task 5: os perfis de backend
 
 **Files:**
 - Create: `stack/backends.py`
@@ -441,7 +441,7 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): backend profiles and where each one runs`.
 
-### Tarefa 6: o compose gerado e as 9 fixtures
+### Task 6: o compose gerado e as 9 fixtures
 
 **Files:**
 - Create: `stack/compose.py`
@@ -496,7 +496,7 @@ no Linux e `/Users/me/.local/share/memories-plugin/stack` no macOS; sem SELinux.
   nenhuma linha `FAIL`.
 - [ ] **Step 5:** commit `feat(stack): the compose file, rendered from the catalogue and a plan`.
 
-### Tarefa 7: download dos modelos com retomada e barra
+### Task 7: download dos modelos com retomada e barra
 
 **Files:**
 - Create: `stack/fetch.py`
@@ -544,7 +544,7 @@ fora dele, uma linha por fatia de 10%.
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): resumable, verified model download with a progress bar`.
 
-### Tarefa 8: prontidão, verificação funcional, calibração e o ambiente
+### Task 8: prontidão, verificação funcional, calibração e o ambiente
 
 **Files:**
 - Create: `stack/health.py`, `stack/verify.py`
@@ -600,7 +600,7 @@ fora dele, uma linha por fatia de 10%.
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): readiness, functional check, calibration and the env trap`.
 
-### Tarefa 9: o estado gravado
+### Task 9: o estado gravado
 
 **Files:**
 - Create: `stack/state.py`
@@ -630,7 +630,7 @@ fora dele, uma linha por fatia de 10%.
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): stack.json, read tolerantly and written atomically`.
 
-### Tarefa 10: o caso de uso de provisionar
+### Task 10: o caso de uso de provisionar
 
 **Files:**
 - Create: `stack/installer.py`
@@ -639,7 +639,7 @@ fora dele, uma linha por fatia de 10%.
 - Test: `tests/test_stack_installer.py`
 
 **Interfaces:**
-- Consumes: tudo das Tarefas 2 a 9.
+- Consumes: tudo das Tasks 2 a 9.
 - Produces:
   - `class Prompter(Protocol)`: `ask(prompt: str) -> str`; `confirm(prompt: str, *,
     default: bool = False) -> bool`; `choose(title: str, lines: list[str], default: int) -> int`;
@@ -731,7 +731,7 @@ Etapas, uma função privada cada, na ordem da spec ("O que ela faz, em ordem"):
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): the provisioning use case`.
 
-### Tarefa 11: o ciclo de vida
+### Task 11: o ciclo de vida
 
 **Files:**
 - Create: `stack/lifecycle.py`
@@ -780,7 +780,7 @@ Etapas, uma função privada cada, na ordem da spec ("O que ela faz, em ordem"):
 - [ ] **Step 4:** passam.
 - [ ] **Step 5:** commit `feat(stack): status, up, down and remove`.
 
-### Tarefa 12: a ligação com o `qctx`
+### Task 12: a ligação com o `qctx`
 
 **Files:**
 - Create: `stack/cli.py`
@@ -836,7 +836,7 @@ linha dizendo que a stack local não é necessária. `StackError` sobe até o `m
 - [ ] **Step 4:** os testes novos e `tests.test_cli_install` passam.
 - [ ] **Step 5:** commit `feat(stack): qctx stack, and the step in qctx install`.
 
-### Tarefa 13: documentação
+### Task 13: documentação
 
 **Files:**
 - Modify: `README.md`, `docs/usage.md`, `docs/install.md`, `docs/architecture.md`
@@ -868,7 +868,7 @@ linha dizendo que a stack local não é necessária. `StackError` sobe até o `m
   `http://` só localhost).
 - [ ] **Step 5:** commit `docs: the local stack, its commands and where each option runs`.
 
-### Tarefa 14: integração opt-in, rodada nesta máquina
+### Task 14: integração opt-in, rodada nesta máquina
 
 **Files:**
 - Create: `tests/test_stack_integration.py`
@@ -895,7 +895,7 @@ baixar de novo; `QCTX_STACK_IT_RUNTIME` escolhe o runtime.
   teste (provider docker-compose) e parado em seguida.
 - [ ] **Step 4:** commit `test(stack): opt-in integration against a real runtime`.
 
-### Tarefa 15: verificação final
+### Task 15: verificação final
 
 - [ ] **Step 1:** suíte inteira: `TMPDIR=/tmp python3 -m unittest discover -s tests`. Esperado:
   OK, com 1931 mais os testes novos; nenhuma falha nova contra a linha de base de `af124e8`.
