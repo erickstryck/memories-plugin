@@ -343,7 +343,14 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   `docker-compose` exige `socket_alive(engine.socket)`; parado, `podman-compose` no PATH vira o
   provider com `note`; sem ele, `problem` e `fix` (no macOS o fix é `podman machine start`).
   `podman compose version` falhando, tenta `podman-compose version`. No macOS, `engine().vm` vem
-  de `podman machine inspect` (`VMType` em minúsculas).
+  do `Host.VMType` de `podman machine info` (em minúsculas), e `engine().socket` do
+  `ConnectionInfo.PodmanSocket.Path` de `podman machine inspect <Host.CurrentMachine>`: o
+  `remoteSocket` do `podman info` é o caminho dentro da VM, e o `machine inspect` não tem VMType
+  (lido no código do Podman v5.7.0 e v6.0.0). No Docker, `docker info --format '{{json .}}'`
+  (o atalho `json` não existe nos CLIs antigos), `OSType` em `engine().os` e `KernelVersion` em
+  `engine().kernel`. A versão do provider é a da linha que nomeia o compose: o
+  `podman-compose version` daqui imprime `podman version 5.7.0` ANTES de
+  `podman-compose version 1.6.0`.
 - [ ] **Step 4:** testes passam.
 - [ ] **Step 5:** commit `feat(stack): Docker and Podman behind one runtime contract`.
 
@@ -378,7 +385,8 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   - `test_this_machines_shape_two_intel_one_amd_and_the_bmc_ignored` (`card0..card3` com vendors
     `0x8086`, `0x1002`, `0x8086`, `0x1a03`; `card0-DP-1` ignorado; três `Gpu`);
   - `test_render_nodes_are_listed`;
-  - `test_wsl_is_read_from_osrelease`;
+  - `test_wsl_is_read_from_the_kernel_release` (`/proc/sys/kernel/osrelease` com `microsoft`;
+    o `/etc/os-release` é o da distro e não nomeia o WSL);
   - `test_ram_is_mem_available_on_linux` (`MemAvailable: 1000 kB` -> 1024000) e
     `test_ram_on_macos_comes_from_sysctl`;
   - `test_disk_is_measured_at_the_nearest_existing_ancestor`;
@@ -433,18 +441,27 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
     linha de log no meio é ignorada);
   - `test_vendor_of` (inclui `"NVIDIA GeForce RTX 4090"` e `"Virtio-GPU Venus (Apple M2 Pro)"`);
   - `test_the_compatibility_matrix_is_the_specs` (absoluto: Linux `cpu/amd/intel/nvidia` x
-    `docker/podman`; macOS `cpu` x `docker/podman` e `apple` x `podman`; nada mais);
+    `docker/podman`; macOS `cpu` x `docker/podman` e `apple` x `podman`; nada mais, nem a CPU
+    no Windows, que a fase 1 recusa em vez de oferecer CPU);
   - `test_availability_table` (subTests: Dri sem GPU do vendor -> UNSUPPORTED; sem `renderD` ->
-    MISSING com fix; Linux pronto -> READY; NVIDIA sem ICD -> MISSING com
-    `libnvidia-gl-<version>`; Docker sem hook -> MISSING; Podman sem CDI -> MISSING com
-    `nvidia-ctk cdi generate`; Apple no Docker -> RUNTIME com `needs == "podman"`; Apple com VM
+    MISSING com fix; Linux pronto -> READY; NVIDIA sem placa NVIDIA no host -> UNSUPPORTED;
+    placa que o `nvidia-smi` não lista -> MISSING com o driver; NVIDIA sem ICD -> MISSING com
+    `install libnvidia-gl-<version>` (no Podman, seguido do `CDI_GENERATE`); Docker sem hook ->
+    MISSING; Podman sem CDI -> MISSING com
+    `CDI_GENERATE = "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (as root)"`; a
+    palavra do comando de root fica fora do código, porque o scanner do hermes a marca como
+    high num módulo;
+    Apple no Docker -> RUNTIME com `needs == "podman"`; Apple com VM
     `applehv` no Podman 5 -> MISSING com `CONTAINERS_MACHINE_PROVIDER=libkrun podman machine
     init`, no Podman 6 -> `podman machine init --provider libkrun`; Mac Intel -> UNSUPPORTED;
-    libkrun em arm64 -> READY);
-  - `test_service_patches` (Dri no Podman: `/dev/dri` mais a anotação
-    `run.oci.keep_original_groups: "1"`; no Docker, só `/dev/dri`; NVIDIA no Docker: o bloco
+    libkrun em arm64 -> READY, também com o Python sob Rosetta, porque vale o arch do
+    engine; CPU fora de Linux e macOS -> UNSUPPORTED);
+  - `test_service_patches` (Dri no Podman: `/dev/dri:/dev/dri`, a forma do exemplo da spec e
+    das fixtures validadas nos providers, mais a anotação
+    `run.oci.keep_original_groups: "1"`; no Docker, só o device; NVIDIA no Docker: o bloco
     `deploy` com `device_ids ["1"]` e `capabilities [gpu, compute, utility, graphics]`; no Podman:
-    `devices ["nvidia.com/gpu=1"]`; Apple: `/dev/dri`; Cpu: `{}`);
+    `devices ["nvidia.com/gpu=1"]`; NVIDIA sem índice -> `StackError`; Apple: `/dev/dri:/dev/dri`;
+    Cpu: `{}`);
   - `test_devices_seen_filters_by_vendor`;
   - `test_default_is_the_most_free_memory_and_never_experimental` (M5: entre Intel 29268 e 29289
     e AMD 4018, `Vulkan2`; uma Apple READY nunca é o padrão; sem GPU, `cpu`);

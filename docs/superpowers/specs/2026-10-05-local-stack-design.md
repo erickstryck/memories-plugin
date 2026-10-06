@@ -103,7 +103,7 @@ oficial de pacotes do Ubuntu e issues dos projetos. Nada foi executado em contai
 | o plugin instala como hoje | sim | nenhuma etapa existente muda de comportamento |
 | o `qctx` instala as dependências | sim | etapa nova no `qctx install` e grupo `qctx stack` |
 | "só precisa de Docker ou Podman" | sim para CPU; com ressalvas | precisa de um provider de compose: o Docker traz o seu; o Podman precisa de docker-compose ou podman-compose, e o docker-compose fala com o socket da API do Podman, que tem de estar ativo. GPU NVIDIA exige, no host, o driver com o componente Vulkan e o NVIDIA Container Toolkit (CDI no Podman). Apple GPU exige Podman com provider libkrun. O `qctx` detecta e explica cada um; não instala nenhum |
-| identificar SO e hardware | sim, com stdlib | `platform`, `/sys/class/drm/*/device/vendor` (0x1002 AMD, 0x8086 Intel, 0x10de NVIDIA), `nvidia-smi`, `podman machine inspect`. A detecção é só pista: a prova é o próprio container listar a GPU |
+| identificar SO e hardware | sim, com stdlib | `platform`, `/sys/class/drm/*/device/vendor` (0x1002 AMD, 0x8086 Intel, 0x10de NVIDIA), `nvidia-smi`, `podman machine info` e `podman machine inspect`. A detecção é só pista: a prova é o próprio container listar a GPU |
 | o usuário escolhe onde rodar | sim | menu com o estado de cada opção e onde ela funciona: Docker, Podman ou os dois (ver "Compatibilidade", em "Perfis de backend") |
 | compose específico por SO e hardware | sim, e necessário | NVIDIA: o Docker usa `deploy.resources.reservations.devices`, e o `podman compose` ignora esse bloco e exige CDI (podman #28309, #28436). AMD e Intel precisam de `/dev/dri`. Apple, via krunkit. No macOS com Docker Desktop, nenhuma GPU chega ao container; a GPU Apple exige o Podman. No Windows, o Vulkan da imagem oficial não chega à GPU, e por isso o Windows usa a imagem própria (fase 3) |
 | Qdrant sempre em CPU | sim | imagem multi-arch (amd64, arm64), 71 MiB |
@@ -599,7 +599,9 @@ usuário, como o wizard já faz com o PATH.
 
 - **Runtimes**: `docker info` e `podman info` em JSON, com timeout. Deles saem versão, os/arch do
   engine (é o que vale para a imagem e os devices, porque no macOS e no Windows o engine roda numa
-  VM), rootless e socket.
+  VM), kernel, rootless e socket. No Docker, `--format '{{json .}}'`, que toda versão aceita: o
+  atalho `--format json` é recente, e um CLI antigo imprime a palavra `json` no lugar do JSON. O
+  sistema do engine é o `OSType`; o `OperatingSystem` é um rótulo, como "Docker Desktop".
 - **Provider de compose**: `docker compose version`, senão `docker-compose version`;
   `podman compose version`, senão `podman-compose version`. O `podman compose` diz no stderr qual
   provider externo executa (`Executing external compose provider "<caminho>"`). Com o
@@ -614,16 +616,30 @@ usuário, como o wizard já faz com o PATH.
 - **Hardware, no Linux nativo**: o vendor de `/sys/class/drm/card*/device` (o ASPEED de BMC é
   ignorado), `/dev/dri/renderD*` e `nvidia-smi -L`. A prontidão da NVIDIA tem duas partes, cada
   uma com a correção nomeada quando falta:
-  - o toolkit: no Docker, um dos hooks no PATH; no Podman, o spec CDI;
+  - o toolkit: no Docker, um dos hooks no PATH; no Podman, o spec CDI, gerado por
+    `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`, como root (sem `--output`, o
+    comando só imprime o spec e não grava nada);
   - o ICD Vulkan da NVIDIA no host. Sem ele, a correção é instalar o componente GL/Vulkan do
     driver (no Ubuntu, `libnvidia-gl-<versão>`) e, no Podman, regenerar o spec CDI.
+
+  Sem placa NVIDIA no host, o perfil não é oferecido. Com a placa no barramento e o `nvidia-smi`
+  sem listá-la (nouveau, ou driver nenhum), a correção é o driver da NVIDIA.
 
   A prova continua sendo o `--list-devices` do container.
 - **Windows (WSL2, com Docker Desktop ou Podman)**: entra na fase 3, já com os perfis de GPU da
   imagem própria (ver "Imagem própria e GPU no Windows"). Antes disso, a etapa diz que o Windows
-  ainda não é suportado e aponta o caminho manual do README, em vez de oferecer CPU.
+  ainda não é suportado e aponta o caminho manual do README, em vez de oferecer CPU. O WSL é
+  reconhecido pelo kernel: `microsoft` no `/proc/sys/kernel/osrelease` do host (WSL2
+  `...-microsoft-standard-WSL2`, WSL1 `...-Microsoft`) ou no kernel do engine (`KernelVersion` do
+  `docker info`, `host.kernel` do `podman info`). O `/etc/os-release` é o da distro e não diz
+  nada sobre o WSL.
 - **macOS**: o `apple` só existe em Apple Silicon e só no Podman com máquina libkrun, conferida
-  pelo `podman machine inspect`. No Docker Desktop, ou com máquina applehv, ele aparece no menu
+  pelo `Host.VMType` do `podman machine info`. O `podman machine inspect` não traz o tipo da VM
+  (lido no código do Podman: o `InspectInfo` das tags `v5.7.0` e `v6.0.0` não tem esse campo);
+  dele sai o socket da API do lado do host, `ConnectionInfo.PodmanSocket.Path`, da máquina que o
+  `machine info` dá em `Host.CurrentMachine`. É esse socket que o `podman compose` passa ao
+  docker-compose no Mac (`cmd/podman/compose.go`); o `remoteSocket` do `podman info` é o caminho
+  dentro da VM. No Docker Desktop, ou com máquina applehv, ele aparece no menu
   como "só Podman", indisponível, com a correção da versão instalada (ver "Compatibilidade"). Em
   Mac com Intel não há caminho de GPU para container: o menu mostra a CPU e diz por quê.
 - **Outros**: RAM e disco livre antes de baixar; portas por `bind` em `127.0.0.1`; SELinux por
@@ -827,8 +843,8 @@ Se falhar, oferece CPU e diz por quê.
 
 Offline e herméticos, como o resto da suíte (`tests/isolation.py`):
 
-- `facts`: árvores `/sys` falsas e saídas reais de `nvidia-smi`, `docker info`, `podman info` e
-  `podman machine inspect`, por plataforma.
+- `facts`: árvores `/sys` falsas e saídas reais de `nvidia-smi`, `docker info`, `podman info`,
+  `podman machine info` e `podman machine inspect`, por plataforma.
 - `runtimes`: teste de contrato. `Docker`, `Podman` e `Fake` produzem o mesmo formato de argv e
   interpretam as saídas de versão e info.
 - `backends`: a matriz de disponibilidade. `devices_seen` sobre amostras de `--list-devices` no
