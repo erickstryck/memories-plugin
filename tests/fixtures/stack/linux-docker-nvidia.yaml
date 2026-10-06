@@ -1,0 +1,99 @@
+services:
+  qdrant:
+    container_name: "memories-plugin-qdrant"
+    image: "docker.io/qdrant/qdrant:v1.19.2-unprivileged@sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b"
+    restart: "always"
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - "memories-plugin-qdrant:/qdrant/storage"
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    cap_drop:
+      - "ALL"
+    security_opt:
+      - "no-new-privileges:true"
+  embed:
+    container_name: "memories-plugin-embed"
+    image: "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9"
+    restart: "always"
+    command:
+      - "-m"
+      - "/models/bge-m3-Q4_K_M.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--embedding"
+      - "-c"
+      - "8192"
+      - "-b"
+      - "8192"
+      - "-ub"
+      - "8192"
+      - "--no-ui"
+      - "-dev"
+      - "Vulkan0"
+    ports:
+      - "127.0.0.1:8003:8080"
+    volumes:
+      - "/home/me/.local/share/memories-plugin/stack/models:/models:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: "nvidia"
+              device_ids:
+                - "0"
+              capabilities:
+                - "gpu"
+                - "compute"
+                - "utility"
+                - "graphics"
+    cap_drop:
+      - "ALL"
+    security_opt:
+      - "no-new-privileges:true"
+  rerank:
+    container_name: "memories-plugin-rerank"
+    image: "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9"
+    restart: "always"
+    command:
+      - "-m"
+      - "/models/bge-reranker-v2-m3-Q4_K_M.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--reranking"
+      - "-c"
+      - "8192"
+      - "-b"
+      - "8192"
+      - "-ub"
+      - "8192"
+      - "--no-ui"
+      - "-dev"
+      - "Vulkan0"
+    ports:
+      - "127.0.0.1:8004:8080"
+    volumes:
+      - "/home/me/.local/share/memories-plugin/stack/models:/models:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: "nvidia"
+              device_ids:
+                - "0"
+              capabilities:
+                - "gpu"
+                - "compute"
+                - "utility"
+                - "graphics"
+    cap_drop:
+      - "ALL"
+    security_opt:
+      - "no-new-privileges:true"
+volumes:
+  "memories-plugin-qdrant": {}
