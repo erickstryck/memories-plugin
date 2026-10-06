@@ -79,13 +79,14 @@ por Vulkan, 0,21 s e 1,07 s, com ~200 MB de RSS por container.
 - Toda saída de terminal em inglês, no estilo do wizard (`  ok    …`, `  ..    …`, `  FAIL  …`).
   Código, comentários, nomes de teste e mensagens de commit em inglês. Sem `Co-Authored-By`.
 - Docs: nenhum travessão longo, `http://` só para localhost, nenhum download encadeado num
-  shell por pipe, nenhum literal com forma de segredo, nenhum caminho do HOME real (o placeholder
+  shell ou num `python` por pipe, nenhum literal com forma de segredo, nenhum caminho do HOME real (o placeholder
   do repo é `/home/me`).
 - Testes herméticos (`tests/isolation.py`), sem rede, sem runtime real; a integração com runtime
   só com `QCTX_STACK_IT=1`.
 - Suíte: `TMPDIR=/tmp python3 -m unittest discover -s tests`. Linha de base em `af124e8` nesta
-  máquina: 1931 testes, OK, 25 pulados. Com `TMPDIR` dentro do HOME, quatro testes de
-  `assert_hermetic` falham por causa do ambiente, não do código.
+  máquina: 1931 testes, OK, 25 pulados. Com `TMPDIR` dentro do HOME, quatro testes falham por
+  causa do ambiente, não do código: os três `test_the_environment_it_runs_in_is_assembled_not_inherited`
+  e o `test_daemon_claim_gap...test_the_unlink_does_not_remove_a_file_that_replaced_the_one_it_judged`.
 
 ## Engenharia: o que KISS e SOLID pedem aqui
 
@@ -159,6 +160,11 @@ def test_stack_imports_no_host_and_no_cli(self):
            for p in (REPO / "stack").glob("*.py")}
     self.assertEqual({k: v for k, v in bad.items() if v}, {})
 
+def test_stack_imports_only_the_stdlib_core_and_itself(self):   # a restrição "só stdlib"
+    allowed = set(sys.stdlib_module_names) | {"core", "stack"}
+    extra = {p.name: sorted(imported_packages(p) - allowed) for p in (REPO / "stack").glob("*.py")}
+    self.assertEqual({k: v for k, v in extra.items() if v}, {})
+
 def test_the_walk_saw_the_stack_package(self):
     self.assertIn("__init__.py", [p.name for p in (REPO / "stack").glob("*.py")])
 
@@ -169,12 +175,17 @@ def test_stack_error_is_a_core_error_and_names_step_and_fix(self):
     self.assertEqual(str(StackError("x", step="s")), "s: x")
 ```
 
-`tests/test_installable_from_git.py`, classe `TestNoTrackedFilePipesADownloadIntoAShell`:
-`PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b")`;
-`test_no_tracked_file_pipes_a_download_into_a_shell` varre `tracked_text_files()`;
-`test_the_pattern_catches_the_shape` monta a linha ofensiva por concatenação em tempo de
+`tests/test_installable_from_git.py`, classe `TestNoTrackedFilePipesADownloadIntoAnInterpreter`:
+`PIPE_TO_INTERPRETER = re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh|python[0-9.]*)\b")`;
+`test_no_tracked_file_pipes_a_download_into_an_interpreter` varre `tracked_text_files()`;
+`test_the_pattern_catches_the_shape` monta cada linha ofensiva por concatenação em tempo de
 execução (`"cu" + "rl -fsSL https://x.example/i" + " | " + "sh"`), para o arquivo de teste não
-carregar o padrão que o scanner do hermes classifica.
+carregar o padrão que o scanner do hermes classifica: curl em `sh`, wget em `bash`, curl em
+`python3 -m json.tool` e curl em `tee x` e depois `sh`; e não casa curl em `sha256sum -c` nem em
+`jq .`. Por que essa forma (medido no `plugin_guard` instalado em 2026-10-06, revisão da Task 1):
+um curl encadeado em `python` é `critical` e BLOQUEIA o install; em shell é `high`, em qualquer
+estágio do pipe e também em `ksh`. A primeira versão desta regex, só shell e só o primeiro
+estágio, deixava passar a forma que bloqueia.
 
 Em `tests/test_core_is_portable.py`: `FORBIDDEN = {"hooks", "hosts", "cli", "agent", "stack"}`.
 
