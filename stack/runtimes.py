@@ -267,16 +267,21 @@ class Podman:
         if not out.ok:
             # the wrapper itself failed: whether the fix is the socket or a missing
             # provider is decided by the socket, so do not blame it when it is alive
+            socket_path = self._socket_path()
             return self._standalone_or_problem(
-                cause="socket" if not self.socket_alive(self._socket_path()) else "wrapper")
+                cause="socket" if not self.socket_alive(socket_path) else "wrapper",
+                socket=socket_path)
         banner = _BANNER.search(out.stderr)
         if banner:
             binary = os.path.basename(banner.group(1))
             # the docker-compose wrapper needs the live API socket; a native provider does not
-            if binary.startswith("docker-compose") and not self.socket_alive(self._socket_path()):
-                return self._standalone_or_problem(
-                    note="podman compose runs docker-compose, which needs the API socket; "
-                         "falling back to the standalone podman-compose")
+            if binary.startswith("docker-compose"):
+                socket_path = self._socket_path()
+                if not self.socket_alive(socket_path):
+                    return self._standalone_or_problem(
+                        note="podman compose runs docker-compose, which needs the API socket; "
+                             "falling back to the standalone podman-compose",
+                        socket=socket_path)
         return ProviderInfo(Provider(("podman", "compose"), "podman compose",
                                      _compose_version(out.stdout)))
 
@@ -285,13 +290,15 @@ class Podman:
         return engine.socket if engine else None
 
     def _standalone_or_problem(self, note: str | None = None,
-                               cause: str = "socket") -> ProviderInfo:
+                               cause: str = "socket",
+                               socket: str | None = None) -> ProviderInfo:
+        if socket is None:
+            socket = self._socket_path()
         if self.which("podman-compose") is not None:
             out = self.runner.run(["podman-compose", "version"], timeout=_INFO_TIMEOUT)
             if out.ok:
                 return ProviderInfo(Provider(("podman-compose",), "podman-compose",
                                              _compose_version(out.stdout)), note=note)
-        socket = self._socket_path()
         if cause == "wrapper":
             # a live socket cannot be the fault: the wrapper is missing or broken
             problem = ("no compose provider: `podman compose` failed"
