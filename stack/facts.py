@@ -151,11 +151,12 @@ def _render_nodes(probe: Probe) -> tuple[str, ...]:
 
 
 def _wsl(probe: Probe) -> bool:
-    """WSL names `microsoft` in its `os-release`; a native Linux does not. Absent
-    is not WSL."""
-    os_release = probe.root / "etc" / "os-release"
+    """WSL is in the KERNEL release: `...-microsoft-standard-WSL2` on WSL2,
+    `...-Microsoft` on WSL1. `/etc/os-release` is the distro's own file and names no
+    WSL, so it is not read. Absent is not WSL."""
+    osrelease = probe.root / "proc" / "sys" / "kernel" / "osrelease"
     try:
-        return "microsoft" in os_release.read_text().lower()
+        return "microsoft" in osrelease.read_text().lower()
     except OSError:
         return False
 
@@ -191,14 +192,14 @@ def _disk_free(probe: Probe, stack_dir: Path) -> int | None:
     """The free bytes at the nearest EXISTING ancestor of `stack_dir`. The stack
     directory is created later, so the path itself is usually absent: walk up
     until something is there, and read its free space."""
-    target = Path(stack_dir)
-    candidate = target
-    while candidate != candidate.parent:
+    candidate = Path(stack_dir)
+    while True:
         try:
             return shutil.disk_usage(candidate).free
         except OSError:
+            if candidate == candidate.parent:
+                return None  # not even the root answered
             candidate = candidate.parent
-    return None
 
 
 def _selinux(probe: Probe) -> bool:

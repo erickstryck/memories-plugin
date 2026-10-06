@@ -51,12 +51,17 @@ def host(system="linux", arch="amd64", gpus=(), render_nodes=(), nvidia=NvidiaFa
                      render_nodes=tuple(render_nodes), selinux=False, nvidia=nvidia)
 
 
-def engine(name="docker", version="28.0.0", os="linux", rootless=True, vm=None) -> EngineInfo:
+def engine(name="docker", version="28.0.0", os="linux", rootless=True, vm=None,
+           arch="amd64") -> EngineInfo:
     """A frozen engine; only the fields the cases pin differ."""
-    return EngineInfo(name=name, version=version, os=os, arch="amd64",
+    return EngineInfo(name=name, version=version, os=os, arch=arch,
                       rootless=rootless, kernel="6.14.0-37-generic", vm=vm,
                       socket=None)
 
+
+#: The documented CDI generation: without `--output` it prints the spec to stdout
+#: and writes nothing, so the profile would stay missing after the "fix".
+CDI_GENERATE = "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (as root)"
 
 #: The real `--list-devices` output measured on this machine (2026-10-06).
 DEVICES_OUTPUT = """\
@@ -126,10 +131,11 @@ class VendorOfTest(unittest.TestCase):
 class CompatibilityMatrixTest(unittest.TestCase):
     def test_the_compatibility_matrix_is_the_specs(self):
         # Absolute: the spec's "Compatibilidade" table is the only source.
-        # Every (platform, profile) pair the spec names, pinned; the rest must
-        # be empty. Windows enters in phase 3, so nothing runs there yet, but
-        # the CPU row of the spec says both runtimes, so the contract keeps
-        # the promise when phase 3 lands.
+        # Every (platform, profile) pair phase 1 serves, pinned; the rest must
+        # be empty. Windows enters in phase 3, and until then the step says
+        # Windows is not supported "em vez de oferecer CPU" (spec, "Detecção"),
+        # so nothing runs there, the CPU included; neither does a platform the
+        # spec does not name.
         both = frozenset({"docker", "podman"})
         podman = frozenset({"podman"})
         expected = {
@@ -143,16 +149,16 @@ class CompatibilityMatrixTest(unittest.TestCase):
             ("macos", "intel"): frozenset(),
             ("macos", "nvidia"): frozenset(),
             ("macos", "apple"): podman,
-            ("windows", "cpu"): both,
+            ("windows", "cpu"): frozenset(),
             ("windows", "amd"): frozenset(),
             ("windows", "intel"): frozenset(),
             ("windows", "nvidia"): frozenset(),
             ("windows", "apple"): frozenset(),
         }
-        for platform in ("linux", "macos", "windows"):
+        for platform in ("linux", "macos", "windows", "freebsd"):
             for profile in ("cpu", "amd", "intel", "nvidia", "apple"):
                 with self.subTest(platform=platform, profile=profile):
-                    self.assertEqual(expected[(platform, profile)],
+                    self.assertEqual(expected.get((platform, profile), frozenset()),
                                      BACKENDS[profile].runtimes(platform))
 
     def test_backends_dict_is_ordered_and_complete(self):
@@ -206,7 +212,29 @@ class AvailabilityTableTest(unittest.TestCase):
                                      docker_hook=True, cdi_spec=True)),
              engine("podman", "5.7.0"), "podman",
              MISSING, "no nvidia vulkan icd on the host",
-             "libnvidia-gl-<version>", None),
+             "install libnvidia-gl-<version>, then " + CDI_GENERATE, None),
+            # spec, "Detecção": on Docker the icd is the whole fix; on Podman the
+            # CDI spec generated before it lacks the icd, so it is generated again
+            ("nvidia without the icd on docker", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
+                  render_nodes=("renderD128",),
+                  nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=False,
+                                     docker_hook=True, cdi_spec=True)),
+             engine("docker"), "docker",
+             MISSING, "no nvidia vulkan icd on the host",
+             "install libnvidia-gl-<version>", None),
+            # this machine: two Intel cards and an AMD one, no NVIDIA at all
+            ("nvidia on a host with no nvidia gpu", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="intel", card="card0"), Gpu(vendor="amd", card="card1")),
+                  render_nodes=("renderD128", "renderD129")),
+             engine("podman", "5.7.0"), "podman",
+             UNSUPPORTED, "no nvidia gpu on the host", None, None),
+            # the card is on the bus, but no driver lists it (nouveau, or none)
+            ("nvidia card that nvidia-smi does not list", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="nvidia", card="card0"),), render_nodes=("renderD128",),
+                  nvidia=NvidiaFacts(gpus=(), icd=False)),
+             engine("docker"), "docker",
+             MISSING, "nvidia-smi lists no gpu", "install the NVIDIA driver", None),
             ("nvidia docker without the hook", "nvidia", "linux",
              host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
                   render_nodes=("renderD128",),
@@ -221,7 +249,7 @@ class AvailabilityTableTest(unittest.TestCase):
                   nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=True,
                                      docker_hook=True, cdi_spec=False)),
              engine("podman", "5.7.0"), "podman",
-             MISSING, "no nvidia cdi spec", "nvidia-ctk cdi generate", None),
+             MISSING, "no nvidia cdi spec", CDI_GENERATE, None),
             ("nvidia ready on podman", "nvidia", "linux",
              host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
                   render_nodes=("renderD128",),
@@ -247,6 +275,12 @@ class AvailabilityTableTest(unittest.TestCase):
              host(system="macos", arch="amd64"),
              engine("podman", "5.7.0", os="linux"), "podman",
              UNSUPPORTED, "no container gpu path on an intel mac", None, None),
+            # Python under Rosetta reports x86_64 on an Apple Silicon Mac; the
+            # engine's arch (the VM's) is what the spec says counts on macOS
+            ("apple under rosetta", "apple", "macos",
+             host(system="macos", arch="amd64"),
+             engine("podman", "5.7.0", os="linux", vm="libkrun", arch="arm64"), "podman",
+             READY, "", None, None),
             ("apple with a libkrun vm on arm64", "apple", "macos",
              host(system="macos", arch="arm64"),
              engine("podman", "5.7.0", os="linux", vm="libkrun"), "podman",
@@ -276,22 +310,37 @@ class AvailabilityTableTest(unittest.TestCase):
                 self.assertEqual(fix, availability.fix)
                 self.assertEqual(needs, availability.needs)
 
-    def test_cpu_is_ready_on_every_platform(self):
-        for platform in ("linux", "macos", "windows"):
+    def test_cpu_is_ready_on_linux_and_macos_only(self):
+        for platform in ("linux", "macos"):
             with self.subTest(platform=platform):
                 availability = BACKENDS["cpu"].availability(
                     platform, host(), engine("podman", "5.7.0"), "podman")
                 self.assertEqual(READY, availability.state)
                 self.assertEqual("cpu", availability.reason)
                 self.assertIsNone(availability.fix)
+        # phase 1 refuses Windows instead of offering the CPU (spec, "Detecção")
+        for platform in ("windows", "freebsd"):
+            with self.subTest(platform=platform):
+                availability = BACKENDS["cpu"].availability(
+                    platform, host(), engine("podman", "5.7.0"), "podman")
+                self.assertEqual(UNSUPPORTED, availability.state)
+                self.assertIsNone(availability.fix)
 
 
 class ServicePatchTest(unittest.TestCase):
+    def test_an_nvidia_patch_without_a_gpu_index_is_refused(self):
+        # `nvidia.com/gpu=None` would reach the compose file and fail at `up`
+        for runtime in ("docker", "podman"):
+            with self.subTest(runtime=runtime):
+                with self.assertRaises(StackError) as ctx:
+                    BACKENDS["nvidia"].service_patch(runtime, None)
+                self.assertEqual("backends", ctx.exception.step)
+
     def test_service_patches(self):
-        self.assertEqual({"devices": ["/dev/dri"],
+        self.assertEqual({"devices": ["/dev/dri:/dev/dri"],
                           "annotations": {"run.oci.keep_original_groups": "1"}},
                          BACKENDS["amd"].service_patch("podman", None))
-        self.assertEqual({"devices": ["/dev/dri"]},
+        self.assertEqual({"devices": ["/dev/dri:/dev/dri"]},
                          BACKENDS["intel"].service_patch("docker", None))
         self.assertEqual({"deploy": {"resources": {"reservations": {"devices":
                          [{"driver": "nvidia", "device_ids": ["1"],
@@ -300,13 +349,13 @@ class ServicePatchTest(unittest.TestCase):
                          BACKENDS["nvidia"].service_patch("docker", 1))
         self.assertEqual({"devices": ["nvidia.com/gpu=1"]},
                          BACKENDS["nvidia"].service_patch("podman", 1))
-        self.assertEqual({"devices": ["/dev/dri"]},
+        self.assertEqual({"devices": ["/dev/dri:/dev/dri"]},
                          BACKENDS["apple"].service_patch("podman", None))
         self.assertEqual({}, BACKENDS["cpu"].service_patch("docker", None))
         # The annotation rides on EVERY podman service patch of a dri profile:
         # it is required rootless and harmless rootful, so there is no branch
         # on rootless.
-        self.assertEqual({"devices": ["/dev/dri"],
+        self.assertEqual({"devices": ["/dev/dri:/dev/dri"],
                           "annotations": {"run.oci.keep_original_groups": "1"}},
                          BACKENDS["intel"].service_patch("podman", None))
 

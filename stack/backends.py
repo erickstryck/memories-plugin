@@ -18,9 +18,18 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from . import StackError  # noqa: F401  (part of the package's error contract)
+from . import StackError
 from .facts import HostFacts
 from .runtimes import EngineInfo
+
+#: The platforms phase 1 serves. Windows (WSL included) enters in phase 3, and
+#: until then the step refuses it instead of offering the CPU (spec, "Detecção").
+_PHASE1_PLATFORMS = ("linux", "macos")
+
+#: The documented CDI generation (NVIDIA Container Toolkit), run as root because it
+#: writes under /etc/cdi. Without `--output` it prints the spec to stdout and writes
+#: nothing, so it would fix nothing.
+CDI_GENERATE = "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (as root)"
 
 #: The states the menu shows for an option. A `runtime` state means the profile
 #: runs, but on the OTHER runtime: it carries `needs`, not a fix.
@@ -82,8 +91,6 @@ def vendor_of(name: str) -> str | None:
         return "intel"
     if "Virtio" in name or "Venus" in name or "Apple" in name:
         return "apple"
-    if "llvmpipe" in name:
-        return None
     return None
 
 
@@ -124,10 +131,15 @@ class Cpu:
     image_role: str | None = None
 
     def runtimes(self, platform: str) -> frozenset[str]:
-        return frozenset({"docker", "podman"})
+        if platform in _PHASE1_PLATFORMS:
+            return frozenset({"docker", "podman"})
+        return frozenset()
 
     def availability(self, platform: str, facts: HostFacts, engine: EngineInfo,
                      runtime: str) -> Availability:
+        if platform not in _PHASE1_PLATFORMS:
+            return Availability(state=UNSUPPORTED,
+                                reason="the stack runs on linux and macos in this version")
         return Availability(state=READY, reason="cpu")
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
@@ -170,7 +182,9 @@ class DriGpu:
         return Availability(state=READY)
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
-        patch: dict = {"devices": ["/dev/dri"]}
+        # the explicit host:container form, as in the spec's example and the nine
+        # shapes the opening verification ran through both providers
+        patch: dict = {"devices": ["/dev/dri:/dev/dri"]}
         if runtime == "podman":
             patch["annotations"] = {"run.oci.keep_original_groups": "1"}
         return patch
@@ -198,22 +212,36 @@ class NvidiaGpu:
                      runtime: str) -> Availability:
         if platform != "linux":
             return Availability(state=UNSUPPORTED, reason="nvidia runs on linux only")
+        if not any(g.vendor == "nvidia" for g in facts.gpus):
+            # offered only with an NVIDIA GPU on the host (spec, "Perfis de backend")
+            return Availability(state=UNSUPPORTED, reason="no nvidia gpu on the host")
+        if not facts.nvidia.gpus:
+            # the card is on the bus, but no driver lists it (nouveau, or none)
+            return Availability(state=MISSING, reason="nvidia-smi lists no gpu",
+                                fix="install the NVIDIA driver")
         if not facts.nvidia.icd:
-            # The spec's named correction: the GL/Vulkan component of the
-            # driver, `libnvidia-gl-<version>` on Ubuntu.
+            # The spec's named correction: the GL/Vulkan component of the driver,
+            # `libnvidia-gl-<version>` on Ubuntu; on Podman the CDI spec generated
+            # before it lacks the icd, so it is generated again.
+            fix = "install libnvidia-gl-<version>"
+            if runtime == "podman":
+                fix += ", then " + CDI_GENERATE
             return Availability(state=MISSING,
-                                reason="no nvidia vulkan icd on the host",
-                                fix="libnvidia-gl-<version>")
+                                reason="no nvidia vulkan icd on the host", fix=fix)
         if runtime == "docker" and not facts.nvidia.docker_hook:
             return Availability(state=MISSING,
                                 reason="no nvidia container runtime hook",
                                 fix="install nvidia-container-toolkit")
         if runtime == "podman" and not facts.nvidia.cdi_spec:
             return Availability(state=MISSING, reason="no nvidia cdi spec",
-                                fix="nvidia-ctk cdi generate")
+                                fix=CDI_GENERATE)
         return Availability(state=READY)
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
+        if gpu_index is None:
+            # `nvidia.com/gpu=None` would reach the compose file and fail at `up`
+            raise StackError("the nvidia profile needs the nvidia-smi index of a gpu",
+                             step="backends")
         if runtime == "podman":
             # Podman ignores the `deploy` block (podman #28309, #28436): the
             # CDI device is the only form it accepts.
@@ -249,8 +277,11 @@ class AppleGpu:
                      runtime: str) -> Availability:
         if platform != "macos":
             return Availability(state=UNSUPPORTED, reason="apple runs on macos only")
-        if facts.arch != "arm64":
+        if "arm64" not in (facts.arch, engine.arch):
             # An Intel Mac has no container GPU path at all (spec, "Detecção").
+            # Either arch saying arm64 is enough: Python under Rosetta reports
+            # x86_64 on Apple Silicon, and the engine's arch (the VM's) is the one
+            # the spec says counts on macOS.
             return Availability(state=UNSUPPORTED,
                                 reason="no container gpu path on an intel mac")
         if runtime == "docker":
@@ -267,7 +298,7 @@ class AppleGpu:
         return Availability(state=READY)
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
-        return {"devices": ["/dev/dri"]}
+        return {"devices": ["/dev/dri:/dev/dri"]}
 
     def devices_seen(self, output: str) -> list[Device]:
         return [d for d in parse_devices(output) if d.vendor == "apple"]

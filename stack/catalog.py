@@ -13,8 +13,8 @@ BUMP PROCEDURE (spec, "Bump e override"), once per release that touches this fil
 2. Qdrant: the NEXT MINOR ONLY, never skip. Qdrant guarantees storage compatibility only
    between consecutive minors, and `qdrant_version` feeds the guard that enforces it on
    `up --upgrade`.
-3. Run the opt-in integration against the new pins and regenerate the golden fixtures:
-   `QCTX_STACK_IT=1 python3 tests/test_stack_compose.py --regen`.
+3. Run the opt-in integration (`QCTX_STACK_IT=1`) against the new pins, then
+   regenerate the golden fixtures: `python3 tests/test_stack_compose.py --regen`.
    (The llama-dzn image is phase 3; its digest is copied from the build workflow instead.)
 
 OVERRIDES: `--image ROLE=REF` (parsed by `parse_image_flags`) beats the
@@ -124,7 +124,8 @@ def qdrant_version(ref: str) -> str:
     A digest-only reference carries no version, and `latest` is not a version either:
     both refuse, because a guard that reads a guess is worse than no guard.
     """
-    tag = ref.partition("@")[0].partition(":")[2]
+    # the tag of the LAST path segment: a registry port (`host:5000/...`) never reaches it
+    tag = ref.partition("@")[0].rsplit("/", 1)[-1].partition(":")[2]
     match = _QDRANT_VERSION.match(tag)
     if match is None:
         raise StackError(f"no Qdrant version in: {ref}", step="catalog")

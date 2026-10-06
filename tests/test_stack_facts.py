@@ -106,28 +106,28 @@ class TestGpuDiscovery(unittest.TestCase):
 
 
 class TestTheOsFacts(unittest.TestCase):
-    def test_wsl_is_read_from_osrelease(self):
+    def test_wsl_is_read_from_the_kernel_release(self):
+        """WSL is the kernel's, not the distro's: `/proc/sys/kernel/osrelease` says
+        `microsoft` (WSL2 `...-microsoft-standard-WSL2`, WSL1 `...-Microsoft`), while
+        `/etc/os-release` is the distro's own file and names no WSL at all."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
+            (root / "proc" / "sys" / "kernel").mkdir(parents=True)
+            osrelease = root / "proc" / "sys" / "kernel" / "osrelease"
+            # a distro file that even says microsoft does not make a native kernel WSL
             (root / "etc").mkdir(parents=True)
-
-            # the WSL2 os-release names microsoft; case is not something to depend on
             (root / "etc" / "os-release").write_text(
-                'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\n')
-            facts = collect(linux_probe(root), root / "stack")
-            self.assertFalse(facts.wsl)
+                'NAME="Ubuntu"\nPRETTY_NAME="Ubuntu on microsoft hardware"\n')
 
-            (root / "etc" / "os-release").write_text(
-                'NAME="Ubuntu"\nID_LIKE=wsl\nWSL_DISTRO_NAME="Ubuntu"\n')
-            # the WSL2 kernel names itself microsoft; the file is case-sensitive to nobody
-            (root / "etc" / "os-release").write_text(
-                'NAME="Ubuntu"\nID_LIKE=wsl\nmicrosoft build\n')
-            facts = collect(linux_probe(root), root / "stack")
-            self.assertTrue(facts.wsl)
+            for release, wsl in (("7.0.0-34-generic\n", False),
+                                 ("5.15.167.4-microsoft-standard-WSL2\n", True),
+                                 ("4.4.0-19041-Microsoft\n", True)):
+                with self.subTest(release=release.strip()):
+                    osrelease.write_text(release)
+                    self.assertEqual(collect(linux_probe(root), root / "stack").wsl, wsl)
 
-            (root / "etc" / "os-release").unlink()
-            facts = collect(linux_probe(root), root / "stack")
-            self.assertFalse(facts.wsl)
+            osrelease.unlink()
+            self.assertFalse(collect(linux_probe(root), root / "stack").wsl)
 
     def test_ram_is_mem_available_on_linux(self):
         """`MemAvailable` is the number the kernel gives for what is actually free."""
@@ -171,6 +171,15 @@ class TestTheOsFacts(unittest.TestCase):
         self.assertIsNotNone(facts.disk_free_bytes)
         self.assertGreater(facts.disk_free_bytes, 0)
         self.assertEqual(facts.disk_free_bytes, expected)
+
+    def test_disk_falls_back_to_the_filesystem_root(self):
+        """Nothing on the way up exists but `/`: the root's free space is still the
+        answer, not `None`."""
+        missing = Path("/nonexistent-qctx-stack-review")
+        facts = collect(linux_probe(missing), missing / "a" / "stack")
+
+        self.assertIsNotNone(facts.disk_free_bytes)
+        self.assertGreater(facts.disk_free_bytes, 0)
 
     def test_selinux_enforcing_is_read(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -56,22 +56,58 @@ PODMAN_COMPOSE_VERSION = Completed(
     'Please see podman-compose(1) for how to disable this message. <<<<')
 PODMAN_COMPOSE_VERSION_FAILED = Completed(1, "", "no such command: podman compose")
 
-#: The real `podman-compose version` here.
+#: The real `podman-compose version` here (podman 5.7.0, podman-compose 1.6.0): the podman
+#: line comes FIRST, so the provider's version is the one on the line that names compose.
 PODMAN_COMPOSE_VERSION_STANDALONE = Completed(
-    0, "podman-compose version 1.6.0\npodman version 5.7.0")
+    0, "podman version 5.7.0\npodman-compose version 1.6.0\n")
 
-#: A well-formed `docker info --format json` (example, per the brief).
+#: The fields of `docker info --format '{{json .}}'` that `engine()` reads, under the
+#: Docker API's `/info` names. There is no Docker engine on this machine, so these are an
+#: example, not a measurement. `OSType` is the engine's OS; `OperatingSystem` is a label
+#: (a distro, or "Docker Desktop").
 DOCKER_INFO = {
     "ServerVersion": "28.3.2",
+    "OSType": "linux",
     "OperatingSystem": "Ubuntu 24.04.3 LTS",
+    "KernelVersion": "6.8.0-45-generic",
     "Architecture": "x86_64",
     "SecurityOptions": ["name=seccomp,profile=default", "name=rootless"],
 }
-DOCKER_INFO_ROOTFUL = {
-    "ServerVersion": "28.3.2",
-    "OperatingSystem": "Ubuntu 24.04.3 LTS",
-    "Architecture": "x86_64",
-    "SecurityOptions": ["name=seccomp,profile=default"],
+DOCKER_INFO_ROOTFUL = {**DOCKER_INFO, "SecurityOptions": ["name=seccomp,profile=default"]}
+#: Docker Desktop with the WSL2 backend: the engine kernel is the WSL one.
+DOCKER_INFO_WSL = {**DOCKER_INFO, "OperatingSystem": "Docker Desktop",
+                   "KernelVersion": "5.15.167.4-microsoft-standard-WSL2"}
+#: `--format '{{json .}}'` works on every Docker CLI. The `--format json` shorthand exists
+#: only since Docker 23; an older CLI prints the literal word `json` instead.
+DOCKER_JSON = "{{json .}}"
+
+#: A Mac. `podman info` answers from INSIDE the VM, so its socket is the VM's path; the
+#: one `podman compose` hands docker-compose is the host side one, from the machine's
+#: ConnectionInfo. Shapes read in the podman source at v5.7.0 and v6.0.0
+#: (pkg/machine/config.go InspectInfo, pkg/domain/entities/machine.go MachineHostInfo,
+#: cmd/podman/compose.go composeDockerHost): `podman machine inspect` has NO VMType.
+MACOS_PODMAN_INFO = {
+    "version": {"Version": "5.7.0"},
+    "host": {
+        "os": "linux",
+        "arch": "arm64",
+        "kernel": "6.17.7-200.fc43.aarch64",
+        "security": {"rootless": True},
+        "remoteSocket": {"path": "/run/user/501/podman/podman.sock", "exists": True},
+    },
+}
+MACOS_HOST_SOCKET = "/var/folders/zz/T/podman/podman-machine-default-api.sock"
+MACOS_RESPONSES = {
+    ("podman", "info", "--format", "json"): Completed(0, json.dumps(MACOS_PODMAN_INFO)),
+    ("podman", "machine", "info", "--format", "json"): Completed(0, json.dumps(
+        {"Host": {"VMType": "libkrun", "CurrentMachine": "podman-machine-default",
+                  "MachineState": "Running"},
+         "Version": {"Version": "5.7.0"}})),
+    ("podman", "machine", "inspect", "podman-machine-default"): Completed(0, json.dumps(
+        [{"Name": "podman-machine-default", "State": "running",
+          "ConnectionInfo": {"PodmanSocket": {"Path": MACOS_HOST_SOCKET},
+                             "PodmanPipe": None}}])),
+    ("podman", "compose", "version"): PODMAN_COMPOSE_VERSION,
 }
 DOCKER_COMPOSE_VERSION = Completed(0, "Docker Compose version v2.35.0")
 DOCKER_COMPOSE_VERSION_FAILED = Completed(1, "", "docker: 'compose' is not a docker command.")
@@ -154,21 +190,60 @@ class TestTheEngine(unittest.TestCase):
         self.assertIsNone(no_info.engine())
 
     def test_docker_engine_reads_rootless_from_security_options(self):
-        docker = Docker(FakeRunner({("docker", "info", "--format", "json"):
+        docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
                                     Completed(0, json.dumps(DOCKER_INFO))}),
                         which={"docker": "/usr/bin/docker"})
         engine = docker.engine()
 
         self.assertEqual(engine.name, "docker")
         self.assertEqual(engine.version, "28.3.2")
-        self.assertEqual(engine.os, "Ubuntu 24.04.3 LTS")
+        self.assertEqual(engine.os, "linux")  # OSType, not the distro label
+        self.assertEqual(engine.kernel, "6.8.0-45-generic")
         self.assertEqual(engine.arch, "amd64")  # x86_64 normalized
         self.assertTrue(engine.rootless)
 
-        rootful = Docker(FakeRunner({("docker", "info", "--format", "json"):
+        rootful = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
                                      Completed(0, json.dumps(DOCKER_INFO_ROOTFUL))}),
                          which={"docker": "/usr/bin/docker"})
         self.assertFalse(rootful.engine().rootless)
+
+    def test_docker_desktop_on_wsl_carries_the_wsl_kernel(self):
+        # platform_of reads `microsoft` in the engine kernel to send WSL to the phase-3
+        # refusal; without the kernel, a Docker engine under WSL would pass for linux.
+        docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
+                                    Completed(0, json.dumps(DOCKER_INFO_WSL))}),
+                        which={"docker": "/usr/bin/docker"})
+        self.assertIn("microsoft", docker.engine().kernel)
+
+    def test_an_engine_whose_info_is_not_json_is_absent(self):
+        # What a Docker CLI older than 23 prints for `--format json`: the literal word.
+        # The engine counts as not answering (discover skips it), never a traceback.
+        docker = Docker(FakeRunner({("docker", "info"): Completed(0, "json\n")}),
+                        which={"docker": "/usr/bin/docker"})
+        self.assertIsNone(docker.engine())
+        podman = Podman(FakeRunner({("podman", "info"): Completed(0, "not json")}),
+                        which={"podman": "/usr/bin/podman"}, host_system="linux")
+        self.assertIsNone(podman.engine())
+
+    def test_on_macos_the_vm_type_and_the_socket_come_from_the_machine(self):
+        podman = Podman(FakeRunner(MACOS_RESPONSES),
+                        which={"podman": "/opt/podman/bin/podman"}, host_system="macos")
+        engine = podman.engine()
+
+        self.assertEqual(engine.vm, "libkrun")
+        self.assertEqual(engine.socket, MACOS_HOST_SOCKET)
+        self.assertEqual(engine.arch, "arm64")
+
+    def test_on_macos_a_machine_that_does_not_answer_leaves_vm_and_socket_unknown(self):
+        responses = {**MACOS_RESPONSES,
+                     ("podman", "machine", "info", "--format", "json"):
+                         Completed(125, "", "Error: no machine")}
+        podman = Podman(FakeRunner(responses),
+                        which={"podman": "/opt/podman/bin/podman"}, host_system="macos")
+        engine = podman.engine()
+
+        self.assertIsNone(engine.vm)
+        self.assertIsNone(engine.socket)
 
     def test_normalize_arch_folds_machine_names(self):
         self.assertEqual(normalize_arch("x86_64"), "amd64")
@@ -238,6 +313,16 @@ class TestTheComposeProvider(unittest.TestCase):
         self.assertEqual(info.provider.version, "v5.2.0")
         self.assertIsNone(info.problem)
         self.assertIsNone(info.note)
+
+    def test_on_macos_the_liveness_check_asks_the_host_side_socket(self):
+        asked = []
+        podman = Podman(FakeRunner(MACOS_RESPONSES),
+                        which={"podman": "/opt/podman/bin/podman"}, host_system="macos",
+                        socket_alive=lambda path: asked.append(path) or True)
+        info = podman.compose_provider()
+
+        self.assertEqual(info.provider.argv, ("podman", "compose"))
+        self.assertEqual(asked, [MACOS_HOST_SOCKET])
 
     def test_a_native_podman_compose_needs_no_socket(self):
         # The banner names something that is not docker-compose: `podman compose` talks to
@@ -328,7 +413,7 @@ class TestTheSizeAndStats(unittest.TestCase):
                          {"memories-plugin-qdrant": 190700000,
                           "memories-plugin-embed": 2147483648})
 
-        docker = Docker(FakeRunner({("docker", "stats", "--no-stream", "--format", "json"):
+        docker = Docker(FakeRunner({("docker", "stats", "--no-stream", "--format", DOCKER_JSON):
                                     Completed(0, DOCKER_STATS)}),
                         which={"docker": "/usr/bin/docker"})
         self.assertEqual(docker.stats(["a", "b"]),
@@ -356,6 +441,12 @@ class TestTheSubprocessRunner(unittest.TestCase):
         self.assertIn("sleep", str(ctx.exception))
         self.assertIn("0.1", str(ctx.exception))
 
+    def test_a_streamed_command_that_hangs_is_a_stack_error_too(self):
+        with self.assertRaises(StackError) as ctx:
+            SubprocessRunner().run(["sleep", "30"], timeout=0.1, stream=True)
+
+        self.assertEqual(ctx.exception.step, "runtime")
+
     def test_the_runner_captures_when_not_streaming(self):
         completed = SubprocessRunner().run(["echo", "hi"], timeout=5.0)
 
@@ -368,7 +459,7 @@ class TestDiscover(unittest.TestCase):
         # docker: binary present, `docker info` does not answer -> skipped.
         # podman: binary present, `podman info` answers -> kept.
         responses = {
-            ("docker", "info", "--format", "json"): Completed(1, "", "permission denied"),
+            ("docker", "info", "--format", DOCKER_JSON): Completed(1, "", "permission denied"),
             ("podman", "info", "--format", "json"): Completed(0, json.dumps(_info(True))),
         }
         runtimes_found = discover(FakeRunner(responses),
@@ -379,7 +470,7 @@ class TestDiscover(unittest.TestCase):
 
     def test_discover_lists_docker_before_podman(self):
         responses = {
-            ("docker", "info", "--format", "json"): Completed(0, json.dumps(DOCKER_INFO)),
+            ("docker", "info", "--format", DOCKER_JSON): Completed(0, json.dumps(DOCKER_INFO)),
             ("podman", "info", "--format", "json"): Completed(0, json.dumps(_info(True))),
         }
         runtimes_found = discover(FakeRunner(responses),

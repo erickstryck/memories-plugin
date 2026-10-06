@@ -29,6 +29,9 @@ from . import StackError
 #: `podman info` and the version commands are cheap; the bounds come from the plan's Global
 #: Constraints (30 s for info/version).
 _INFO_TIMEOUT = 30.0
+#: `--format '{{json .}}'` works on every Docker CLI; the `--format json` shorthand exists only
+#: since Docker 23, and an older CLI prints the literal word `json` instead.
+_DOCKER_JSON = "{{json .}}"
 
 
 def _as_which(which: Callable | Mapping[str, str]):
@@ -66,10 +69,10 @@ class SubprocessRunner:
     def run(self, argv: list[str], *, timeout: float, stream: bool = False) -> Completed:
         if self.which(argv[0]) is None:
             return Completed(127, "", f"{argv[0]}: not found")
-        if stream:
-            # inherit the terminal's stdout/stderr; the progress bar is the provider's to draw
-            return Completed(subprocess.run(argv, timeout=timeout).returncode)
         try:
+            if stream:
+                # inherit the terminal's stdout/stderr; the progress bar is the provider's
+                return Completed(subprocess.run(argv, timeout=timeout).returncode)
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise StackError(
@@ -175,14 +178,21 @@ class Docker:
     def engine(self) -> EngineInfo | None:
         if self.which("docker") is None:
             return None
-        out = self.runner.run(["docker", "info", "--format", "json"], timeout=_INFO_TIMEOUT)
+        out = self.runner.run(["docker", "info", "--format", _DOCKER_JSON],
+                              timeout=_INFO_TIMEOUT)
         if not out.ok:
             return None
-        info = json.loads(out.stdout)
+        try:
+            info = json.loads(out.stdout)
+        except json.JSONDecodeError:
+            return None  # an engine whose info is not JSON does not answer
         # rootless is a security option here, not a dedicated field
         rootless = any("rootless" in opt for opt in info.get("SecurityOptions", []))
-        return EngineInfo("docker", info.get("ServerVersion", ""), info.get("OperatingSystem", ""),
-                          normalize_arch(info.get("Architecture", "")), rootless)
+        # `OSType` is the engine's OS (`OperatingSystem` is a label such as "Docker
+        # Desktop"); the kernel is what tells WSL apart (`platform_of`)
+        return EngineInfo("docker", info.get("ServerVersion", ""), info.get("OSType", ""),
+                          normalize_arch(info.get("Architecture", "")), rootless,
+                          kernel=info.get("KernelVersion", ""))
 
     def compose_provider(self) -> ProviderInfo:
         out = self.runner.run(["docker", "compose", "version"], timeout=_INFO_TIMEOUT)
@@ -205,7 +215,8 @@ class Docker:
     def stats(self, names: list[str]) -> dict[str, int]:
         if not names:
             return {}
-        out = self.runner.run(["docker", "stats", "--no-stream", "--format", "json", *names],
+        out = self.runner.run(["docker", "stats", "--no-stream", "--format", _DOCKER_JSON,
+                               *names],
                               timeout=_INFO_TIMEOUT)
         # one JSON object per line
         result: dict[str, int] = {}
@@ -236,31 +247,52 @@ class Podman:
     def engine(self) -> EngineInfo | None:
         if self.which("podman") is None:
             return None
-        out = self.runner.run(["podman", "info", "--format", "json"], timeout=_INFO_TIMEOUT)
-        if not out.ok:
-            return None
-        info = json.loads(out.stdout)
+        info = self._json(["podman", "info", "--format", "json"])
+        if not isinstance(info, dict):
+            return None  # no answer, or an answer that is not JSON
         host = info.get("host", {})
         vm = None
+        socket_path = host.get("remoteSocket", {}).get("path")
         if self.host_system == "macos":
-            vm = self._machine_vm()
+            # On a Mac `podman info` answers from INSIDE the VM, so its socket is the
+            # VM's path; the VM type and the host side socket come from the machine.
+            vm, socket_path = self._machine()
         return EngineInfo("podman", info.get("version", {}).get("Version", ""),
                           host.get("os", ""), normalize_arch(host.get("arch", "")),
                           host.get("security", {}).get("rootless", False),
-                          kernel=host.get("kernel", ""), vm=vm,
-                          socket=host.get("remoteSocket", {}).get("path"))
+                          kernel=host.get("kernel", ""), vm=vm, socket=socket_path)
 
-    def _machine_vm(self) -> str | None:
-        out = self.runner.run(["podman", "machine", "inspect"], timeout=_INFO_TIMEOUT)
+    def _machine(self) -> tuple[str | None, str | None]:
+        """The VM type and the host side API socket of the machine in use (macOS).
+
+        Read in the podman source at v5.7.0 and v6.0.0: `podman machine inspect` carries
+        no VMType; `podman machine info` names the provider (`Host.VMType`) and the
+        machine in use (`Host.CurrentMachine`); and the socket `podman compose` hands
+        docker-compose is that machine's `ConnectionInfo.PodmanSocket.Path`.
+        """
+        info = self._json(["podman", "machine", "info", "--format", "json"])
+        host = info.get("Host") if isinstance(info, dict) else None
+        if not isinstance(host, dict):
+            return None, None
+        vm = str(host.get("VMType") or "").lower() or None
+        name = host.get("CurrentMachine") or ""
+        if not name:
+            return vm, None
+        machines = self._json(["podman", "machine", "inspect", name])
+        if not (isinstance(machines, list) and machines and isinstance(machines[0], dict)):
+            return vm, None
+        podman_socket = (machines[0].get("ConnectionInfo") or {}).get("PodmanSocket") or {}
+        return vm, podman_socket.get("Path") or None
+
+    def _json(self, argv: list[str]):
+        """The JSON a podman command prints, or None when it fails or prints something else."""
+        out = self.runner.run(argv, timeout=_INFO_TIMEOUT)
         if not out.ok:
             return None
         try:
-            machines = json.loads(out.stdout)
+            return json.loads(out.stdout)
         except json.JSONDecodeError:
             return None
-        if machines:
-            return str(machines[0].get("VMType", "")).lower() or None
-        return None
 
     def compose_provider(self) -> ProviderInfo:
         out = self.runner.run(["podman", "compose", "version"], timeout=_INFO_TIMEOUT)
@@ -304,8 +336,7 @@ class Podman:
             problem = ("no compose provider: `podman compose` failed"
                        f" (the API socket at {socket} answers)" if socket
                        else "no compose provider: `podman compose` failed")
-            fix = ("check the docker-compose binary `podman compose` delegates to"
-                   if socket else "podman machine start")
+            fix = "check the docker-compose binary `podman compose` delegates to"
         else:
             problem = ("no compose provider: `podman compose` needs the API socket at "
                        f"{socket}" if socket
@@ -344,10 +375,15 @@ def _compose_argv(provider: Provider, project: str, file: Path, args: tuple[str,
 
 
 def _compose_version(stdout: str) -> str:
-    # "Docker Compose version v5.2.0" / "podman-compose version 1.6.0": the token after `version`
-    parts = stdout.strip().split()
-    if "version" in parts:
-        return parts[parts.index("version") + 1]
+    """The token after `version` on the line that names compose: "Docker Compose version
+    v5.2.0", or the second line of podman-compose's "podman version 5.7.0\npodman-compose
+    version 1.6.0" (measured here: the podman line comes first)."""
+    for line in stdout.splitlines():
+        parts = line.split()
+        if "compose" in line.lower() and "version" in parts:
+            index = parts.index("version")
+            if index + 1 < len(parts):
+                return parts[index + 1]
     return ""
 
 

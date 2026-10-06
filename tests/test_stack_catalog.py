@@ -134,6 +134,10 @@ class TestTheQdrantVersion(unittest.TestCase):
         self.assertEqual(catalog.qdrant_version(catalog.QDRANT_IMAGE), "1.19.2")
         self.assertEqual(catalog.qdrant_version("qdrant/qdrant:v1.13.4-unprivileged"),
                          "1.13.4")
+        # a registry with a port: the tag is the one on the LAST path segment
+        self.assertEqual(catalog.qdrant_version(
+            "localhost:5000/qdrant/qdrant:v1.19.2-unprivileged@sha256:" + "0" * 64),
+            "1.19.2")
 
     def test_a_reference_without_a_version_is_refused(self):
         for ref in (QDRANT_REF_WITHOUT_VERSION, "qdrant/qdrant:latest"):
