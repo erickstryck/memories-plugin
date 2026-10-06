@@ -176,7 +176,7 @@ def test_stack_error_is_a_core_error_and_names_step_and_fix(self):
 ```
 
 `tests/test_installable_from_git.py`, classe `TestNoTrackedFilePipesADownloadIntoAnInterpreter`:
-`PIPE_TO_INTERPRETER = re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh|python[0-9.]*)\b")`;
+`PIPE_TO_INTERPRETER = re.compile(r"\b(?:curl|wget)[ \t][^\n]*\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh\b|python)", re.IGNORECASE)`;
 `test_no_tracked_file_pipes_a_download_into_an_interpreter` varre `tracked_text_files()`;
 `test_the_pattern_catches_the_shape` monta cada linha ofensiva por concatenação em tempo de
 execução (`"cu" + "rl -fsSL https://x.example/i" + " | " + "sh"`), para o arquivo de teste não
@@ -184,8 +184,11 @@ carregar o padrão que o scanner do hermes classifica: curl em `sh`, wget em `ba
 `python3 -m json.tool` e curl em `tee x` e depois `sh`; e não casa curl em `sha256sum -c` nem em
 `jq .`. Por que essa forma (medido no `plugin_guard` instalado em 2026-10-06, revisão da Task 1):
 um curl encadeado em `python` é `critical` e BLOQUEIA o install; em shell é `high`, em qualquer
-estágio do pipe e também em `ksh`. A primeira versão desta regex, só shell e só o primeiro
-estágio, deixava passar a forma que bloqueia.
+estágio do pipe e também em `ksh`; e o scanner ignora caixa e casa `python` como prefixo
+(`pythonw`, `Python3`). A primeira versão desta regex, só
+shell e só o primeiro estágio, deixava passar a forma que bloqueia. O `[ \t]` depois do nome da
+ferramenta, como o `curl\s+` do scanner, impede a regex de casar o próprio texto: com `\b` no
+lugar, a alternância casava a linha que a declara, neste plano e no teste (achado do fix round 1).
 
 Em `tests/test_core_is_portable.py`: `FORBIDDEN = {"hooks", "hosts", "cli", "agent", "stack"}`.
 
