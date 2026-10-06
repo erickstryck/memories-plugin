@@ -229,6 +229,28 @@ class TestNvidiaReadiness(unittest.TestCase):
         self.assertTrue(facts.nvidia.docker_hook)
         self.assertTrue(facts.nvidia.cdi_spec)
 
+    def test_the_secondary_icd_and_cdi_paths_count_too(self):
+        """The spec names a second home for each: the ICD in `/etc/vulkan/icd.d`
+        (an admin drop) and the CDI spec in `/var/run/cdi` (the runtime's hand).
+        With only the secondary paths present, both readiness parts still hold."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            make_card(root, "card0", "0x10de", "NVIDIA GeForce RTX 4090")
+            (root / "etc" / "vulkan" / "icd.d").mkdir(parents=True)
+            (root / "etc" / "vulkan" / "icd.d" / "nvidia_icd.json").write_text(
+                '{"file_format_version": "1.0.0"}\n')
+            (root / "var" / "run" / "cdi").mkdir(parents=True)
+            (root / "var" / "run" / "cdi" / "nvidia.yaml").write_text(
+                "containers:\n  - name: nvidia.com/gpu\n")
+
+            probe = linux_probe(root, runner=FakeRunner({
+                ("nvidia-smi", "-L"): runtimes.Completed(0, "")}))
+
+            facts = collect(probe, root / "stack")
+
+        self.assertTrue(facts.nvidia.icd)
+        self.assertTrue(facts.nvidia.cdi_spec)
+
     def test_without_a_nvidia_card_the_facts_stay_the_empty_default(self):
         """No nvidia in the tree: no nvidia-smi call, no file reads, the default stands."""
         with tempfile.TemporaryDirectory() as raw:

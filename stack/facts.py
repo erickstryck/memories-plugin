@@ -224,11 +224,21 @@ def _nvidia_facts(probe: Probe, gpus: tuple[Gpu, ...]) -> NvidiaFacts:
             names = tuple(_nvidia_name(line)
                           for line in out.stdout.splitlines()
                           if (n := _nvidia_name(line)))
-    icd = (probe.root / "usr" / "share" / "vulkan" / "icd.d" / "nvidia_icd.json").is_file()
+    icd = _nvidia_icd(probe)
     docker_hook = probe.which("nvidia-container-runtime-hook") is not None \
         or probe.which("nvidia-cdi-hook") is not None
     cdi = _cdi_spec(probe)
     return NvidiaFacts(gpus=names, icd=icd, docker_hook=docker_hook, cdi_spec=cdi)
+
+
+def _nvidia_icd(probe: Probe) -> bool:
+    """The NVIDIA Vulkan ICD on the host (spec, "Detecção"): it ships in
+    `/usr/share/vulkan/icd.d` on a driver install and in `/etc/vulkan/icd.d`
+    when the admin drops it there, so either one makes the profile possible."""
+    for path in ("usr/share/vulkan/icd.d", "etc/vulkan/icd.d"):
+        if (probe.root / path / "nvidia_icd.json").is_file():
+            return True
+    return False
 
 
 def _nvidia_name(line: str) -> str:
@@ -244,19 +254,20 @@ def _nvidia_name(line: str) -> str:
 
 
 def _cdi_spec(probe: Probe) -> bool:
-    """A CDI spec under `/etc/cdi/` naming an nvidia GPU: any file containing
-    `nvidia.com/gpu`."""
-    cdi_dir = probe.root / "etc" / "cdi"
-    if not cdi_dir.is_dir():
-        return False
-    for entry in cdi_dir.iterdir():
-        if not entry.is_file():
+    """A CDI spec naming an nvidia GPU (spec, "Detecção"): it lives in `/etc/cdi`
+    or `/var/run/cdi`, in either container runtime's hand, so either directory
+    makes the profile possible: any file containing `nvidia.com/gpu`."""
+    for cdi_dir in (probe.root / "etc" / "cdi", probe.root / "var" / "run" / "cdi"):
+        if not cdi_dir.is_dir():
             continue
-        try:
-            if "nvidia.com/gpu" in entry.read_text():
-                return True
-        except OSError:
-            continue
+        for entry in cdi_dir.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                if "nvidia.com/gpu" in entry.read_text():
+                    return True
+            except OSError:
+                continue
     return False
 
 
