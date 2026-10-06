@@ -5,8 +5,12 @@ Data: 2026-10-05, revista em 2026-10-06. Repo: `memories-plugin` @ `05ff84b` (v1
 Estado: as decisões da tabela "O que se decidiu" foram tomadas pelo usuário no brainstorming de
 2026-10-05 e 2026-10-06. O que está marcado **[a validar]** é proposta minha, escrita a pedido do
 usuário para ser validada direto neste documento, sem a revisão seção por seção que normalmente
-viria antes.
-A seção "Arquitetura" chegou a ser apresentada na conversa, mas não foi aprovada.
+viria antes. A spec foi aprovada em 2026-10-06 (`af124e8`).
+
+Revisão de 2026-10-06, depois da aprovação: as verificações de abertura da fase 1 rodaram numa
+máquina com GPU (ver "Resultado das verificações de abertura da fase 1", no fim). Sete detalhes
+marcados **[a validar]** mudaram por medição, e cada um está corrigido no lugar onde a spec o
+afirmava. Nenhuma decisão da tabela mudou.
 
 ## O problema
 
@@ -284,9 +288,19 @@ URL: `https://huggingface.co/<repo>/resolve/<revisão>/<arquivo>`. Com a revisã
 ### Flags dos servidores **[a validar]**
 
 ```
-embed:  -m /models/bge-m3-Q4_K_M.gguf --host 0.0.0.0 --port 8080 --embedding -c 8192 -b 8192 -ub 8192 --no-webui [-dev <device>]
-rerank: -m /models/bge-reranker-v2-m3-Q4_K_M.gguf --host 0.0.0.0 --port 8080 --reranking -c 8192 -b 8192 -ub 8192 --no-webui [-dev <device>]
+embed:  -m /models/bge-m3-Q4_K_M.gguf --host 0.0.0.0 --port 8080 --embedding -c 8192 -b 8192 -ub 8192 --no-ui -dev <device|none>
+rerank: -m /models/bge-reranker-v2-m3-Q4_K_M.gguf --host 0.0.0.0 --port 8080 --reranking -c 8192 -b 8192 -ub 8192 --no-ui -dev <device|none>
 ```
+
+**`-dev none` no perfil `cpu`, sempre** (medido em 2026-10-06). Um engine pode injetar GPUs em todo
+container sem que o compose peça: o `containers.conf` do Podman aceita `[containers] devices`, e na
+máquina de teste ele trazia `/dev/dri`. Ali, o container do perfil `cpu` listou as três GPUs, e o
+llama.cpp usou a GPU por padrão (rerank de 20 x 2400 em 1,18 s, 204 MB de RSS). Com `-dev none`, o
+mesmo container ficou na CPU (7,06 s, 2,8 GB), igual a uma máquina sem essa configuração. Então o
+perfil `cpu` não depende da ausência de device: ele a declara.
+
+**`--no-ui`, e não `--no-webui`**: na `b11382`, o log avisa "Use --ui/--no-ui (or deprecated
+--webui/--no-webui)". As duas formas desligam a UI; fica a que não é deprecada.
 
 **`-ub 8192` vai nos dois, não só no rerank.** No código da `b11382`, com embeddings ligados o
 servidor força `n_batch = n_ubatch` (`tools/server/server.cpp:152-157`, `common/common.cpp:1288-1293`),
@@ -308,7 +322,13 @@ exposição é a publicação só em `127.0.0.1`.
   `models/`, `compose.yaml` e `stack.json`. Fica sob `$HOME`, que o Docker Desktop e a VM do
   Podman compartilham por padrão.
 - Projeto compose `memories-plugin`, serviços `qdrant`, `embed` e `rerank`, volume nomeado
-  `memories-plugin-qdrant`.
+  `memories-plugin-qdrant`. Os dois providers prefixam o volume com o projeto, então o nome real
+  no engine é `memories-plugin_memories-plugin-qdrant` (medido no docker-compose e no
+  podman-compose). É o prefixo que impede a integração opt-in, que usa outro projeto, de tocar no
+  acervo da stack de verdade.
+- Cada serviço leva `container_name: <projeto>-<serviço>`. Sem isso, o docker-compose nomeia
+  `<projeto>-<serviço>-1` e o podman-compose `<projeto>_<serviço>_1`, e o `stats`, os logs e o
+  `status` teriam de saber qual provider criou o container.
 
 ### Bump e override **[a validar]**
 
@@ -385,11 +405,11 @@ Comum a todos:
 **Escolha da GPU.** O menu lista cada GPU que o `--list-devices` mostrou, com nome, memória livre
 e onde a opção funciona (ver "Compatibilidade"). O formato é
 `Vulkan<n>: <nome> (<total> MiB, <livre> MiB free)`, ou `(none)` sem GPU (`common/arg.cpp:1141`
-na `b11382`). O padrão é a dedicada antes da integrada e, no empate, a de maior memória livre;
-opção experimental nunca é o padrão. O `--list-devices` não imprime o tipo: ele vem da linha
-`ggml_vulkan: <n> = … | uma: <0|1> | …` que o backend registra ao inicializar
-(`ggml-vulkan.cpp:5168`), e que é log de debug. Sem essa linha, só a memória livre decide. Em AMD
-e Intel, a escolha vira `-dev Vulkan<n>`. Na NVIDIA, a GPU entra no container pelo índice do
+na `b11382`). O padrão é a GPU provada de maior memória livre; opção experimental nunca é o
+padrão. A versão anterior desta seção punha a dedicada antes da integrada, lendo o tipo da linha
+`ggml_vulkan: <n> = … | uma: <0|1> | …`. Medido em 2026-10-06: essa linha não sai com
+`--list-devices`, nem com `-lv 4`, então só a memória livre decide e o menu não afirma o tipo. Em
+AMD e Intel, a escolha vira `-dev Vulkan<n>`. Na NVIDIA, a GPU entra no container pelo índice do
 `nvidia-smi` (`device_ids` no Docker, `nvidia.com/gpu=<i>` no CDI, os dois na ordem do NVML), e o
 `-dev` sai do `--list-devices` desse container.
 
@@ -403,6 +423,7 @@ Exemplo renderizado, Linux + Podman + `amd` (digests encurtados aqui; o arquivo 
 ```yaml
 services:
   qdrant:
+    container_name: "memories-plugin-qdrant"
     image: "docker.io/qdrant/qdrant:v1.19.2-unprivileged@sha256:efb96a94…"
     restart: "always"
     ports:
@@ -416,6 +437,7 @@ services:
     security_opt:
       - "no-new-privileges:true"
   embed:
+    container_name: "memories-plugin-embed"
     image: "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee…"
     restart: "always"
     command:
@@ -432,7 +454,7 @@ services:
       - "8192"
       - "-ub"
       - "8192"
-      - "--no-webui"
+      - "--no-ui"
       - "-dev"
       - "Vulkan0"
     ports:
@@ -501,8 +523,10 @@ de fato enxergou. O consentimento para baixar vem da pergunta de entrada, ou do 
    próprio provider valide o arquivo.
 4. `compose pull`, com o progresso do provider repassado ao terminal: 294 MiB do llama.cpp e
    ~71 MiB do Qdrant.
-5. Prova cada perfil de GPU pronto com `compose run --rm --no-deps embed --list-devices`. Usa a
-   mesma definição de serviço que vai rodar, então o que o container vê aqui é o que verá depois.
+5. Prova cada perfil de GPU pronto com `compose run -T --rm --no-deps embed --list-devices`. Usa
+   a mesma definição de serviço que vai rodar, então o que o container vê aqui é o que verá
+   depois (medido: a mesma lista que um `compose exec` no serviço rodando). O `-T` porque o
+   podman-compose aloca TTY por padrão no `run`, e a saída vinha com `\r\n`.
 6. Menu: uma linha por opção que a plataforma tem para o hardware desta máquina: `cpu`, cada GPU
    provada e cada GPU que não pôde ser usada. Toda linha diz onde a opção funciona (Docker e
    Podman, ou só um deles, pela tabela de "Compatibilidade") e o estado aqui: disponível, com
@@ -543,11 +567,23 @@ stack como valor atual), detecção de `vector_size`, hosts e re-check.
 
 ### O que grava no config
 
-Grava o mesmo que o README manda gravar à mão para a stack local: `qdrant_url =
-http://127.0.0.1:<q>`, `api_base_url = http://127.0.0.1:<e>`, `rerank_url =
-http://127.0.0.1:<r>/rerank`, e `vector_size` detectado do endpoint. `embed_model` e `rerank_model`
-só são gravados se diferirem dos nomes do catálogo, que hoje são os defaults. Nenhuma chave: a
-stack local não tem autenticação.
+Grava `qdrant_url = http://127.0.0.1:<q>`, `api_base_url = http://127.0.0.1:<e>/v1`, `rerank_url =
+http://127.0.0.1:<r>/v1/rerank`, `embed_url` vazio e `vector_size` detectado do endpoint.
+`embed_model` e `rerank_model` só são gravados se diferirem dos nomes do catálogo, que hoje são os
+defaults. Nenhuma chave: a stack local não tem autenticação.
+
+**O `/v1` é obrigatório** (medido em 2026-10-06). A versão anterior desta seção dizia
+`api_base_url = http://127.0.0.1:<e>`, como o README manda à mão. Com isso o plugin chama
+`/embeddings`, e na `b11382` essa rota não é a da OpenAI: devolve uma lista crua, e o `Embedder`
+quebra com `AttributeError: 'list' object has no attribute 'get'`. Só `/v1/embeddings` devolve o
+formato que o plugin lê (dimensão 1024 detectada). O rerank responde igual em `/rerank` e em
+`/v1/rerank`; fica o `/v1`, o mesmo layout do `connect` da fase 2. O caminho manual do README tem
+o mesmo defeito, e a correção dele fica fora desta spec, como o `-ub` do embed (ver "Achado à
+parte").
+
+**O `embed_url` é esvaziado** porque ele vence o `api_base_url` (`resolved_embed_url` em
+`core/config.py`): um `embed_url` antigo no arquivo continuaria mandando o embedding para o
+endereço de antes, com o resto apontando para a stack.
 
 Antes de gravar, mostra o diff. Se algum valor não vazio vai ser substituído, pergunta `y/N`
 (`--yes` responde sim). O config só é gravado **depois** da verificação passar.
@@ -565,9 +601,16 @@ usuário, como o wizard já faz com o PATH.
   engine (é o que vale para a imagem e os devices, porque no macOS e no Windows o engine roda numa
   VM), rootless e socket.
 - **Provider de compose**: `docker compose version`, senão `docker-compose version`;
-  `podman compose version`, senão `podman-compose version`. Com o docker-compose atrás do
-  Podman, o socket precisa existir (`podman info`), e a correção no Linux é habilitar o
-  `podman.socket` do usuário.
+  `podman compose version`, senão `podman-compose version`. O `podman compose` diz no stderr qual
+  provider externo executa (`Executing external compose provider "<caminho>"`). Com o
+  docker-compose atrás do Podman, o socket da API precisa responder, e a etapa confere
+  **conectando nele**, não pelo `podman info`: no Podman 5.7.0, o `remoteSocket.exists` do
+  `podman info` veio `true` com o socket inexistente, e o `podman compose` então falhou com
+  "failed to connect to the docker API" (medido em 2026-10-06). Com o socket parado e o
+  `podman-compose` instalado, a etapa usa o `podman-compose`, que não precisa de socket, e diz
+  isso numa linha. Sem nenhum dos dois, a correção no Linux é habilitar o `podman.socket` do
+  usuário. O provider usado fica gravado no `stack.json`, e o ciclo de vida usa sempre o
+  gravado: os dois providers rotulam os containers de forma diferente.
 - **Hardware, no Linux nativo**: o vendor de `/sys/class/drm/card*/device` (o ASPEED de BMC é
   ignorado), `/dev/dri/renderD*` e `nvidia-smi -L`. A prontidão da NVIDIA tem duas partes, cada
   uma com a correção nomeada quando falta:
@@ -603,8 +646,13 @@ usuário, como o wizard já faz com o PATH.
    200 quando pronto. Timeout de 10 minutos.
 2. **Funcional**: reusa `core.setup.diagnose()` com um `Config` montado a partir do plano e
    considera só os checks de Qdrant, Embedding (dimensão igual a `vector_size`) e Re-rank (Paris
-   em primeiro). A coleção de memória é a etapa seguinte do wizard.
-3. **Calibração**, comparada com o orçamento de cada host:
+   em primeiro). A coleção de memória é a etapa seguinte do wizard. Aqui o Re-rank falho
+   bloqueia, ao contrário do `diagnose`, onde ele é aviso: no `diagnose` o rerank é opcional
+   porque pode não existir, e aqui ele é um dos três serviços que a etapa acabou de subir.
+3. **Calibração**, comparada com o orçamento de cada host, depois de uma chamada de aquecimento
+   em cada servidor (medido em 2026-10-06: a primeira chamada custa bem mais que as seguintes,
+   1,39 s contra 0,21 s no embed e 2,93 s contra 1,07 s no rerank, na mesma GPU, e é o regime
+   quente que o recall de cada host vive):
    - embed de um texto de 6000 caracteres (o teto do chunk), que também prova o `-ub 8192`;
    - rerank de 20 pares (o `TOP_K` do recall com rerank, `hooks/recall.py:135`) de 2400
      caracteres;
@@ -956,6 +1004,43 @@ Fase 3, numa máquina Windows que o usuário fornecer:
 
 O comando de embedding do README (`## Local models`, passo 3) sobe o servidor só com
 `--embedding`, ou seja com o `ubatch` padrão de 512. Pelo código da `b11382` citado em "Flags dos
-servidores", entrada acima de 512 tokens é recusada, e o chunk típico do plugin tem ~800. Não foi
-medido (decisão 7). A correção é independente desta spec: acrescentar `-c 8192 -b 8192 -ub 8192`
-ao comando de embed e fixá-lo no teste de fidelidade, como as flags do rerank já são fixadas.
+servidores", entrada acima de 512 tokens é recusada, e o chunk típico do plugin tem ~800. Medido em
+2026-10-06: com esse comando, um chunk de 2400 caracteres volta HTTP 500 "input (568 tokens) is too
+large to process. increase the physical batch size (current batch size: 512)", e um de 1200 passa.
+A correção é independente desta spec: acrescentar `-c 8192 -b 8192 -ub 8192` ao comando de embed e
+fixá-lo no teste de fidelidade, como as flags do rerank já são fixadas.
+
+O mesmo caminho manual tem um segundo defeito, medido no mesmo dia: `qctx config set api-base-url
+http://127.0.0.1:8003` faz o plugin chamar `/embeddings`, que na `b11382` devolve uma lista crua e
+quebra o `Embedder` (ver "O que grava no config"). A correção do README é `http://127.0.0.1:8003/v1`.
+E o `Embedder` levanta `AttributeError`, que não é `CoreError`, para uma resposta nesse formato; o
+`diagnose` não o captura. As três correções ficam para depois, com o usuário.
+
+## Resultado das verificações de abertura da fase 1
+
+Medido em 2026-10-06 numa máquina Linux com Podman 5.7.0 rootless (crun 1.21), o docker-compose
+v5.2.0 como provider externo do Podman e o podman-compose 1.6.0, sem Docker engine, com duas Intel
+Arc B70 e uma Radeon RX 6900 XT. As fixtures da medição vieram de um renderizador descartável no
+formato desta spec.
+
+| # | verificação | resultado |
+|---|---|---|
+| 1 | YAML aceito pelos providers | 9 de 9 em `docker-compose config -q`, `podman compose config` e `podman-compose config`. O Docker engine não estava na máquina |
+| 2 | perfil `cpu` com a `server-vulkan` | sem `/dev/dri`, o `--list-devices` mostra `(none)`: o llvmpipe é ignorado. Embed de 6000 caracteres e rerank de 20 x 2400 passam com `-ub 8192`. Quente, com 4, 8 e todas as threads: embed 4,69, 2,61 e 0,97 s; rerank 35,8, 19,3 e 7,0 s. Memória: embed ~1,83 GB, rerank ~2,78 GB |
+| 3 | anotação `run.oci.keep_original_groups` no Podman rootless | chega ao crun pela API compatível (docker-compose sobre a API 1.41 do Podman) e pelo podman-compose: os grupos vão de `0(root)` para `0(root)` mais dez `65534`. Os nós `renderD*` daquela máquina são 0666, então a recusa de permissão sem a anotação não pôde ser reproduzida |
+| 4 | `restart: always` e o `podman-restart.service` | os dois providers criam o container com `RestartPolicy=always`, e o comando do `ExecStart` da unidade (`podman start --all --filter restart-policy=always`) religou um container parado. O reboot em si não foi executado |
+| 5 | Qdrant `-unprivileged` com volume nomeado | funciona no Podman rootless: `/readyz` 200 em ~1 s, os dados sobrevivem a `down` e `up`, roda como uid 1000. O Docker não foi testado |
+| 6 | `compose run` vê o mesmo que o serviço | sim: `compose run -T --rm --no-deps embed --list-devices` e `compose exec embed /app/llama-server --list-devices` no serviço rodando dão a mesma lista |
+| 7 | a linha `uma:` sai com o `--list-devices` | não, nem com `-lv 4`. O desempate fica só pela memória livre |
+
+Medido também, com a GPU Intel (`-dev Vulkan0`): embed de 6000 caracteres em 0,21 s e rerank de
+20 x 2400 em 1,07 s, quentes (1,39 s e 2,93 s na primeira chamada), ~200 MB de RSS por container e
+~945 MB de VRAM para os dois modelos. Com esses números, o rerank em CPU estoura os orçamentos dos
+dois hosts (7,0 s contra 6,0 s e 2,0 s), e na GPU cabe nos dois.
+
+O que a medição mudou nesta spec, cada item corrigido no seu lugar: `-dev none` no perfil `cpu` e
+`--no-ui` ("Flags dos servidores"); `/v1` no `api_base_url` e no `rerank_url`, e o `embed_url`
+esvaziado ("O que grava no config"); o socket conferido por conexão, com o podman-compose de
+reserva ("Detecção"); o `-T` no `compose run` ("O que ela faz, em ordem"); o desempate só pela
+memória livre ("Escolha da GPU"); o `container_name` e o nome real do volume ("Portas, caminhos e
+nomes"); o aquecimento antes da calibração ("Verificação e calibração").
