@@ -3,7 +3,8 @@
 Two rules. `core/`, `hooks/` and `hosts/` never import `stack`: the hooks load `core` on every
 prompt, and they must not so much as load the subprocess, container and download code the stack
 is made of. And `stack/` never imports `hooks/`, `hosts/` or `cli/`: it must not know which hosts
-exist, so what differs per host must reach it as a parameter from the CLI.
+exist, so what differs per host must reach it as a parameter from the CLI. Beside the direction,
+`stack/` imports nothing but the stdlib, `core` and itself.
 
 Imports are read from the AST by `imported_packages`, the reader `test_core_is_portable.py`
 proves catches a real import and ignores prose. `stack/` names `hooks/`, `hosts/` and `cli/` in
@@ -47,6 +48,17 @@ class TestTheDependenciesPointOneWay(unittest.TestCase):
 
         self.assertEqual({k: v for k, v in bad.items() if v}, {},
                          "stack/ must not import hooks/, hosts/, cli/ or agent")
+
+    def test_stack_imports_only_the_stdlib_core_and_itself(self):
+        """The stdlib-only constraint, held mechanically. `plugin.yaml` declares no Python
+        dependency, so nothing installs one: what `stack/` imports must already be in every
+        Python it runs on."""
+        allowed = set(sys.stdlib_module_names) | {"core", "stack"}
+        extra = {p.name: sorted(imported_packages(p) - allowed)
+                 for p in (REPO / "stack").glob("*.py")}
+
+        self.assertEqual({k: v for k, v in extra.items() if v}, {},
+                         "stack/ may import only the stdlib, core and itself")
 
     def test_the_walk_saw_the_stack_package(self):
         self.assertIn("__init__.py", [p.name for p in (REPO / "stack").glob("*.py")])
