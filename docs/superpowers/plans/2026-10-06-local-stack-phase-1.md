@@ -568,10 +568,11 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   - `@dataclass(frozen=True) class Plan: platform: str; runtime: str; backend: str;
     device: str | None; gpu_index: int | None; ports: dict[str, int]; stack_dir: Path;
     images: dict[str, str]; selinux: bool = False; project: str = PROJECT`;
-  - `render(plan: Plan) -> dict` (puro; recusa um `stack_dir` com `:` ou com caractere fora do
-    Plano Multilíngue Básico, `StackError(step="compose")`, porque a sintaxe curta de volume
-    `<host>:/models:ro` quebra nos dois providers); `emit(doc: dict) -> str`; `dump(plan: Plan)
-    -> str`;
+  - `render(plan: Plan) -> dict` (puro; recusa um `stack_dir` que não seja absoluto ou que
+    contenha `:`, `$`, um surrogato ou caractere fora do Plano Multilíngue Básico,
+    `StackError(step="compose")` com a fix única apontando para `QCTX_STACK_DIR`, porque a
+    sintaxe curta de volume `<host>:/models:ro` quebra ou reescreve esses caminhos nos dois
+    providers); `emit(doc: dict) -> str`; `dump(plan: Plan) -> str`;
   - `container_name(project: str, service: str) -> str` (`f"{project}-{service}"`);
   - `volume_name(project: str) -> str` (`f"{project}_{VOLUME}"`, o nome real nos dois providers).
 
@@ -603,11 +604,12 @@ no Linux e `/Users/me/.local/share/memories-plugin/stack` no macOS; sem SELinux.
     `devices`);
   - `test_ports_bind_loopback_only`; `test_selinux_adds_the_z_label`;
   - `test_container_and_volume_names_carry_the_project` (M6).
-  - `test_a_stack_dir_with_a_colon_is_refused` e
-    `test_a_stack_dir_with_a_non_bmp_character_is_refused` (R2-9: `render` levanta
-    `StackError(step="compose")` com a fix apontando para
-    `QCTX_STACK_DIR`), e `test_an_accented_stack_dir_is_accepted` (acento dentro do BMP não
-    recusa).
+  - `test_a_stack_dir_with_a_colon_is_refused`,
+    `test_a_relative_stack_dir_is_refused`, `test_a_tilde_stack_dir_is_refused`,
+    `test_a_stack_dir_with_a_dollar_is_refused`, `test_a_stack_dir_with_a_surrogate_is_refused`
+    e `test_a_stack_dir_with_a_non_bmp_character_is_refused` (R2-9 e R4: `render` levanta
+    `StackError(step="compose")` com a fix apontando para `QCTX_STACK_DIR`), e
+    `test_an_accented_stack_dir_is_accepted` (acento dentro do BMP não recusa).
   Regeneração: `python3 tests/test_stack_compose.py --regen` reescreve as 9.
 - [ ] **Step 2:** rodar; esperado `No module named 'stack.compose'`.
 - [ ] **Step 3:** implementar e gerar as fixtures com `--regen`; ler as 9 uma vez, à mão, contra o
@@ -951,8 +953,8 @@ linha dizendo que a stack local não é necessária. `StackError` sobe até o `m
     `RERANK_TIMEOUT_S`) e de `hosts/hermes/__init__.py` (`HERMES_PREFETCH_BUDGET_S` e o divisor
     `4.0` da atribuição `share = ...`) contra `STACK_BUDGETS`;
   - `test_the_parser_does_not_import_the_heavy_modules`: subprocess que importa `cli/qctx.py`,
-    monta o parser e confere que `stack.installer`, `stack.lifecycle` e `stack.runtimes` não
-    estão em `sys.modules`.
+    monta o parser e confere que `stack.installer`, `stack.lifecycle`, `stack.runtimes` e
+    `stack.process` não estão em `sys.modules`.
 - [ ] **Step 2:** rodar; esperado falha de import ou `invalid choice: 'stack'`.
 - [ ] **Step 3:** implementar. O `cmd_install` mostra a seção `local stack:` no relatório de todo
   modo, põe a chave `stack` no `--json` e chama `install_step` logo depois do launcher. O

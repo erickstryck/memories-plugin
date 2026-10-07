@@ -331,11 +331,15 @@ exposição é a publicação só em `127.0.0.1`.
   escolha antes de seguir.
 - Diretório: `$QCTX_STACK_DIR`, ou `${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`, com
   `models/`, `compose.yaml` e `stack.json`. Fica sob `$HOME`, que o Docker Desktop e a VM do
-  Podman compartilham por padrão. O caminho não pode levar `:` (quebra a sintaxe curta de volume
-  nos dois providers) nem caractere fora do Plano Multilíngue Básico (um emoji, que o
-  podman-compose corrompe e o docker-compose rejeita); a etapa recusa com um `StackError` que
-  aponta para `QCTX_STACK_DIR`, em vez de mudar para a sintaxe longa. Acento dentro do BMP
-  funciona nos dois e é aceito (medido 2026-10-06 nos dois providers com arquivos descartáveis).
+  Podman compartilham por padrão. A etapa recusa, com um `StackError` que aponta para
+  `QCTX_STACK_DIR`, qualquer diretório que não seja absoluto ou que leve `:` (quebra a
+  sintaxe curta de volume nos dois providers), `$` (os dois providers interpolam `$VAR` e
+  `${VAR}` no caminho: `/x/$HOME/stack` resolve para a home real, saindo 0 sem aviso), ou um
+  surrogato ou caractere fora do Plano Multilíngue Básico (um emoji: um provider rejeita o
+  arquivo, o outro o corrompe). Recusa em vez de mudar para a sintaxe longa, porque `$$` não
+  é portável: medido em 2026-10-07, `a$$b` ficou `a$$b` no docker-compose e virou `a$b` no
+  podman-compose. Acento dentro do BMP funciona nos dois e é aceito (medido em 2026-10-06 nos
+  dois providers com arquivos descartáveis).
 - Projeto compose `memories-plugin`, serviços `qdrant`, `embed` e `rerank`, volume nomeado
   `memories-plugin-qdrant`. Os dois providers prefixam o volume com o projeto, então o nome real
   no engine é `memories-plugin_memories-plugin-qdrant` (medido no docker-compose e no
