@@ -3,22 +3,30 @@
 They exist so the stack modules are tested against recorded command output, never against a
 live engine: a `FakeRunner` answers a `run` from a table, a `FakeRuntime` is a
 `ContainerRuntime` in a box, and a `FakeTransport` answers a download from scripted bytes.
+Task 10 adds the three protocol fakes the installer's `provision` runs against
+(`ScriptedPrompter`, `RecordingReporter`, `FakeConfigSink`), and tasks 11-13 build on all
+of them.
+
 Tasks 4-11 import from here, so nothing in this file does real I/O and it depends only on
-`stack.runtimes` (which exists by the time this file is imported: this test module is never
-collected before it is written). The `FakeTransport` stands in for the `Transport` contract
-of `stack.fetch`; like the other fakes it is checked against it structurally, so this file
-does not need to import it.
+`stack.runtimes`, `core.config` (the sink returns a real `Config`) and `stack.fetch`
+(`RecordingReporter.bar` returns a real `ProgressBar`). The `FakeTransport` stands in for
+the `Transport` contract of `stack.fetch`; like the other fakes it is checked against it
+structurally, so this file does not need to import it.
 
 None of the fakes inherits from a real class: the contracts are `Protocol`s, so having the
 methods is enough (the same convention as `tests/fakes.py`).
 """
 import sys
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TypeVar
+
+_T = TypeVar("_T")
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from core.config import Config  # noqa: E402
+from stack.fetch import ProgressBar  # noqa: E402
 from stack.runtimes import Completed  # noqa: E402
 
 
@@ -136,3 +144,109 @@ class FakeTransport:
         while offset < len(view):
             yield bytes(view[offset:offset + 256])
             offset += 256
+
+
+class ScriptedPrompter:
+    """A `Prompter` that replays scripted answers, in order.
+
+    `ask`, `confirm` and `choose` pop the next answer from the shared script, so a test
+    scripts a whole conversation (`confirm` for the summary, `choose` for the menu,
+    `confirm` for a replaced value) and asserts the CALLS the installer made, not just
+    the outcome. An exhausted script is an error, so a conversation the installer asked
+    that the test did not script fails loudly instead of silently defaulting.
+    """
+
+    def __init__(self, script: list):
+        self.script = list(script)
+        self.asks: list[str] = []
+        self.confirms: list[str] = []
+        self.choices: list[tuple[str, list, int]] = []
+
+    def _next(self) -> _T:
+        if not self.script:
+            raise AssertionError("the prompter ran out of scripted answers")
+        return self.script.pop(0)
+
+    def ask(self, prompt: str) -> str:
+        self.asks.append(prompt)
+        return self._next()
+
+    def confirm(self, prompt: str, *, default: bool = False) -> bool:
+        self.confirms.append(prompt)
+        return self._next()
+
+    def choose(self, title: str, lines: list, default: int) -> int:
+        self.choices.append((title, list(lines), default))
+        return self._next()
+
+
+class RecordingReporter:
+    """A `Reporter` that records every call, in order, and prints nothing.
+
+    `.calls` is the ordered list of `(method, text)` for `step`/`ok`/`info`/`warn`/`fail`,
+    so a test asserts both what was said and WHEN it was said (the ordering is what
+    proves the config is saved only after the verification). `.bars` records
+    `(total, label, start)` for each `bar` call, and `bar` returns a REAL `ProgressBar`
+    whose `write` is recorded in `.written`: the installer's download step is observed
+    through the bar the way a user would see it, and a test can assert the final line.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+        self.bars: list[tuple[int, str, int]] = []
+        self.written: list[str] = []
+
+    def _record(self, method: str, text: str) -> None:
+        self.calls.append((method, text))
+
+    def step(self, text: str) -> None:
+        self._record("step", text)
+
+    def ok(self, text: str) -> None:
+        self._record("ok", text)
+
+    def info(self, text: str) -> None:
+        self._record("info", text)
+
+    def warn(self, text: str) -> None:
+        self._record("warn", text)
+
+    def fail(self, text: str) -> None:
+        self._record("fail", text)
+
+    def bar(self, total: int, label: str, start: int) -> ProgressBar:
+        self.bars.append((total, label, start))
+        return ProgressBar(total, label, tty=False, write=self.written.append)
+
+
+class FakeConfigSink:
+    """A `ConfigSink` that records every `save` and answers from an in-memory file.
+
+    `.saves` is the ordered list of `patch` dicts, so a test asserts WHEN the config
+    was written (the ordering against the reporter's calls is the "written only after
+    verification" proof). `.file` starts from `current` and each `save` updates it:
+    `current_file` and `effective` read it, so a test can check the file BEFORE and
+    AFTER the save and see the `config set` advice the installer prints when the save
+    is declined. The `effective` answer is a real `Config` built from the file, the
+    way the production sink resolves it through `core.config.load`.
+    """
+
+    def __init__(self, current: dict | None = None, effective: Config | None = None):
+        self.file: dict = dict(current or {})
+        self._effective = effective
+        self.saves: list[dict] = []
+
+    def current_file(self) -> dict:
+        return dict(self.file)
+
+    def save(self, patch: dict) -> None:
+        self.saves.append(dict(patch))
+        self.file.update(patch)
+
+    def effective(self) -> Config:
+        if self._effective is not None:
+            return self._effective
+        # The real defaults, with the file on top: the fields `load` fills with its
+        # defaults are not in `current_file`, so build from `DEFAULTS` explicitly.
+        from core.config import DEFAULTS
+        return Config(**{**DEFAULTS, **self.file})
