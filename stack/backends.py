@@ -19,8 +19,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from . import StackError
+# `parse_devices` and `vendor_of` are re-exported for the importers of `stack.backends`.
+from .devices import Device, parse_devices, vendor_of  # noqa: F401
+from .engine import EngineInfo
 from .facts import HostFacts
-from .runtimes import EngineInfo
 
 #: The platforms phase 1 serves. Windows (WSL included) enters in phase 3, and
 #: until then the step refuses it instead of offering the CPU (spec, "Detecção").
@@ -34,66 +36,6 @@ CDI_GENERATE = "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (as root)"
 #: The states the menu shows for an option. A `runtime` state means the profile
 #: runs, but on the OTHER runtime: it carries `needs`, not a fix.
 READY, MISSING, RUNTIME, UNSUPPORTED = "ready", "missing", "runtime", "unsupported"
-
-#: One line of `--list-devices`: `Vulkan1: AMD Radeon RX 6900 XT (RADV NAVI21)
-#: (16368 MiB, 4018 MiB free)`. The `Vulkan<n>` prefix is what the server
-#: command's `-dev` takes, so it is parsed, not assumed to be in order.
-_DEVICE = re.compile(
-    r"^Vulkan(\d+):\s+(.*?)\s*\((\d+) MiB,\s*(\d+) MiB free\)\s*$")
-
-
-@dataclass(frozen=True)
-class Device:
-    """One Vulkan device the container saw in `--list-devices`."""
-    index: int
-    name: str
-    total_mib: int
-    free_mib: int
-
-    @property
-    def id(self) -> str:
-        """The `-dev` argument: `Vulkan<index>`."""
-        return f"Vulkan{self.index}"
-
-    @property
-    def vendor(self) -> str | None:
-        """The vendor, read from the name the driver prints. `None` for a CPU
-        device (llvmpipe) and for a name no profile knows."""
-        return vendor_of(self.name)
-
-
-def parse_devices(output: str) -> list[Device]:
-    """The `Vulkan<n>` lines of `--list-devices`, in the order printed.
-
-    The output comes from `compose run` (M4: a TTY, so `\r\n`) and may carry
-    log lines in the middle (the `ggml_vulkan` banner): a line that does not
-    match is noise, and the `(none)` shape gives an empty list.
-    """
-    devices = []
-    for line in output.splitlines():
-        match = _DEVICE.match(line.strip())
-        if match is None:
-            continue
-        devices.append(Device(int(match.group(1)), match.group(2),
-                              int(match.group(3)), int(match.group(4))))
-    return devices
-
-
-def vendor_of(name: str) -> str | None:
-    """The vendor of a device name, by the tokens the native drivers print, matched
-    case-sensitively: a name is the driver's, not a free text. `llvmpipe` is a
-    CPU, and a name no profile knows belongs to no profile. The dzn device (Windows,
-    phase 3) names itself `Microsoft Direct3D12 (...)`, and that prefix is not a
-    phase-1 token, so a dzn name is unknown here: dzn recognition arrives in phase 3."""
-    if "NVIDIA" in name:
-        return "nvidia"
-    if "AMD" in name or "RADV" in name:
-        return "amd"
-    if "Intel" in name:
-        return "intel"
-    if "Virtio" in name or "Venus" in name or "Apple" in name:
-        return "apple"
-    return None
 
 
 @dataclass(frozen=True)

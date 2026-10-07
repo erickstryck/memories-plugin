@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO))
 
 from stack import StackError  # noqa: E402
 from stack import runtimes  # noqa: E402
+from stack.engine import compose_version  # noqa: E402
 from stack.runtimes import (  # noqa: E402
     Completed,
     Docker,
@@ -743,14 +744,10 @@ class TestReviewRoundR2(unittest.TestCase):
     def test_the_compose_version_strips_a_trailing_comma(self):
         # v1 docker-compose prints `docker-compose version 1.29.2, build 5becea4c`:
         # the token after `version` must drop the comma.
-        self.assertEqual(_compose_version("docker-compose version 1.29.2, build 5becea4c"),
+        self.assertEqual(compose_version("docker-compose version 1.29.2, build 5becea4c"),
                          "1.29.2")
-        self.assertEqual(_compose_version("Docker Compose version v5.2.0"), "v5.2.0")
-        self.assertEqual(_compose_version("podman-compose version 1.6.0"), "1.6.0")
-
-
-# keep the name importable for the class above
-from stack.runtimes import _compose_version  # noqa: E402
+        self.assertEqual(compose_version("Docker Compose version v5.2.0"), "v5.2.0")
+        self.assertEqual(compose_version("podman-compose version 1.6.0"), "1.6.0")
 
 
 if __name__ == "__main__":

@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .runtimes import Runner, SubprocessRunner, normalize_arch
+from .engine import normalize_arch
+from .process import Runner, SubprocessRunner
 
 #: The PCI vendor ids the kernel prints in `/sys/bus/pci/devices/*/vendor`, mapped to
 #: the name the menu uses. Only these are GPUs: the ASPEED BMC (0x1a03) and every
