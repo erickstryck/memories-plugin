@@ -128,11 +128,13 @@ class CheckMode(unittest.TestCase):
 
         ready = {"ready": True, "blockers": [], "checks": [], "memory_suggestions": []}
         args = SimpleNamespace(check=True, json=False, yes=False, config_only=False,
-                               host=None)
+                               host=None, stack=None, runtime=None, image=[])
+        no_stack = {"managed": False}
         with mock.patch.object(qctx.core.setup, "diagnose", return_value=ready), \
              mock.patch.object(qctx, "_plumbing", return_value=[]), \
              mock.patch.object(qctx, "_host_sections", return_value=[]), \
              mock.patch.object(qctx, "merged_report", return_value=ready), \
+             mock.patch.object(qctx, "_stack_section", return_value=no_stack), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(qctx.cmd_install(args, None) or 0, 0,
                              "a ready install reported failure to its caller")
@@ -143,6 +145,7 @@ class CheckMode(unittest.TestCase):
              mock.patch.object(qctx, "_plumbing", return_value=[]), \
              mock.patch.object(qctx, "_host_sections", return_value=[]), \
              mock.patch.object(qctx, "merged_report", return_value=blocked), \
+             mock.patch.object(qctx, "_stack_section", return_value=no_stack), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(qctx.cmd_install(args, None), 1,
                              "the same handler must still report a blocked install")
@@ -1198,13 +1201,20 @@ class HostGroups(unittest.TestCase):
 
 
 class Args:
-    """The two attributes the host groups read off argparse."""
+    """The attributes the host groups and the stack step read off argparse.
+
+    `stack`, `runtime` and `image` default to the parser's defaults (no forced
+    profile, no forced runtime, no `--image` overrides), which is exactly the
+    "the wizard decides" shape `cmd_install` hands to `install_step`."""
 
     def __init__(self, yes=True, config_only=False):
         self.yes = yes
         self.config_only = config_only
         self.check = False
         self.json = False
+        self.stack = None
+        self.runtime = None
+        self.image = []
 
 
 class ClosingBehaviour(unittest.TestCase):

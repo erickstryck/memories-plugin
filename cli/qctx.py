@@ -69,6 +69,24 @@ def output(obj, want_json: bool) -> None:
         print(as_json(obj))
 
 
+#: The recall latency budget of each host, for the local stack's calibration: the seconds
+#: its recall may spend on the embed and on the rerank. Kept as PLAIN tuples (Ruling 3) and
+#: built into `Budget` objects only inside the call, so importing the CLI (which `qctx
+#: statusline` does on every assistant message) never imports `stack.verify`. `tests/
+#: test_stack_cli.py` reads these back out of `hooks/recall.py` and
+#: `hosts/hermes/__init__.py` by AST, so a change that would desync the recall hook's
+#: timing is caught.
+STACK_BUDGETS = (("claude-code", 8.0, 6.0), ("hermes", 2.0, 2.0))
+
+
+def _budgets():
+    """The `Budget` objects for the stack's calibration, from `STACK_BUDGETS`. Built here
+    (not at module level) because `Budget` lives in `stack.verify`, a heavy module the
+    parser must not load."""
+    from stack.verify import Budget
+    return [Budget(host, embed, rerank) for host, embed, rerank in STACK_BUDGETS]
+
+
 # ---- collections / config --------------------------------------------------
 
 # One definition, in the core, imported here. It used to exist twice under two names
@@ -967,6 +985,35 @@ def merged_report(report: dict, plumbing: list[dict]) -> dict:
             "ready": not blockers}
 
 
+def _stack_section():
+    """The `stack` section of the install report and `--json`: the state of a managed
+    stack and the health of its endpoints, read by probing the URLs only. It never talks
+    to a runtime, so `--check` and `--json` stay read-only and cheap -- a `status` would
+    need the discovery the report mode must not run. The heavy `stack` modules are
+    imported inside, so the parser (built on every assistant message) never loads them."""
+    from stack import cli as stack_cli
+    return stack_cli.check_section()
+
+
+def _stack_section_lines(section):
+    """The report lines of the `stack` section, in the wizard's style (one home for the
+    shape; the section itself is computed by `_stack_section`)."""
+    from stack import cli as stack_cli
+    return stack_cli.section_lines(section)
+
+
+def _stack_install_step(args, report):
+    """The stack step of `qctx install`, after the launcher and before the configuration:
+    the `install_step` dispatcher, with the budgets built from `STACK_BUDGETS`, the
+    diagnose report (its Qdrant/Embedding blockers decide whether the step offers itself)
+    and the terminal's `input()` as the question. A `StackError` rises to `main()`, which
+    prints it with its step and fix."""
+    from stack import cli as stack_cli
+    stack_cli.install_step(args, report,
+                           budgets=_budgets(), ask=_ask,
+                           interactive=_interactive(args))
+
+
 def cmd_install(args, cfg):
     """The wizard: diagnose, then offer to fix, one group at a time.
 
@@ -979,13 +1026,14 @@ def cmd_install(args, cfg):
     report = core.setup.diagnose(cfg)
     plumbing = _plumbing(root)
     hosts = _host_sections(root) if report_hosts(args) else []
+    stack = _stack_section()
     # Same contract as `setup --check`: the mode a script branches on answers in the channel
     # a script reads. `scripts/install.sh --check` returned 0 with blockers too.
     merged = merged_report(report, plumbing)
     blocked = 1 if (args.check and not merged.get("ready")) else 0
 
     if args.json:
-        output({**merged, "hosts": hosts}, True)
+        output({**merged, "hosts": hosts, "stack": stack}, True)
 
         return blocked
 
@@ -995,6 +1043,9 @@ def cmd_install(args, cfg):
     print("\nreachability and configuration:\n")
     for c in report["checks"]:
         _render_check(c)
+    print("\nlocal stack:\n")
+    for line in _stack_section_lines(stack):
+        print(line)
     for section in hosts:
         print(f"\n{section['host']}:\n")
         print(section["text"].rstrip())
@@ -1019,6 +1070,11 @@ def cmd_install(args, cfg):
     if not core.install.path_check(dict(os.environ)).ok:
         print(f"  ..    {core.install.target_dir(dict(os.environ))} is not on PATH — add:")
         print('        export PATH="$HOME/.local/bin:$PATH"')
+
+    # The local stack, in the spec's order (between the launcher and the configuration, so
+    # the configuration pass shows the stack's URLs as the current value). `--config-only`
+    # never reaches it (it returned above). A StackError rises to main().
+    _stack_install_step(args, report)
 
     # 3. config — the two passes, then the one field that is answered by the endpoint.
     _ask_config(cfg, _interactive(args), report["memory_suggestions"])
@@ -1824,6 +1880,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="answer yes to every group")
     p.add_argument("--config-only", action="store_true",
                    help="only the configuration pass; touch no host")
+    # The local-stack flags. `stack.cli` is the light seam (it imports only the light
+    # `stack` modules at its top), so importing it here never loads the heavy
+    # installer/lifecycle/runtimes/process code; it is done inside, not at module level,
+    # because the parser is built on every assistant message.
+    from stack import cli as stack_cli
+    stack_cli.add_install_flags(p)
     p.set_defaults(fn=cmd_install)
 
     sub.add_parser("stats", help="what both hosts and the daemon recorded, summarised"
@@ -2017,6 +2079,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("repo")
     p.add_argument("--yes", action="store_true", help="skip the confirmation")
     p.set_defaults(fn=cmd_repos_drop)
+
+    # The local stack: `qctx stack status|up|down|remove`. `register` builds the group
+    # (its verbs import the heavy `stack` modules inside themselves, so merely building
+    # the parser loads nothing heavy); `ask` is the group's one question, routed into the
+    # prompter for `remove --purge-data`.
+    from stack import cli as stack_cli
+    stack_cli.register(sub, ask=_ask)
 
     _propagate_json(ap)
 

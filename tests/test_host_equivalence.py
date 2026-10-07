@@ -1094,9 +1094,16 @@ class TestBothHostsOfferTheSameOperations(unittest.TestCase):
     #: the PLUGIN is running (latencies, failures, what the daemon did) for the operator reading
     #: it, and answers nothing about the archive a model asked about. Offering it would spend a
     #: tool slot on every turn for a question no conversation has.
+    #: The four `stack_*` verbs join them by the acting four's reason, and by `install`'s:
+    #: `stack up`/`down`/`remove` start, stop or delete containers, and `stack status` reads the
+    #: stack's own state (not the archive a model asked about). Provisioning and managing the
+    #: endpoints is the operator's decision from a terminal, the same as `install` (which already
+    #: reaches it via `--stack`); a model calling `stack remove --purge-data` mid-conversation
+    #: would be deleting the archive's container. The CLI keeps all four.
     NOT_FOR_THE_MODEL = {"setup", "install", "collections_list", "config_show", "config_set",
                          "config_detect", "repos_daemon", "repos_add_all", "repos_status",
-                         "repos_cancel", "repos_quarantine_clear", "stats", "statusline"}
+                         "repos_cancel", "repos_quarantine_clear", "stats", "statusline",
+                         "stack_status", "stack_up", "stack_down", "stack_remove"}
 
     def setUp(self):
         from hosts.hermes import tools
