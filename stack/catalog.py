@@ -128,7 +128,8 @@ def qdrant_version(ref: str) -> str:
     tag = ref.partition("@")[0].rsplit("/", 1)[-1].partition(":")[2]
     match = _QDRANT_VERSION.match(tag)
     if match is None:
-        raise StackError(f"no Qdrant version in: {ref}", step="catalog")
+        raise StackError(f"no Qdrant version in: {ref}", step="catalog",
+                         fix="use a Qdrant image tagged vX.Y.Z")
     return match.group(1)
 
 

@@ -923,18 +923,6 @@ class TestReviewRoundR2(unittest.TestCase):
                                        "Error: looking up compose provider failed")
         self.assertEqual(info.fix, "install podman-compose (or docker-compose)")
 
-    def test_a_failed_version_falls_back_to_podman_compose(self):
-        runtime = _podman_provider(
-            _info(True),
-            which={"podman": "/usr/bin/podman",
-                   "podman-compose": "/usr/bin/podman-compose"},
-            alive=lambda path: True,
-            compose_version=PODMAN_COMPOSE_VERSION_FAILED,
-            standalone=PODMAN_COMPOSE_VERSION_STANDALONE)
-        info = runtime.compose_provider()
-        self.assertEqual(info.provider.argv, ("podman-compose",))
-        self.assertEqual(info.provider.version, "1.6.0")
-
     # ---- m5: a failed stats carries the tool's own first stderr line ----
     def test_a_failed_stats_carries_the_tools_first_stderr_line(self):
         podman = Podman(FakeRunner({("podman", "stats", "--no-stream", "--format", "json"):

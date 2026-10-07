@@ -146,6 +146,13 @@ class TestTheQdrantVersion(unittest.TestCase):
                     catalog.qdrant_version(ref)
                 self.assertEqual(ctx.exception.step, "catalog")
 
+    def test_a_refused_version_names_the_tagged_image_fix(self):
+        # R5 (fix-round-r2-rulings m5, part 2): the refusal has to tell the user what to
+        # do, not only that the reference is unusable. The string is the ruling's, verbatim.
+        with self.assertRaises(StackError) as ctx:
+            catalog.qdrant_version(QDRANT_REF_WITHOUT_VERSION)
+        self.assertEqual(ctx.exception.fix, "use a Qdrant image tagged vX.Y.Z")
+
 
 class TestTheImageOverride(unittest.TestCase):
     def test_image_flags_parse_and_refuse(self):
