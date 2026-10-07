@@ -287,6 +287,7 @@ class TestRuntimeAndPlatform(ProvisionTestCase):
         self.assertIsInstance(err, StackError)
         self.assertEqual(err.step, "runtime")
         self.assertIn("apple runs on Podman only", str(err))
+        self.assertNotIn("only only", str(err))  # the label already carries it
 
     def test_windows_is_refused_with_the_readme_path(self):
         # WSL is read from the kernel (the `wsl` fact here stands for the
@@ -344,6 +345,11 @@ class TestMenu(ProvisionTestCase):
         self.assertEqual(len(prompter.choices), 2)
         lines = prompter.choices[0][1]
         self.assertIn("Podman only", lines[4])
+        # the line names what it needs without a self-contradiction: the "not X"
+        # clause used to derive X from the backend's own label, rendering "runs on
+        # podman here, not podman" (review round on T10).
+        self.assertIn("runs on podman here", lines[4])
+        self.assertNotIn("not podman", lines[4])
         warns = [t for m, t in reporter.calls if m == "warn"]
         self.assertTrue(any("podman" in w for w in warns))
         self.assertEqual(result.profile, "cpu")

@@ -210,8 +210,12 @@ def option_line(option: Option, platform: str) -> str:
                     f"{option.device.free_mib} MiB free) [{where}]")
         return f"{option.backend}: no device (the servers run on the cpu) [{where}]"
     if av.state == "runtime":
-        return (f"{option.backend}: runs on {av.needs} here, not "
-                f"{where.split()[0].lower()} ({av.reason}) [{where}]")
+        # the line says what the profile needs and where, and the bracket the
+        # compatibility table gives; it does NOT name the runtime in use as the
+        # thing it does not run on, because that runtime is not passed here (the
+        # brief's signature is option_line(option, platform)) and deriving it
+        # from the backend's own label rendered "runs on podman here, not podman".
+        return f"{option.backend}: runs on {av.needs} here ({av.reason}) [{where}]"
     reason = av.reason or "unavailable"
     fix = f"; {av.fix}" if av.fix else ""
     return f"{option.backend}: unavailable here — {reason}{fix} [{where}]"
@@ -307,7 +311,7 @@ def _engine_of(request: Request, deps: Deps, runtime: ContainerRuntime) -> tuple
     if profile in BACKENDS:
         needs = BACKENDS[profile].runtimes(facts.platform_of(deps.facts))
         if needs and runtime.name not in needs:
-            raise StackError(f"{profile} runs on {runtime_label(needs)} only",
+            raise StackError(f"{profile} runs on {runtime_label(needs)}",
                              step="runtime", fix=f"use --runtime {sorted(needs)[0]}")
     return runtime, engine
 
