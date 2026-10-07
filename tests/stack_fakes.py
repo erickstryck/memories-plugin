@@ -2,15 +2,19 @@
 
 They exist so the stack modules are tested against recorded command output, never against a
 live engine: a `FakeRunner` answers a `run` from a table, a `FakeRuntime` is a
-`ContainerRuntime` in a box. Tasks 4-11 import from here, so nothing in this file does real
-I/O and it depends only on `stack.runtimes` (which exists by the time this file is imported:
-this test module is never collected before `stack.runtimes` is written).
+`ContainerRuntime` in a box, and a `FakeTransport` answers a download from scripted bytes.
+Tasks 4-11 import from here, so nothing in this file does real I/O and it depends only on
+`stack.runtimes` (which exists by the time this file is imported: this test module is never
+collected before it is written). The `FakeTransport` stands in for the `Transport` contract
+of `stack.fetch`; like the other fakes it is checked against it structurally, so this file
+does not need to import it.
 
-Neither fake inherits from a real class: the contracts are `Protocol`s, so having the methods
-is enough (the same convention as `tests/fakes.py`).
+None of the fakes inherits from a real class: the contracts are `Protocol`s, so having the
+methods is enough (the same convention as `tests/fakes.py`).
 """
 import sys
 from pathlib import Path
+from typing import Iterator
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -93,3 +97,42 @@ class FakeRuntime:
         if "run" in args and "--list-devices" in args:
             return Completed(0, self.list_devices.get(Path(file).stem, ""))
         return Completed(0)
+
+
+class FakeTransport:
+    """A `Transport` that answers `get` from scripted bytes, never the network.
+
+    It sits at the TRANSPORT contract: `content` is the whole file and the bytes a
+    download sees are `content[start:]`, because that is exactly what a
+    `UrllibTransport` hands back for both server classes it absorbs (the 206 tail, and
+    the 200 whole-file with its head read away: measured, module docstring of
+    `stack/fetch.py`). `ignore_range` therefore records which server class the test
+    stands in for without changing the bytes, and `cut_after` ends the stream after
+    that many bytes (a connection that dropped).
+
+    Every call is recorded in `.starts` as `(url, start)`, so a test asserts the
+    resume point by reading the call. Tasks 10 and 11 reuse this fake for the
+    installer's download steps (Ruling 1).
+    """
+
+    def __init__(self, content: bytes, cut_after: int | None = None,
+                 ignore_range: bool = False):
+        self.content = content
+        self.cut_after = cut_after
+        self.ignore_range = ignore_range
+        self.starts: list[tuple[str, int]] = []
+
+    def get(self, url: str, *, start: int = 0) -> Iterator[bytes]:
+        self.starts.append((url, start))
+        # The transport contract, whichever server class `ignore_range` stands in
+        # for: the bytes start at `start`.
+        body = self.content[start:]
+        if self.cut_after is not None:
+            body = body[:self.cut_after]
+        # A memoryview, not slicing: the fake serves 10 MiB files, and slicing in a
+        # loop is O(n^2) (measured: the focused suite took 59 s before this).
+        view = memoryview(body)
+        offset = 0
+        while offset < len(view):
+            yield bytes(view[offset:offset + 256])
+            offset += 256
