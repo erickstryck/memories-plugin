@@ -325,3 +325,14 @@ def platform_of(facts: HostFacts, engine_kernel: str = "") -> str:
     if facts.system == "windows" or facts.wsl or "microsoft" in engine_kernel.lower():
         return "windows"
     return "linux"
+
+
+def is_windows_host(probe: Probe) -> bool:
+    """Whether the host is Windows or WSL, from the two facts `platform_of`'s windows
+    branch reads on the HOST side -- the system name and the kernel release. The
+    install step asks this BEFORE it offers anything (the plan's first branch, "uma
+    linha e volta"), so it must be cheap: it reads neither the GPUs nor the disk, and it
+    runs no `nvidia-smi`. It cannot diverge from `platform_of` on the host side, because
+    it answers the same question with the same two reads (`/etc/os-release` names no
+    WSL, so the `/proc` kernel release is the only WSL source)."""
+    return probe.system().strip().lower() == "windows" or _wsl(probe)

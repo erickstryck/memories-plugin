@@ -263,6 +263,127 @@ class TheInstallStep(unittest.TestCase):
         self.assertEqual(len(called), 1, "an interrupted install must provision again")
         self.assertEqual(called[0].profile, "auto")
 
+    def test_a_stopped_stack_restarts_not_provisions(self):
+        """A `stack.json` in the `stopped` phase is the common post-reboot case: the step
+        restarts it with the CHEAP `lifecycle.up` (re-render + `compose up -d`, the images
+        `stack.json` already holds), not a twelve-step re-provision. This is the round-7
+        fix: the stopped and the interrupted branches used to both call `_provision`."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+        import stack.lifecycle as lifecycle
+
+        up_calls = []
+        provision_calls = []
+
+        def fake_up(deps, *, upgrade=False, images=None):
+            up_calls.append((upgrade, images))
+            return None
+
+        def fake_provision(request, deps):
+            provision_calls.append(request)
+            return None
+
+        stack_dir = make_stack_dir(self.root, phase="stopped")
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(stack_cli, "_discover",
+                                  return_value=[SimpleNamespace(name="docker")]), \
+                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(lifecycle, "up", fake_up), \
+                mock.patch.object(installer, "provision", fake_provision), \
+                redirect_stdout(io.StringIO()):
+            stack_cli.install_step(
+                self.args(stack=None, yes=True),
+                {"blockers": [], "ready": True, "checks": []},
+                budgets=[], ask=lambda prompt: "", interactive=True)
+        self.assertEqual(len(up_calls), 1, "a stopped stack restarts via lifecycle.up")
+        self.assertEqual(up_calls[0], (False, None),
+                         "the restart repeats the recorded images (no upgrade)")
+        self.assertEqual(len(provision_calls), 0,
+                         "a stopped stack must NOT re-provision (re-pull, re-proof)")
+
+    def test_windows_is_not_offered_it_says_the_line_and_returns(self):
+        """The plan's first `install_step` branch: on Windows (WSL included) the step is
+        not offered in phase 1 -- it says the one line, points at the README's
+        `## Local models`, and returns. It must not offer and then die in
+        `installer._check_platform` with `StackError(step="platform")`."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+        import stack.lifecycle as lifecycle
+
+        provision_calls = []
+        up_calls = []
+
+        def fake_provision(request, deps):
+            provision_calls.append(request)
+            return None
+
+        def fake_up(deps, *, upgrade=False, images=None):
+            up_calls.append(deps)
+            return None
+
+        stack_dir = self.root / "stack"
+        stack_dir.mkdir(exist_ok=True)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(facts, "is_windows_host", return_value=True), \
+                mock.patch.object(installer, "provision", fake_provision), \
+                mock.patch.object(lifecycle, "up", fake_up), \
+                redirect_stdout(buf):
+            stack_cli.install_step(
+                self.args(stack="auto", yes=True),
+                {"blockers": [{"name": "Qdrant"}], "ready": False, "checks": []},
+                budgets=[], ask=lambda prompt: "", interactive=True)
+        out = buf.getvalue()
+        self.assertEqual(len(provision_calls), 0, "Windows never provisions in phase 1")
+        self.assertEqual(len(up_calls), 0, "Windows never restarts in phase 1")
+        self.assertIn("Local models", out, "the line must point at the README section")
+        self.assertIn("not available", out, "the line must say it is not available")
+
+    def test_the_offer_explains_what_it_would_do_before_it_asks(self):
+        """The spec's "Quando aparece": a no-stack blocker explains what it would do --
+        what it downloads, how much, the ports, where the data lives -- BEFORE it asks
+        `y/N`. The numbers come from the catalogue (never a literal), so they cannot
+        drift from the download. Declining still ends the step without provisioning."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+        import stack.catalog as catalog
+
+        provision_calls = []
+        asked = []
+
+        def fake_provision(request, deps):
+            provision_calls.append(request)
+            return None
+
+        def fake_ask(prompt):
+            asked.append(prompt)
+            return "n"  # decline
+
+        stack_dir = self.root / "stack"
+        stack_dir.mkdir(exist_ok=True)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(installer, "provision", fake_provision), \
+                redirect_stdout(buf):
+            stack_cli.install_step(
+                self.args(stack=None, yes=False),
+                {"blockers": [{"name": "Qdrant"}, {"name": "Embedding"}],
+                 "ready": False, "checks": []},
+                budgets=[], ask=fake_ask, interactive=True)
+        out = buf.getvalue()
+        # the question was asked
+        self.assertTrue(any("y/N" in p for p in asked), "the offer must ask y/N")
+        # the disclosure is present, and its numbers are the catalogue's
+        self.assertIn(f"{catalog.MODELS_BYTES / 2 ** 20:.0f} MiB", out,
+                      "the offer must name the download size from the catalogue")
+        self.assertIn("qdrant on 6333", out, "the offer must name the ports")
+        self.assertIn(str(stack_dir), out, "the offer must name the data directory")
+        self.assertEqual(len(provision_calls), 0, "declining must not provision")
+
 
 class ParserIsLight(unittest.TestCase):
     """The load-bearing constraint: building the parser must not import the heavy stack

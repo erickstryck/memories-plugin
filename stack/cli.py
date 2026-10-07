@@ -259,6 +259,14 @@ def install_step(args, report: dict, *, budgets: list,
     import stack.installer as installer
     import stack.state as state
 
+    # The plan's first branch: on Windows (WSL included) the step is not offered in
+    # phase 1 -- it says the one line and returns. The gate is cheap (host system +
+    # kernel release only, no hardware probe) so it runs on every call, even the ones
+    # that would end in a no-op.
+    if facts.is_windows_host(facts.Probe()):
+        _windows_line()
+        return
+
     stack_dir = state.stack_dir(os.environ)
     st = state.load(stack_dir)  # a corrupt stack.json raises; it rises to main()
 
@@ -280,6 +288,17 @@ def install_step(args, report: dict, *, budgets: list,
             print("  ..    Qdrant or the embedding endpoint is not answering; a local stack "
                   "would stand them up (qctx install --stack auto)")
             return
+        # The spec's "Quando aparece": before it asks, the offer explains what it would
+        # do -- what it downloads and how much, the ports, where the data lives. The
+        # numbers come from the catalogue so they cannot drift from the download
+        # (review round R7, item 3).
+        print("  ..    Qdrant or the embedding endpoint is not answering; a local stack "
+              "would stand them up:")
+        print(f"        downloads {catalog.MODELS_BYTES / 2 ** 20:.0f} MiB of models "
+              f"into {stack_dir / 'models'}")
+        print("        ports: " + ", ".join(f"{name} on {port}"
+                                            for name, port in catalog.PORTS.items()))
+        print(f"        data: {stack_dir}")
         if _confirm(ask, "stand up the local stack now? [y/N] "):
             _provision(args, stack_dir, budgets, ask, installer, facts)
             return
@@ -301,7 +320,7 @@ def _step_managed(st, stack_dir, args, report, budgets, ask, installer, facts) -
     elif st.phase == state.PHASE_STOPPED:
         print(f"  ..    the stack is stopped; restart it with: qctx stack up")
         if args.yes or _confirm(ask, "restart the stack now? [y/N] "):
-            _provision(args, stack_dir, budgets, ask, installer, facts)
+            _restart(args, stack_dir, ask)
             return
     else:
         # An other phase (compose): the last install was interrupted. Resume by
@@ -325,6 +344,25 @@ def _status_of(st, stack_dir):
                               prompter=_prompter(None), config=CoreConfigSink(),
                               stack_dir=stack_dir, runner=process.SubprocessRunner())
     return lifecycle.status(deps)
+
+
+def _restart(args, stack_dir, ask) -> None:
+    """Restart a STOPPED stack the cheap way: `lifecycle.up` re-renders the compose from
+    the recorded state and does `compose up -d`, repeating exactly the images `stack.json`
+    holds. It is not `_provision`, which would re-detect the runtimes, re-prove the GPUs,
+    re-pull the images and re-verify for what a reboot left merely stopped. The deps are
+    the same a `qctx stack up` builds (review round R7, item 1)."""
+    import stack.lifecycle as lifecycle
+    lifecycle.up(_life_deps(args, ask), upgrade=False, images=None)
+
+
+def _windows_line() -> None:
+    """The one line and return the plan's first `install_step` branch requires on Windows
+    (WSL included): phase 1 does not offer the step there, so it points at the README's
+    manual path instead of offering and dying in `installer._check_platform` (review
+    round R7, item 2)."""
+    print("  ..    the local stack is not available on this platform in this version "
+          "(windows, incl. wsl); set it up by hand: see '## Local models' in the README")
 
 
 def _provision(args, stack_dir, budgets, ask, installer, facts) -> None:
