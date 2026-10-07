@@ -83,12 +83,19 @@ def render(plan: Plan) -> dict:
     return {"services": services, "volumes": {catalog.VOLUME: {}}}
 
 
+#: One fix for every refused directory: the check below is the whole policy.
+_STACK_DIR_FIX = ("set QCTX_STACK_DIR to an absolute path without ':', '$' or characters "
+                  "outside the basic multilingual plane")
+
+
 def _check_stack_dir(stack_dir: Path) -> None:
-    """Refuse a `stack_dir` the short volume syntax `<host>:/models:ro` cannot carry in both
+    r"""Refuse a `stack_dir` the short volume syntax `<host>:/models:ro` cannot carry in both
     providers.
 
-    `json.dumps` escapes nothing a provider would rewrite, so every one of these was
-    measured on throwaway compose files (both providers, `config` only, never `up`):
+    The emitter writes the path through `json.dumps`, which escapes every non-ASCII
+    character as a `\uXXXX` sequence; the providers read those escapes back differently,
+    so every one of these was measured on throwaway compose files (both providers,
+    `config` only, never `up`):
     2026-10-06 (R2-9): a `:` anywhere breaks the parse in BOTH; a code point above 0xFFFF
     is rejected by docker-compose and garbled by podman-compose. 2026-10-07 (R4):
     `docker-compose v5.2.0` and `podman-compose 1.6.0` interpolate `$VAR` and `${VAR}` in the
@@ -116,11 +123,6 @@ def _check_stack_dir(stack_dir: Path) -> None:
             raise StackError(
                 f"the stack directory {path!r} cannot be used as a compose source path",
                 step="compose", fix=_STACK_DIR_FIX)
-
-
-#: One fix for every refused directory: the check above is the whole policy.
-_STACK_DIR_FIX = ("set QCTX_STACK_DIR to an absolute path without ':', '$' or characters "
-                  "outside the basic multilingual plane")
 
 
 def dump(plan: Plan) -> str:
