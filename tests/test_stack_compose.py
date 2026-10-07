@@ -275,6 +275,37 @@ class TheRenderTest(unittest.TestCase):
                         render(fixture_plan("linux", "docker", "odd"))
                 self.assertEqual("compose", ctx.exception.step)
 
+    def test_a_stack_dir_with_a_colon_is_refused(self):
+        # R2 item R2-9: the models mount is the short form `<host>:/models:ro`, which
+        # both providers split on ':'. A ':' in the host path breaks the parse in BOTH
+        # (measured 2026-10-06 with docker-compose v5.2.0 and podman-compose 1.6.0).
+        for bad in (Path("/home/me/stack:1"), Path("/home/me/a:b/c")):
+            with self.subTest(stack_dir=bad):
+                with self.assertRaises(StackError) as ctx:
+                    render(fixture_plan("linux", "docker", "cpu", stack_dir=bad))
+                self.assertEqual("compose", ctx.exception.step)
+                self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
+                self.assertIn(":", ctx.exception.fix)
+
+    def test_a_stack_dir_with_a_non_bmp_character_is_refused(self):
+        # R2 item R2-9: a code point above 0xFFFF (an emoji) is rejected by
+        # docker-compose and garbled by podman-compose (measured 2026-10-06).
+        with self.assertRaises(StackError) as ctx:
+            render(fixture_plan("linux", "docker", "cpu",
+                                stack_dir=Path("/home/me/\U0001F4A4")))  # a face
+        self.assertEqual("compose", ctx.exception.step)
+        self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
+        self.assertIn("emoji", ctx.exception.fix)
+
+    def test_an_accented_stack_dir_is_accepted(self):
+        # R2 item R2-9: an accented path (code points inside the BMP) works in both
+        # providers, so it must NOT be refused.
+        accented = Path("/home/me/Memórias/plugin")
+        doc = render(fixture_plan("linux", "docker", "cpu", stack_dir=accented))
+        models = "/home/me/Memórias/plugin/models:/models:ro"
+        self.assertEqual([models], doc["services"]["embed"]["volumes"])
+        self.assertEqual([models], doc["services"]["rerank"]["volumes"])
+
 
 def regen() -> None:
     """Rewrites every fixture from `dump`. Runs no test."""

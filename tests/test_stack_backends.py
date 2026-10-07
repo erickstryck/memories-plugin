@@ -122,6 +122,9 @@ class VendorOfTest(unittest.TestCase):
         self.assertEqual("apple", vendor_of("Virtio-GPU Venus (Apple M2 Pro)"))
         self.assertEqual("apple", vendor_of("Venus (Apple M3)"))
         self.assertIsNone(vendor_of("llvmpipe (LLVM 19.1.7, 256 bits)"))
+        # The dzn device (Windows, phase 3) names itself `Microsoft Direct3D12
+        # (...)`; that prefix is not a phase-1 token, so a dzn name is unknown
+        # here (the spec's Windows row names the format; recognition is phase 3).
         self.assertIsNone(vendor_of("Microsoft Direct3D12 (RTX 4090)"))
         # The tokens are matched case-sensitively, as llama.cpp prints them.
         self.assertIsNone(vendor_of("nvidia geforce rtx 4090"))
@@ -206,23 +209,25 @@ class AvailabilityTableTest(unittest.TestCase):
              engine("podman", "5.7.0", rootless=False), "podman",
              READY, "", None, None),
             ("nvidia without the icd", "nvidia", "linux",
-             host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
                   render_nodes=("renderD128",),
                   nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=False,
                                      docker_hook=True, cdi_spec=True)),
              engine("podman", "5.7.0"), "podman",
              MISSING, "no nvidia vulkan icd on the host",
-             "install libnvidia-gl-<version>, then " + CDI_GENERATE, None),
+             "install the driver's GL/Vulkan package (libnvidia-gl-<version> on Ubuntu), "
+             "then " + CDI_GENERATE, None),
             # spec, "Detecção": on Docker the icd is the whole fix; on Podman the
             # CDI spec generated before it lacks the icd, so it is generated again
             ("nvidia without the icd on docker", "nvidia", "linux",
-             host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
                   render_nodes=("renderD128",),
                   nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=False,
                                      docker_hook=True, cdi_spec=True)),
              engine("docker"), "docker",
              MISSING, "no nvidia vulkan icd on the host",
-             "install libnvidia-gl-<version>", None),
+             "install the driver's GL/Vulkan package (libnvidia-gl-<version> on Ubuntu)",
+             None),
             # this machine: two Intel cards and an AMD one, no NVIDIA at all
             ("nvidia on a host with no nvidia gpu", "nvidia", "linux",
              host(gpus=(Gpu(vendor="intel", card="card0"), Gpu(vendor="amd", card="card1")),
@@ -231,25 +236,52 @@ class AvailabilityTableTest(unittest.TestCase):
              UNSUPPORTED, "no nvidia gpu on the host", None, None),
             # the card is on the bus, but no driver lists it (nouveau, or none)
             ("nvidia card that nvidia-smi does not list", "nvidia", "linux",
-             host(gpus=(Gpu(vendor="nvidia", card="card0"),), render_nodes=("renderD128",),
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),), render_nodes=("renderD128",),
                   nvidia=NvidiaFacts(gpus=(), icd=False)),
              engine("docker"), "docker",
              MISSING, "nvidia-smi lists no gpu", "install the NVIDIA driver", None),
             ("nvidia docker without the hook", "nvidia", "linux",
-             host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
                   render_nodes=("renderD128",),
                   nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=True,
                                      docker_hook=False, cdi_spec=True)),
              engine("docker"), "docker",
              MISSING, "no nvidia container runtime hook",
              "install nvidia-container-toolkit", None),
-            ("nvidia podman without the cdi spec", "nvidia", "linux",
-             host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
+            # R2 item m3: the cdi hook counts for Docker only from 29.2. On 28.x it
+            # does not, so a host with only the cdi hook and Docker 28.5 is missing.
+            ("nvidia docker cdi hook but docker below 29.2", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
                   render_nodes=("renderD128",),
                   nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=True,
-                                     docker_hook=True, cdi_spec=False)),
+                                     docker_hook=False, cdi_hook=True, cdi_spec=True)),
+             engine("docker", "28.5.2"), "docker",
+             MISSING, "no nvidia container runtime hook",
+             "install nvidia-container-toolkit", None),
+            # the same host on Docker 29.2: the cdi hook counts, ready.
+            ("nvidia docker cdi hook on docker 29.2", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
+                  render_nodes=("renderD128",),
+                  nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=True,
+                                     docker_hook=False, cdi_hook=True, cdi_spec=True)),
+             engine("docker", "29.2.0"), "docker",
+             READY, "", None, None),
+            ("nvidia podman without the cdi spec, with nvidia-ctk", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
+                  render_nodes=("renderD128",),
+                  nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=True,
+                                     docker_hook=True, cdi_spec=False, ctk=True)),
              engine("podman", "5.7.0"), "podman",
              MISSING, "no nvidia cdi spec", CDI_GENERATE, None),
+            # the toolkit is not installed: the fix names it first (R2 item m4)
+            ("nvidia podman without the cdi spec, without nvidia-ctk", "nvidia", "linux",
+             host(gpus=(Gpu(vendor="nvidia", card="0000:65:00.0"),),
+                  render_nodes=("renderD128",),
+                  nvidia=NvidiaFacts(gpus=("NVIDIA GeForce RTX 4090",), icd=True,
+                                     docker_hook=True, cdi_spec=False, ctk=False)),
+             engine("podman", "5.7.0"), "podman",
+             MISSING, "no nvidia cdi spec",
+             "install nvidia-container-toolkit, then " + CDI_GENERATE, None),
             ("nvidia ready on podman", "nvidia", "linux",
              host(gpus=(Gpu(vendor="nvidia", card="NVIDIA GeForce RTX 4090"),),
                   render_nodes=("renderD128",),
@@ -261,16 +293,24 @@ class AvailabilityTableTest(unittest.TestCase):
              host(system="macos", arch="arm64"),
              engine("docker", "4.40.0", os="linux"), "docker",
              RUNTIME, "docker desktop passes no gpu to a container", None, "podman"),
+            # R2 item I7: ONE fix for podman 5 and 6. The provider must persist in
+            # the [machine] table of containers.conf; a one-shot env at `init` does
+            # not, because `machine info` and `machine start` read the configured
+            # provider for each command.
             ("apple with an applehv vm on podman 5", "apple", "macos",
              host(system="macos", arch="arm64"),
              engine("podman", "5.7.0", os="linux", vm="applehv"), "podman",
              MISSING, "the podman machine is not libkrun",
-             "CONTAINERS_MACHINE_PROVIDER=libkrun podman machine init", None),
+             "set provider = \"libkrun\" in the [machine] table of "
+             "~/.config/containers/containers.conf (and unset "
+             "CONTAINERS_MACHINE_PROVIDER), then podman machine init --now", None),
             ("apple with an applehv vm on podman 6", "apple", "macos",
              host(system="macos", arch="arm64"),
              engine("podman", "6.0.0", os="linux", vm="applehv"), "podman",
              MISSING, "the podman machine is not libkrun",
-             "podman machine init --provider libkrun", None),
+             "set provider = \"libkrun\" in the [machine] table of "
+             "~/.config/containers/containers.conf (and unset "
+             "CONTAINERS_MACHINE_PROVIDER), then podman machine init --now", None),
             ("intel mac", "apple", "macos",
              host(system="macos", arch="amd64"),
              engine("podman", "5.7.0", os="linux"), "podman",
@@ -350,6 +390,11 @@ class ServicePatchTest(unittest.TestCase):
         self.assertEqual({"devices": ["nvidia.com/gpu=1"]},
                          BACKENDS["nvidia"].service_patch("podman", 1))
         self.assertEqual({"devices": ["/dev/dri:/dev/dri"]},
+                         BACKENDS["apple"].service_patch("docker", None))
+        # R2 item R2-8: the apple profile on Podman carries the same keep_original_groups
+        # annotation the dri profiles do: the machine runs rootless by default.
+        self.assertEqual({"devices": ["/dev/dri:/dev/dri"],
+                          "annotations": {"run.oci.keep_original_groups": "1"}},
                          BACKENDS["apple"].service_patch("podman", None))
         self.assertEqual({}, BACKENDS["cpu"].service_patch("docker", None))
         # The annotation rides on EVERY podman service patch of a dri profile:

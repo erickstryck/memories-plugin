@@ -75,11 +75,39 @@ def volume_name(project: str) -> str:
 
 def render(plan: Plan) -> dict:
     """The compose document of `plan`, keys in the order they are written."""
+    _check_stack_dir(plan.stack_dir)
     services = {}
     for service in catalog.SERVICES:
         fields = _qdrant(plan) if service == "qdrant" else _server(plan, service)
         services[service] = {key: fields[key] for key in _SERVICE_KEYS if key in fields}
     return {"services": services, "volumes": {catalog.VOLUME: {}}}
+
+
+def _check_stack_dir(stack_dir: Path) -> None:
+    """Refuse a `stack_dir` the short volume syntax cannot carry (R2 item R2-9).
+
+    The models mount is the SHORT form `<host path>:/models:ro`, which both providers
+    split on `:`. Measured 2026-10-06 on this machine with docker-compose v5.2.0 and
+    podman-compose 1.6.0 `config` on throwaway files:
+      * a `:` ANYWHERE in the host path breaks the parse in BOTH providers;
+      * a character outside the Basic Multilingual Plane (an emoji, code point above
+        0xFFFF) is rejected by docker-compose and garbled by podman-compose.
+    Accented characters (the Latin-1 supplement and beyond, still inside the BMP) work in
+    both. Rather than switch to the long volume syntax, the step refuses the directory
+    with a named fix.
+    """
+    path = str(stack_dir)
+    if ":" in path:
+        raise StackError(
+            f"the stack directory {path!r} contains ':', which breaks the compose "
+            "volume syntax in both providers",
+            step="compose", fix="set QCTX_STACK_DIR to a path without ':'")
+    for char in path:
+        if ord(char) > 0xFFFF:
+            raise StackError(
+                f"the stack directory {path!r} has a character outside the basic "
+                "multilingual plane, which one compose provider garbles",
+                step="compose", fix="set QCTX_STACK_DIR to a path without emoji")
 
 
 def dump(plan: Plan) -> str:

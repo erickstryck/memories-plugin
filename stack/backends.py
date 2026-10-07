@@ -80,9 +80,11 @@ def parse_devices(output: str) -> list[Device]:
 
 
 def vendor_of(name: str) -> str | None:
-    """The vendor of a device name, by the tokens the drivers print, matched
+    """The vendor of a device name, by the tokens the native drivers print, matched
     case-sensitively: a name is the driver's, not a free text. `llvmpipe` is a
-    CPU, and a name no profile knows belongs to no profile."""
+    CPU, and a name no profile knows belongs to no profile. The dzn device (Windows,
+    phase 3) names itself `Microsoft Direct3D12 (...)`, and that prefix is not a
+    phase-1 token, so a dzn name is unknown here: dzn recognition arrives in phase 3."""
     if "NVIDIA" in name:
         return "nvidia"
     if "AMD" in name or "RADV" in name:
@@ -220,21 +222,34 @@ class NvidiaGpu:
             return Availability(state=MISSING, reason="nvidia-smi lists no gpu",
                                 fix="install the NVIDIA driver")
         if not facts.nvidia.icd:
-            # The spec's named correction: the GL/Vulkan component of the driver,
+            # The spec's named correction: the driver's GL/Vulkan component,
             # `libnvidia-gl-<version>` on Ubuntu; on Podman the CDI spec generated
             # before it lacks the icd, so it is generated again.
-            fix = "install libnvidia-gl-<version>"
+            fix = "install the driver's GL/Vulkan package (libnvidia-gl-<version> on Ubuntu)"
             if runtime == "podman":
                 fix += ", then " + CDI_GENERATE
             return Availability(state=MISSING,
                                 reason="no nvidia vulkan icd on the host", fix=fix)
-        if runtime == "docker" and not facts.nvidia.docker_hook:
-            return Availability(state=MISSING,
-                                reason="no nvidia container runtime hook",
-                                fix="install nvidia-container-toolkit")
-        if runtime == "podman" and not facts.nvidia.cdi_spec:
-            return Availability(state=MISSING, reason="no nvidia cdi spec",
-                                fix=CDI_GENERATE)
+        if runtime == "docker":
+            # A Docker daemon accepts a GPU request through one of its two hooks:
+            # `nvidia-container-runtime-hook` on any version, or `nvidia-cdi-hook`,
+            # but only from 29.2 (the daemon did not recognise the CDI hook before
+            # then; read in moby at v28.3.2, v28.5.2, docker-v29.1.0 and
+            # docker-v29.2.0, review round R2 item m3). An unparseable version
+            # therefore does not count the CDI hook.
+            hook_ok = facts.nvidia.docker_hook
+            if not hook_ok and facts.nvidia.cdi_hook:
+                hook_ok = _docker_ge_29_2(engine.version)
+            if not hook_ok:
+                return Availability(state=MISSING,
+                                    reason="no nvidia container runtime hook",
+                                    fix="install nvidia-container-toolkit")
+        elif not facts.nvidia.cdi_spec:
+            # On Podman the CDI spec is the hook. Generating it needs `nvidia-ctk`;
+            # when the toolkit is not installed, the fix says so first (R2 item m4).
+            fix = (CDI_GENERATE if facts.nvidia.ctk
+                   else "install nvidia-container-toolkit, then " + CDI_GENERATE)
+            return Availability(state=MISSING, reason="no nvidia cdi spec", fix=fix)
         return Availability(state=READY)
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
@@ -289,27 +304,47 @@ class AppleGpu:
                                 reason="docker desktop passes no gpu to a container",
                                 needs="podman")
         if engine.vm != "libkrun":
-            if _major(engine.version) >= 6:
-                fix = "podman machine init --provider libkrun"
-            else:
-                fix = "CONTAINERS_MACHINE_PROVIDER=libkrun podman machine init"
+            # ONE fix for podman 5 and 6 (review round R2, item I7): the provider
+            # must persist. A one-shot `CONTAINERS_MACHINE_PROVIDER=libkrun podman
+            # machine init` does not, because `podman machine info` (Host.VMType)
+            # and `podman machine start` read the provider CONFIGURED in
+            # containers.conf or the environment for each command, so the next
+            # `info` says applehv again and the start cannot find the new machine.
+            # On podman 6 applehv appears only when config or env pins it, which
+            # `--provider libkrun` does not change. The durable fix is to set it in
+            # the [machine] table, then re-create the machine.
+            fix = ("set provider = \"libkrun\" in the [machine] table of "
+                   "~/.config/containers/containers.conf (and unset "
+                   "CONTAINERS_MACHINE_PROVIDER), then podman machine init --now")
             return Availability(state=MISSING,
                                 reason="the podman machine is not libkrun", fix=fix)
         return Availability(state=READY)
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
-        return {"devices": ["/dev/dri:/dev/dri"]}
+        patch: dict = {"devices": ["/dev/dri:/dev/dri"]}
+        if runtime == "podman":
+            # the same annotation the dri profiles carry on Podman: the machine runs
+            # rootless by default, and the annotation is required rootless and
+            # harmless rootful (review round R2, item R2-8). Unmeasured on a Mac;
+            # the cost of being wrong is one annotation line.
+            patch["annotations"] = {"run.oci.keep_original_groups": "1"}
+        return patch
 
     def devices_seen(self, output: str) -> list[Device]:
         return [d for d in parse_devices(output) if d.vendor == "apple"]
 
 
-def _major(version: str) -> int:
-    """The major of a podman version like `5.7.0` or `6.0.0`."""
-    try:
-        return int(version.split(".")[0])
-    except (ValueError, IndexError):
-        return 5
+def _docker_ge_29_2(version: str) -> bool:
+    """Whether a Docker version is 29.2 or newer, so the `nvidia-cdi-hook` counts.
+
+    `29.2`/`29.3.1`/`30.0` are yes; `28.5.2`, `29.1.0` and an unparseable string
+    are no (review round R2 item m3): when the version cannot be read, the CDI
+    hook must not count, only the runtime hook may."""
+    match = re.match(r"^(\d+)\.(\d+)", version.strip())
+    if match is None:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2))
+    return major > 29 or (major == 29 and minor >= 2)
 
 
 #: The menu's order: the safe default first, then the GPU profiles.

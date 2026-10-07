@@ -40,6 +40,8 @@ services:
       - "/Users/me/.local/share/memories-plugin/stack/models:/models:ro"
     devices:
       - "/dev/dri:/dev/dri"
+    annotations:
+      "run.oci.keep_original_groups": "1"
     cap_drop:
       - "ALL"
     security_opt:
@@ -71,6 +73,8 @@ services:
       - "/Users/me/.local/share/memories-plugin/stack/models:/models:ro"
     devices:
       - "/dev/dri:/dev/dri"
+    annotations:
+      "run.oci.keep_original_groups": "1"
     cap_drop:
       - "ALL"
     security_opt:

@@ -11,31 +11,40 @@ what exists, and nothing the choice will not use.
 Everything is read through a `Probe`: files under `probe.root`, `platform` and
 `shutil` as injected callables, and a `Runner` for the commands. A production
 `collect` uses the default `Probe()`; a test points `root` at a fake tree in a
-temp directory. The GPU walk is shaped like this machine: two Intel cards, one AMD
-card, an ASPEED BMC card that is not a GPU, and a `card0-DP-1` connector that is
-not a card at all.
+temp directory.
+
+The GPU walk reads the PCI bus, not `/sys/class/drm` (review round R2, item I4): a
+`cardN` appears there only once a kernel driver is bound, so a card with no driver
+(a driverless NVIDIA, the case the spec names) is invisible there. A PCI device is a
+GPU when its `class` starts with `0x03` (display controller: `0x030000` VGA,
+`0x030200` 3D, `0x038000` other) and its `vendor` is in `VENDORS`; its `card` name is
+the PCI address. Render nodes still come from `/dev/dri`.
 """
 import platform
 import re
 import shutil
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from .runtimes import Runner, normalize_arch
+from .runtimes import Runner, SubprocessRunner, normalize_arch
 
-#: The PCI vendor ids the kernel prints in `/sys`, mapped to the name the menu uses.
-#: Only these are GPUs: the ASPEED BMC (0x1a03) and every other onboard device
-#: that lives in `/sys/class/drm` is ignored.
+#: The PCI vendor ids the kernel prints in `/sys/bus/pci/devices/*/vendor`, mapped to
+#: the name the menu uses. Only these are GPUs: the ASPEED BMC (0x1a03) and every
+#: other display-class device are ignored.
 VENDORS = {"0x1002": "amd", "0x8086": "intel", "0x10de": "nvidia"}
 
-_CARD = re.compile(r"^card(\d+)$")
+#: A display controller (PCI class 0x03): `0x030000` VGA, `0x030200` 3D, `0x038000`
+#: other. The audio functions that share a GPU's card number are class `0x040300`
+#: (multimedia) and start with `0x04`, so they are not matched here (measured
+#: 2026-10-06: the AMD card's HDMI audio is `0000:44:00.1`, class `0x040300`).
+_DISPLAY_CLASS_PREFIX = "0x03"
 
 
 @dataclass(frozen=True)
 class Gpu:
-    """One GPU the host can see: its vendor and the readable name of its card."""
+    """One GPU the host can see: its vendor and the PCI address of the card."""
     vendor: str
     card: str
 
@@ -43,11 +52,20 @@ class Gpu:
 @dataclass(frozen=True)
 class NvidiaFacts:
     """Whether an NVIDIA GPU could reach a container. Filled only when a nvidia
-    GPU is present; the empty default is the "no nvidia here" answer."""
+    GPU is present; the empty default is the "no nvidia here" answer.
+
+    `docker_hook` is `nvidia-container-runtime-hook` on the PATH (any Docker
+    version). `cdi_hook` is `nvidia-cdi-hook` on the PATH: it counts for Docker only
+    from 29.2 (the daemon did not recognise it before), so the backend combines it
+    with the Docker version (review round R2, item m3). `ctk` is `nvidia-ctk`, the
+    tool that generates a missing CDI spec.
+    """
     gpus: tuple[str, ...] = ()
     icd: bool = False
     docker_hook: bool = False
+    cdi_hook: bool = False
     cdi_spec: bool = False
+    ctk: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,12 +87,16 @@ class HostFacts:
 class Probe:
     """The injected primitives every fact is read through. A production `collect`
     uses the defaults; a test points `root` at a fake tree and swaps the
-    callables, so no real file, command or PATH lookup happens."""
+    callables, so no real file read happens. `runner` defaults to a real
+    `SubprocessRunner` (review round R2, item I5: a production `collect` must run
+    `nvidia-smi`); a test injects a fake. `disk_usage` is injected so the disk test
+    never reads a real filesystem (review round R2, item m8)."""
     root: Path = Path("/")
     system: Callable[[], str] = platform.system
     machine: Callable[[], str] = platform.machine
     which: Callable[[str], str | None] = shutil.which
-    runner: Runner | None = None
+    runner: Runner = field(default_factory=SubprocessRunner)
+    disk_usage: Callable[[Path], Any] = shutil.disk_usage
 
 
 def normalize_system(name: str) -> str:
@@ -110,34 +132,30 @@ def collect(probe: Probe, stack_dir: Path) -> HostFacts:
 
 
 def _gpus(probe: Probe) -> tuple[Gpu, ...]:
-    """The real cards in `/sys/class/drm`: a `cardN` (all digits) whose vendor is
-    in `VENDORS`. A `cardN-<connector>` is a connector, not a card, and a vendor
-    outside `VENDORS` (the ASPEED BMC) is not a GPU."""
-    drm = probe.root / "sys" / "class" / "drm"
-    if not drm.is_dir():
+    """The display controllers on the PCI bus, by vendor (review round R2, item I4).
+
+    A device counts when its `class` starts with `0x03` (a display controller) and
+    its `vendor` is in `VENDORS`. Reading the bus, not `/sys/class/drm`, is what
+    keeps a driverless card visible: `/sys/class/drm` lists a `cardN` only once a
+    driver is bound. The card's name is the PCI address, and the list is sorted by
+    address (the addresses are zero-padded, so lexicographic order is numeric).
+    """
+    pci = probe.root / "sys" / "bus" / "pci" / "devices"
+    if not pci.is_dir():
         return ()
-    found = []
-    for entry in drm.iterdir():
-        match = _CARD.match(entry.name)
-        if match is None or not entry.is_dir():
-            continue
-        vendor_file = entry / "device" / "vendor"
+    found: list[Gpu] = []
+    for dev in sorted(pci.iterdir()):
         try:
-            vendor = vendor_file.read_text().strip().lower()
+            cls = (dev / "class").read_text().strip()
+            vendor = (dev / "vendor").read_text().strip().lower()
         except OSError:
+            continue
+        if not cls.startswith(_DISPLAY_CLASS_PREFIX):
             continue
         if vendor not in VENDORS:
             continue
-        label_file = entry / "device" / "label"
-        try:
-            card = label_file.read_text().strip()
-        except OSError:
-            card = entry.name
-        if not card:
-            card = entry.name
-        found.append((int(match.group(1)), Gpu(vendor=VENDORS[vendor], card=card)))
-    found.sort(key=lambda pair: pair[0])
-    return tuple(gpu for _, gpu in found)
+        found.append(Gpu(vendor=VENDORS[vendor], card=dev.name))
+    return tuple(found)
 
 
 def _render_nodes(probe: Probe) -> tuple[str, ...]:
@@ -162,40 +180,34 @@ def _wsl(probe: Probe) -> bool:
 
 
 def _ram(probe: Probe, system: str) -> int | None:
-    """The free RAM the host can actually use. On linux the kernel publishes it
-    as `MemAvailable`; on macos the only reading is `sysctl hw.memsize`."""
-    if system == "linux":
-        try:
-            meminfo = (probe.root / "proc" / "meminfo").read_text()
-        except OSError:
-            return None
-        for line in meminfo.splitlines():
-            if line.startswith("MemAvailable:"):
-                # "MemAvailable:    4194304 kB" -> 4194304 * 1024 bytes
-                return int(line.split()[1]) * 1024
+    """The free RAM the host can actually use, for the LINUX case. On linux the
+    kernel publishes it as `MemAvailable`. On macOS this returns `None` (review
+    round R2, item I6): the host's `hw.memsize` is not what the containers get.
+    They run in the machine VM (2048 MiB by default), so the figure that matters
+    is the engine's own, read from `EngineInfo.memory_bytes` by the caller."""
+    if system != "linux":
         return None
-    if system == "macos":
-        if probe.runner is None:
-            return None
-        out = probe.runner.run(["sysctl", "hw.memsize"], timeout=30.0)
-        if not out.ok:
-            return None
-        # "hw.memsize: 17179869184"
-        for line in out.stdout.splitlines():
-            if line.startswith("hw.memsize:"):
-                return int(line.split(":")[1].strip())
+    try:
+        meminfo = (probe.root / "proc" / "meminfo").read_text()
+    except OSError:
         return None
+    for line in meminfo.splitlines():
+        if line.startswith("MemAvailable:"):
+            # "MemAvailable:    4194304 kB" -> 4194304 * 1024 bytes
+            return int(line.split()[1]) * 1024
     return None
 
 
 def _disk_free(probe: Probe, stack_dir: Path) -> int | None:
     """The free bytes at the nearest EXISTING ancestor of `stack_dir`. The stack
     directory is created later, so the path itself is usually absent: walk up
-    until something is there, and read its free space."""
+    until something is there, and read its free space. The measurement goes through
+    `probe.disk_usage` so a test injects a fake and never reads a real filesystem
+    (review round R2, item m8)."""
     candidate = Path(stack_dir)
     while True:
         try:
-            return shutil.disk_usage(candidate).free
+            return probe.disk_usage(candidate).free
         except OSError:
             if candidate == candidate.parent:
                 return None  # not even the root answered
@@ -226,10 +238,12 @@ def _nvidia_facts(probe: Probe, gpus: tuple[Gpu, ...]) -> NvidiaFacts:
                           for line in out.stdout.splitlines()
                           if (n := _nvidia_name(line)))
     icd = _nvidia_icd(probe)
-    docker_hook = probe.which("nvidia-container-runtime-hook") is not None \
-        or probe.which("nvidia-cdi-hook") is not None
+    docker_hook = probe.which("nvidia-container-runtime-hook") is not None
+    cdi_hook = probe.which("nvidia-cdi-hook") is not None
+    ctk = probe.which("nvidia-ctk") is not None
     cdi = _cdi_spec(probe)
-    return NvidiaFacts(gpus=names, icd=icd, docker_hook=docker_hook, cdi_spec=cdi)
+    return NvidiaFacts(gpus=names, icd=icd, docker_hook=docker_hook,
+                       cdi_hook=cdi_hook, cdi_spec=cdi, ctk=ctk)
 
 
 def _nvidia_icd(probe: Probe) -> bool:
@@ -251,13 +265,16 @@ def _nvidia_name(line: str) -> str:
     if match is None:
         return ""
     name = match.group(1).strip()
-    return re.sub(r"\s*\((?:UUID|uuid):\s*[^)]*\)\s*$", "", name).strip()
+    return re.sub(r"\s*\(?(?:UUID|uuid):\s*[^)]*\)\s*$", "", name).strip()
 
 
 def _cdi_spec(probe: Probe) -> bool:
     """A CDI spec naming an nvidia GPU (spec, "Detecção"): it lives in `/etc/cdi`
     or `/var/run/cdi`, in either container runtime's hand, so either directory
-    makes the profile possible: any file containing `nvidia.com/gpu`."""
+    makes the profile possible. The files are read as bytes and searched for the
+    marker `nvidia.com/gpu`, because a generated spec is not guaranteed UTF-8
+    (review round R2, item m9)."""
+    marker = b"nvidia.com/gpu"
     for cdi_dir in (probe.root / "etc" / "cdi", probe.root / "var" / "run" / "cdi"):
         if not cdi_dir.is_dir():
             continue
@@ -265,7 +282,7 @@ def _cdi_spec(probe: Probe) -> bool:
             if not entry.is_file():
                 continue
             try:
-                if "nvidia.com/gpu" in entry.read_text():
+                if marker in entry.read_bytes():
                     return True
             except OSError:
                 continue
@@ -293,10 +310,10 @@ def port_free(port: int, host: str = "127.0.0.1") -> bool:
 def platform_of(facts: HostFacts, engine_kernel: str = "") -> str:
     """The platform the install step runs on, from the facts and the engine
     kernel. WSL is Windows even when the host reports linux: the kernel says
-    `microsoft`. The macos branch comes first because the engine, not the host,
-    is what the image must run on."""
+    `microsoft` (case-insensitive, review round R2, item m6). The macos branch
+    comes first because the engine, not the host, is what the image must run on."""
     if facts.system == "macos":
         return "macos"
-    if facts.system == "windows" or facts.wsl or "microsoft" in engine_kernel:
+    if facts.system == "windows" or facts.wsl or "microsoft" in engine_kernel.lower():
         return "windows"
     return "linux"

@@ -9,16 +9,17 @@ and nothing here reads the GPU TYPE: measured on this machine (2026-10-06, spec
 flag, so free memory is the only signal a choice may use, and the facts stay
 typeless by design (M5).
 
-The GPU tree is shaped like this machine's: two Intel cards, one AMD card, and an
-ASPEED BMC card that must be ignored, plus a connector directory that must not be
-mistaken for a card.
+The GPU list is shaped like this machine's PCI display devices, measured 2026-10-06
+with `cat /sys/bus/pci/devices/*/class /sys/bus/pci/devices/*/vendor`: two Intel (xe),
+one AMD (amdgpu), an ASPEED BMC that must be ignored, and the class-`0x04` audio
+functions that share a GPU's card number, which must not be mistaken for GPUs.
 """
-import shutil
 import socket
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -39,19 +40,18 @@ from stack.runtimes import normalize_arch  # noqa: E402
 from tests.stack_fakes import FakeRunner  # noqa: E402
 
 
-def make_card(root: Path, name: str, vendor: str | None, label: str | None) -> None:
-    """One `cardN` under the fake `/sys/class/drm`, as the machine prints it.
+def make_pci(root: Path, addr: str, vendor: str, cls: str) -> None:
+    """One PCI device under the fake `/sys/bus/pci/devices`, as the machine prints it.
 
-    A `None` vendor or label leaves the file out: the fallbacks `collect` must
-    apply are exactly what a real tree does (the BMC card has a vendor with no
-    label here, and the labels are empty on some systems).
+    `vendor` is the hex id the kernel writes (lowercased here, as the code reads it),
+    and `cls` the class code. A device counts as a GPU when `cls` starts with `0x03`
+    (a display controller) and `vendor` is in `VENDORS`; the `0x04` audio functions
+    that share a GPU's card number are not display controllers and must be ignored.
     """
-    card = root / "sys" / "class" / "drm" / name
-    (card / "device").mkdir(parents=True)
-    if vendor is not None:
-        (card / "device" / "vendor").write_text(f"{vendor}\n")
-    if label is not None:
-        (card / "device" / "label").write_text(f"{label}\n")
+    dev = root / "sys" / "bus" / "pci" / "devices" / addr
+    dev.mkdir(parents=True)
+    (dev / "vendor").write_text(f"{vendor}\n")
+    (dev / "class").write_text(f"{cls}\n")
 
 
 def linux_probe(tmp: Path, **overrides) -> Probe:
@@ -62,35 +62,53 @@ def linux_probe(tmp: Path, **overrides) -> Probe:
 
 class TestGpuDiscovery(unittest.TestCase):
     def test_this_machines_shape_two_intel_one_amd_and_the_bmc_ignored(self):
-        """card0..card3 as on this machine: 0x8086, 0x1002, 0x8086, and the 0x1a03
-        ASPEED BMC, plus a connector dir that is not a card at all."""
+        """The PCI display devices of this machine (measured 2026-10-06 with
+        `cat /sys/bus/pci/devices/*/class /sys/bus/pci/devices/*/vendor`): two Intel
+        (xe), one AMD (amdgpu), and the ASPEED BMC, plus the audio functions that
+        share a GPU's card number, which are class `0x04` and not display
+        controllers, so they are not GPUs."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            make_card(root, "card0", "0x8086", "Intel(R) Graphics (BMG G31)")
-            make_card(root, "card1", "0x1002", "Radeon RX 6900 XT")
-            make_card(root, "card2", "0x8086", "Intel(R) Graphics (BMG G31)")
-            make_card(root, "card3", "0x1a03", None)  # the BMC: a vendor, no label
-            (root / "sys" / "class" / "drm" / "card0-DP-1").mkdir(parents=True)
+            make_pci(root, "0000:03:00.0", "0x8086", "0x030000")  # Intel, xe
+            make_pci(root, "0000:44:00.0", "0x1002", "0x030000")  # AMD, amdgpu
+            make_pci(root, "0000:c8:00.0", "0x8086", "0x030000")  # Intel, xe
+            make_pci(root, "0000:cb:00.0", "0x1a03", "0x030000")  # ASPEED BMC: not in VENDORS
+            make_pci(root, "0000:04:00.0", "0x8086", "0x040300")  # Intel HDMI audio: class 0x04
+            make_pci(root, "0000:44:00.1", "0x1002", "0x040300")  # AMD HDMI audio: class 0x04
 
             facts = collect(linux_probe(root), root / "stack")
 
-        self.assertEqual(len(facts.gpus), 3, f"BMC and connector must be out: {facts.gpus}")
-        self.assertEqual(facts.gpus[0], Gpu(vendor="intel",
-                                            card="Intel(R) Graphics (BMG G31)"))
-        self.assertEqual(facts.gpus[1], Gpu(vendor="amd", card="Radeon RX 6900 XT"))
-        self.assertEqual(facts.gpus[2], Gpu(vendor="intel",
-                                            card="Intel(R) Graphics (BMG G31)"))
+        # the three display GPUs, sorted by PCI address; the BMC and both audio
+        # functions are out
+        self.assertEqual(len(facts.gpus), 3, f"BMC and audio must be out: {facts.gpus}")
+        self.assertEqual(facts.gpus[0], Gpu(vendor="intel", card="0000:03:00.0"))
+        self.assertEqual(facts.gpus[1], Gpu(vendor="amd", card="0000:44:00.0"))
+        self.assertEqual(facts.gpus[2], Gpu(vendor="intel", card="0000:c8:00.0"))
         self.assertNotIn("0x1a03", VENDORS)
 
-    def test_a_card_without_a_label_falls_back_to_its_directory_name(self):
-        """This machine's own cards carry no `device/label`: the fallback must hold."""
+    def test_a_driverless_nvidia_is_on_the_bus_and_visible(self):
+        """The case the spec names: a card with no driver bound. `/sys/class/drm`
+        would not list it at all (a `cardN` appears only once a driver binds), but
+        the PCI bus does, so it is in `gpus` and the availability step can say
+        "install the driver" (review round R2, item I4)."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            make_card(root, "card1", "0x8086", None)
+            make_pci(root, "0000:65:00.0", "0x10de", "0x030000")  # NVIDIA, no driver
 
             facts = collect(linux_probe(root), root / "stack")
 
-        self.assertEqual(facts.gpus, (Gpu(vendor="intel", card="card1"),))
+        self.assertEqual(facts.gpus, (Gpu(vendor="nvidia", card="0000:65:00.0"),))
+
+    def test_a_non_display_function_is_not_a_gpu(self):
+        """A device with a GPU vendor but a non-display class (the AMD HDMI audio
+        function, class `0x040300`) is not a GPU, even though the vendor is known."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            make_pci(root, "0000:44:00.1", "0x1002", "0x040300")
+
+            facts = collect(linux_probe(root), root / "stack")
+
+        self.assertEqual(facts.gpus, ())
 
     def test_render_nodes_are_listed(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -144,42 +162,69 @@ class TestTheOsFacts(unittest.TestCase):
 
         self.assertEqual(facts.ram_bytes, 1000 * 1024)
 
-    def test_ram_on_macos_comes_from_sysctl(self):
+    def test_ram_on_macos_is_not_the_host_figure(self):
+        """On macOS the host's `hw.memsize` is NOT what the containers get: they run
+        in the machine VM (2048 MiB by default), so `collect` does not read `sysctl`
+        and returns None (review round R2, item I6). The figure the install step
+        checks is the engine's own, `EngineInfo.memory_bytes`."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            probe = Probe(root=root, system=lambda: "Darwin", machine=lambda: "arm64",
-                          runner=FakeRunner({
-                              ("sysctl", "hw.memsize"):
-                                  runtimes.Completed(0, "hw.memsize: 17179869184\n")}))
+            probe = Probe(root=root, system=lambda: "Darwin", machine=lambda: "arm64")
 
             facts = collect(probe, root / "stack")
 
         self.assertEqual(facts.system, "macos")
         self.assertEqual(facts.arch, "arm64")
-        self.assertEqual(facts.ram_bytes, 16 * 1024**3)
+        self.assertIsNone(facts.ram_bytes)
 
     def test_disk_is_measured_at_the_nearest_existing_ancestor(self):
-        """`stack_dir` does not exist yet: the free space is read at the ancestor that does."""
+        """`stack_dir` does not exist yet: the free space is read at the ancestor
+        that does. The measurement goes through the injected `disk_usage`, so this
+        test never reads a real filesystem (review round R2, item m8)."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             stack_dir = root / "a" / "b" / "stack"  # a and b do not exist
-            facts = collect(linux_probe(root), stack_dir)
-            # the nearest existing ancestor is `root` itself: capture its free space
-            # while the tree still exists so the numbers below must agree
-            expected = shutil.disk_usage(root).free
 
-        self.assertIsNotNone(facts.disk_free_bytes)
-        self.assertGreater(facts.disk_free_bytes, 0)
-        self.assertEqual(facts.disk_free_bytes, expected)
+            def fake_disk_usage(path):
+                return SimpleNamespace(free=424242)  # a figure, not a real read
 
-    def test_disk_falls_back_to_the_filesystem_root(self):
-        """Nothing on the way up exists but `/`: the root's free space is still the
-        answer, not `None`."""
-        missing = Path("/nonexistent-qctx-stack-review")
-        facts = collect(linux_probe(missing), missing / "a" / "stack")
+            facts = collect(linux_probe(root, disk_usage=fake_disk_usage), stack_dir)
 
-        self.assertIsNotNone(facts.disk_free_bytes)
-        self.assertGreater(facts.disk_free_bytes, 0)
+        self.assertEqual(facts.disk_free_bytes, 424242)
+
+    def test_disk_walks_up_until_an_existing_path(self):
+        """The walk records every candidate it tries: it walks up from the missing
+        `stack` directory until one is measured, and only the first that answers is
+        used (review round R2, item m8)."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            stack_dir = root / "a" / "b" / "stack"
+            asked: list = []
+
+            def fake_disk_usage(path):
+                asked.append(Path(path))
+                if Path(path) == stack_dir or Path(path) == stack_dir.parent:
+                    raise OSError("no such file")  # the not-yet-created levels
+                return SimpleNamespace(free=1234)
+
+            facts = collect(linux_probe(root, disk_usage=fake_disk_usage), stack_dir)
+
+        self.assertEqual(facts.disk_free_bytes, 1234)
+        # the walk tried the missing levels first, then the first existing one
+        # (`root/a`), which answered, and stopped there
+        self.assertEqual(asked, [stack_dir, stack_dir.parent, stack_dir.parent.parent])
+        self.assertEqual(asked[-1], root / "a")
+
+    def test_disk_returns_none_when_nothing_answers(self):
+        """Even the root that the walk ends on raises: the answer is None, not a
+        crash (review round R2, item m8)."""
+        def refusing(path):
+            raise OSError("no filesystem")
+
+        facts = collect(linux_probe(Path(tempfile.mkdtemp()),
+                                    disk_usage=refusing),
+                        Path("/nonexistent/a/stack"))
+        self.assertIsNone(facts.disk_free_bytes)
 
     def test_selinux_enforcing_is_read(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -204,20 +249,26 @@ class TestTheOsFacts(unittest.TestCase):
 
 
 class TestNvidiaReadiness(unittest.TestCase):
-    def test_nvidia_readiness_has_its_three_parts(self):
+    def test_nvidia_readiness_has_its_parts(self):
         """A nvidia card in the tree: every readiness part is read, nothing is skipped."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            make_card(root, "card0", "0x10de", "NVIDIA GeForce RTX 4090")
+            make_pci(root, "0000:65:00.0", "0x10de", "0x030000")  # NVIDIA
             (root / "usr" / "share" / "vulkan" / "icd.d").mkdir(parents=True)
             (root / "usr" / "share" / "vulkan" / "icd.d" / "nvidia_icd.json").write_text(
                 '{"file_format_version": "1.0.0"}\n')
             (root / "etc" / "cdi").mkdir(parents=True)
             (root / "etc" / "cdi" / "gpu.nvidia.yaml").write_text(
-                "kind: RuntimeClass\nspec:\n  containers:\n    - name: nvidia.com/gpu\n")
+                # the device class an nvidia CDI spec is generated with; the code
+                # looks for the `nvidia.com/gpu` marker in it (m7: `kind: RuntimeClass`
+                # was an invention, this is the real nvidia-ctk output)
+                "kind: nvidia.com/gpu\n"
+                "metadata:\n  name: gpu0\n"
+                "containers:\n  - type: cdiv1\n")
 
             def fake_which(name):
-                if name in ("nvidia-container-runtime-hook", "nvidia-cdi-hook"):
+                if name in ("nvidia-container-runtime-hook", "nvidia-cdi-hook",
+                            "nvidia-ctk"):
                     return f"/usr/bin/{name}"
                 return None
 
@@ -235,7 +286,9 @@ class TestNvidiaReadiness(unittest.TestCase):
         self.assertEqual(facts.nvidia.gpus,
                          ("NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 4090"))
         self.assertTrue(facts.nvidia.icd)
-        self.assertTrue(facts.nvidia.docker_hook)
+        self.assertTrue(facts.nvidia.docker_hook)  # nvidia-container-runtime-hook
+        self.assertTrue(facts.nvidia.cdi_hook)     # nvidia-cdi-hook
+        self.assertTrue(facts.nvidia.ctk)          # nvidia-ctk
         self.assertTrue(facts.nvidia.cdi_spec)
 
     def test_the_secondary_icd_and_cdi_paths_count_too(self):
@@ -244,7 +297,7 @@ class TestNvidiaReadiness(unittest.TestCase):
         With only the secondary paths present, both readiness parts still hold."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            make_card(root, "card0", "0x10de", "NVIDIA GeForce RTX 4090")
+            make_pci(root, "0000:65:00.0", "0x10de", "0x030000")  # NVIDIA
             (root / "etc" / "vulkan" / "icd.d").mkdir(parents=True)
             (root / "etc" / "vulkan" / "icd.d" / "nvidia_icd.json").write_text(
                 '{"file_format_version": "1.0.0"}\n')
@@ -259,12 +312,16 @@ class TestNvidiaReadiness(unittest.TestCase):
 
         self.assertTrue(facts.nvidia.icd)
         self.assertTrue(facts.nvidia.cdi_spec)
+        # the hooks and ctk are absent on this tree: only the file facts are set
+        self.assertFalse(facts.nvidia.docker_hook)
+        self.assertFalse(facts.nvidia.cdi_hook)
+        self.assertFalse(facts.nvidia.ctk)
 
     def test_without_a_nvidia_card_the_facts_stay_the_empty_default(self):
         """No nvidia in the tree: no nvidia-smi call, no file reads, the default stands."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            make_card(root, "card0", "0x8086", "Intel(R) Graphics")
+            make_pci(root, "0000:03:00.0", "0x8086", "0x030000")  # Intel
             runner = FakeRunner({("nvidia-smi", "-L"):  # must never be consulted
                                  runtimes.Completed(0, "GPU 0: never\n")})
 
@@ -295,11 +352,15 @@ class TestNormalizeAndPlatformOf(unittest.TestCase):
             platform_of(HostFacts(**base), engine_kernel="5.10.16.3-microsoft-standard-WSL2"),
             "windows")
 
-    def test_the_default_probe_points_at_the_real_root(self):
+    def test_the_default_probe_points_at_the_real_root_and_runner(self):
+        # R2 item I5: a production `Probe()` must run `nvidia-smi`, so `runner`
+        # defaults to a real `SubprocessRunner`, not `None` (tests inject a fake).
         self.assertEqual(Probe().root, Path("/"))
         self.assertEqual(Probe().system(), "Linux")
         self.assertIsNotNone(Probe().which("sh"))
-        self.assertIsNone(Probe().runner)
+        self.assertIsInstance(Probe().runner, runtimes.SubprocessRunner)
+        # R2 item m8: the disk measurement is injected, defaulting to `shutil.disk_usage`.
+        self.assertIsNotNone(Probe().disk_usage)
 
 
 class TestPortFree(unittest.TestCase):

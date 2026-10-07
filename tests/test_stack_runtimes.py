@@ -8,9 +8,11 @@ still passes, and the M3 lie (`remoteSocket.exists: true` while the socket file 
 pinned by `socket_alive`, which is the only verdict the code trusts.
 """
 import json
+import os
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -39,7 +41,7 @@ PODMAN_INFO = {
     "host": {
         "os": "linux",
         "arch": "amd64",
-        "kernel": "6.14.0-37-generic",
+        "kernel": "7.0.0-34-generic",
         "security": {"rootless": True},
         "remoteSocket": {
             "path": "/run/user/1000/podman/podman.sock",
@@ -177,7 +179,7 @@ class TestTheEngine(unittest.TestCase):
         self.assertEqual(engine.os, "linux")
         self.assertEqual(engine.arch, "amd64")
         self.assertTrue(engine.rootless)
-        self.assertEqual(engine.kernel, "6.14.0-37-generic")
+        self.assertEqual(engine.kernel, "7.0.0-34-generic")
         self.assertEqual(engine.socket, "/run/user/1000/podman/podman.sock")
         self.assertIsNone(engine.vm)
 
@@ -453,6 +455,30 @@ class TestTheSubprocessRunner(unittest.TestCase):
         self.assertTrue(completed.ok)
         self.assertEqual(completed.stdout.strip(), "hi")
 
+    def test_a_timeout_kills_the_whole_process_group(self):
+        # R2 item m2: a compose provider runs its backend as a CHILD of the
+        # command. A plain timeout kills only the direct child and leaves the
+        # backend alive. `start_new_session` makes the command a session leader
+        # and the kill goes to the whole group, so the grandchild dies too.
+        pid_file = Path(tempfile.gettempdir()) / "qctx-r2-grandchild"
+        # the direct child is the shell; it spawns `sleep 30` (the grandchild)
+        # and records its pid, then waits. The command hangs on the `wait`.
+        script = f"sleep 30 & echo $! > {pid_file}; wait"
+        with self.assertRaises(StackError):
+            SubprocessRunner().run(["sh", "-c", script], timeout=1.0)
+        if not pid_file.exists():
+            self.fail("the command was killed before it recorded the grandchild pid")
+        grandchild = int(pid_file.read_text().strip())
+        pid_file.unlink()
+        # poll: the grandchild must be reaped by the group kill, not linger
+        for _ in range(20):
+            try:
+                os.kill(grandchild, 0)  # signal 0: does the process exist?
+            except OSError:
+                return  # gone: the group kill reached it
+            time.sleep(0.1)
+        self.fail(f"grandchild {grandchild} survived the timeout kill")
+
 
 class TestDiscover(unittest.TestCase):
     def test_discover_skips_a_runtime_whose_engine_does_not_answer(self):
@@ -529,6 +555,202 @@ class TestTheFakes(unittest.TestCase):
             FakeRuntime("podman", engine=None, provider_info=None, list_devices={}).compose(
                 runtimes.Provider(("podman", "compose"), "w", "1"), "p", PROBE_FILE,
                 "up", "-d", timeout=600.0), Completed(0))
+
+
+# -- measured for review round R2, 2026-10-06 ---------------------------------
+# The fields of `docker info --format '{{json .}}'` when the Docker CLI is present
+# but the DAEMON does not answer. Measured 2026-10-06 with the real Docker CLI
+# 27.5.1 (downloaded to the scratch dir) run against a missing socket:
+#   DOCKER_HOST=unix:///nonexistent.sock docker info --format '{{json .}}'; echo rc=$?
+# The CLI EXITS 0 and prints the client part with zero-valued server fields and
+# "SecurityOptions": null (R2 items C1 and I3): iterating SecurityOptions then
+# raises TypeError, and discover crashes although Podman works. The guard is
+# therefore the JSON (a non-empty ServerVersion and no ServerErrors), not the
+# exit code. Trimmed here to the keys `engine()` reads, with ServerErrors.
+DOCKER_INFO_DEAD_DAEMON = {
+    "ServerVersion": "",
+    "OSType": "",
+    "Architecture": "",
+    "KernelVersion": "",
+    "SecurityOptions": None,
+    "ServerErrors": ["Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+                     "Is the docker daemon running?"],
+    "MemTotal": 0,
+}
+#: A `docker` that is the podman-docker shim (`docker` = a script doing
+#: `exec podman "$@"`, podman v5.7.0 docker/docker.in): `docker info` prints
+#: PODMAN's info, which has no ServerVersion, so the engine() guard must reject
+#: it and let Podman be discovered on its own (R2 item I3).
+DOCKER_SHIM_TO_PODMAN = json.dumps(PODMAN_INFO)
+
+
+class TestReviewRoundR2(unittest.TestCase):
+    # ---- C1 / I3: the engine is answered by the JSON, not the exit code ----
+    def test_a_dead_daemon_that_exits_zero_is_not_an_engine(self):
+        # Docker CLI 23.0 to 28.0 exits 0 with zero-valued fields on a dead daemon.
+        # The old code iterated SecurityOptions (None) and raised TypeError.
+        docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
+                                    Completed(0, json.dumps(DOCKER_INFO_DEAD_DAEMON))}),
+                        which={"docker": "/usr/bin/docker"})
+        self.assertIsNone(docker.engine())
+
+    def test_docker_info_with_server_errors_is_not_an_engine(self):
+        # a non-empty ServerErrors means the daemon did not fully answer
+        info = {**DOCKER_INFO, "ServerErrors": ["some daemon error"]}
+        docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
+                                    Completed(0, json.dumps(info))}),
+                        which={"docker": "/usr/bin/docker"})
+        self.assertIsNone(docker.engine())
+
+    def test_a_docker_that_is_a_podman_shim_is_not_a_docker_engine(self):
+        # the shim prints podman's info: no ServerVersion, so it is rejected.
+        docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
+                                    Completed(0, DOCKER_SHIM_TO_PODMAN)}),
+                        which={"docker": "/usr/bin/docker"})
+        self.assertIsNone(docker.engine())
+
+    def test_discover_skips_docker_with_a_dead_daemon_and_keeps_podman(self):
+        # the C1 regression end to end: a dead-daemon Docker (exit 0) must not
+        # crash discover and must not shadow the working Podman.
+        responses = {
+            ("docker", "info", "--format", DOCKER_JSON):
+                Completed(0, json.dumps(DOCKER_INFO_DEAD_DAEMON)),
+            ("podman", "info", "--format", "json"): Completed(0, json.dumps(_info(True))),
+        }
+        found = discover(FakeRunner(responses),
+                         which={"docker": "/usr/bin/docker",
+                                "podman": "/usr/bin/podman"})
+        self.assertEqual([r.name for r in found], ["podman"])
+
+    def test_discover_skips_an_engine_whose_info_times_out(self):
+        # R2 item m1: a HUNG `docker info` (the runner raises StackError on
+        # timeout) must not stop Podman from being tried.
+        class HangingRunner:
+            def run(self, argv, *, timeout, stream=False):
+                if argv[:2] == ["docker", "info"]:
+                    raise StackError("timed out after 30.0s: docker info", step="runtime")
+                if argv[:2] == ["podman", "info"]:
+                    return Completed(0, json.dumps(_info(True)))
+                raise KeyError(argv)
+
+        found = discover(HangingRunner(),
+                         which={"docker": "/usr/bin/docker",
+                                "podman": "/usr/bin/podman"})
+        self.assertEqual([r.name for r in found], ["podman"])
+
+    def test_the_engine_carries_the_memory_the_containers_get(self):
+        # R2 item I6: the engine's MemTotal (docker) / host.memTotal (podman) is
+        # what the containers get, not the Mac's hw.memsize.
+        docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
+                                    Completed(0, json.dumps(DOCKER_INFO))}),
+                        which={"docker": "/usr/bin/docker"})
+        self.assertIsNone(docker.engine().memory_bytes)  # DOCKER_INFO has no MemTotal
+
+        podman = _podman_provider(_info(True), which={"podman": "/usr/bin/podman"},
+                                  alive=lambda path: True,
+                                  compose_version=PODMAN_COMPOSE_VERSION)
+        # PODMAN_INFO has no memTotal: the field is None, not a guess
+        self.assertIsNone(podman.engine().memory_bytes)
+        with_mem = json.loads(json.dumps(PODMAN_INFO))
+        with_mem["host"]["memTotal"] = 2147483648
+        podman2 = _podman_provider(with_mem, which={"podman": "/usr/bin/podman"},
+                                   alive=lambda path: True,
+                                   compose_version=PODMAN_COMPOSE_VERSION)
+        self.assertEqual(podman2.engine().memory_bytes, 2147483648)
+
+    # ---- I1: docker-compose is recognised by the banner OR the stdout ----
+    def test_banner_off_still_detects_docker_compose_and_needs_the_socket(self):
+        # the banner can be switched off (PODMAN_COMPOSE_WARNING_LOGS=false);
+        # stdout still says `Docker Compose version`. Measured 2026-10-06.
+        runtime = _podman_provider(
+            _info(False),
+            which={"podman": "/usr/bin/podman"},  # no podman-compose on PATH
+            alive=lambda path: False,
+            compose_version=Completed(0, "Docker Compose version v5.2.0", ""))
+        info = runtime.compose_provider()
+        self.assertIsNone(info.provider)
+        self.assertEqual(info.fix, "systemctl --user enable --now podman.socket")
+
+    def test_banner_off_with_a_live_socket_keeps_the_wrapper(self):
+        runtime = _podman_provider(
+            _info(True),
+            which={"podman": "/usr/bin/podman"},
+            alive=lambda path: True,
+            compose_version=Completed(0, "Docker Compose version v5.2.0", ""))
+        info = runtime.compose_provider()
+        self.assertEqual(info.provider.argv, ("podman", "compose"))
+        self.assertEqual(info.provider.version, "v5.2.0")
+
+    # ---- I2: a failing `podman compose version` means no provider ----
+    def test_a_failed_version_is_a_missing_provider_not_the_socket(self):
+        # the real stderr, measured 2026-10-06 with both providers hidden on
+        # PATH (env PATH=/usr/bin:/bin podman compose version; rc=125). The
+        # socket is NOT the cause: `version` never touches it.
+        real_stderr = ("Error: looking up compose provider failed\n"
+                       "7 errors occurred:\n"
+                       "\t* exec: \"/home/me/.docker/cli-plugins/docker-compose\": "
+                       "stat /home/me/.docker/cli-plugins/docker-compose: no such file "
+                       "or directory\n"
+                       "\t* exec: \"docker-compose\": executable file not found in $PATH\n"
+                       "\t* exec: \"podman-compose\": executable file not found in $PATH")
+        runtime = _podman_provider(
+            _info(True),  # a LIVE socket: the old code blamed the socket anyway
+            which={"podman": "/usr/bin/podman"},  # no podman-compose on PATH
+            alive=lambda path: True,
+            compose_version=Completed(125, "", real_stderr))
+        info = runtime.compose_provider()
+        self.assertIsNone(info.provider)
+        self.assertIn("looking up compose provider failed", info.problem)
+        self.assertEqual(info.fix, "install podman-compose (or docker-compose)")
+
+    def test_a_failed_version_falls_back_to_podman_compose(self):
+        runtime = _podman_provider(
+            _info(True),
+            which={"podman": "/usr/bin/podman",
+                   "podman-compose": "/usr/bin/podman-compose"},
+            alive=lambda path: True,
+            compose_version=Completed(125, "", "Error: looking up compose provider failed"),
+            standalone=PODMAN_COMPOSE_VERSION_STANDALONE)
+        info = runtime.compose_provider()
+        self.assertEqual(info.provider.argv, ("podman-compose",))
+        self.assertEqual(info.provider.version, "1.6.0")
+
+    # ---- m5: a failed stats carries the tool's own first stderr line ----
+    def test_a_failed_stats_carries_the_tools_first_stderr_line(self):
+        # measured: podman stats on a missing container exits 125 and names it
+        podman = Podman(FakeRunner({("podman", "stats", "--no-stream", "--format", "json"):
+                                    Completed(125, "", "time=\"now\" level=warning msg=\"no "
+                                                       "such container\"\nError: no such "
+                                                       "container: gone")}),
+                        which={"podman": "/usr/bin/podman"})
+        with self.assertRaises(StackError) as ctx:
+            podman.stats(["gone"])
+        self.assertEqual(ctx.exception.step, "runtime")
+        self.assertIn("podman stats failed", str(ctx.exception))
+        self.assertIn("no such container", str(ctx.exception))
+
+    def test_a_failed_docker_stats_is_a_stack_error_not_a_traceback(self):
+        docker = Docker(FakeRunner({("docker", "stats", "--no-stream", "--format",
+                                     DOCKER_JSON): Completed(1, "", "Cannot connect to "
+                                                                    "the Docker daemon")}),
+                        which={"docker": "/usr/bin/docker"})
+        with self.assertRaises(StackError) as ctx:
+            docker.stats(["gone"])
+        self.assertEqual(ctx.exception.step, "runtime")
+        self.assertIn("docker stats failed", str(ctx.exception))
+
+    # ---- m7: the compose version token strips a trailing comma ----
+    def test_the_compose_version_strips_a_trailing_comma(self):
+        # v1 docker-compose prints `docker-compose version 1.29.2, build 5becea4c`:
+        # the token after `version` must drop the comma.
+        self.assertEqual(_compose_version("docker-compose version 1.29.2, build 5becea4c"),
+                         "1.29.2")
+        self.assertEqual(_compose_version("Docker Compose version v5.2.0"), "v5.2.0")
+        self.assertEqual(_compose_version("podman-compose version 1.6.0"), "1.6.0")
+
+
+# keep the name importable for the class above
+from stack.runtimes import _compose_version  # noqa: E402
 
 
 if __name__ == "__main__":

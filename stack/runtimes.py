@@ -5,26 +5,33 @@ This module is where the stack meets a container engine. Everything else in `sta
 picks the compose front-end that will actually work, `compose()` runs one compose command, and
 `stats()` reads a container's memory. A new engine is one class, not a branch.
 
-The one decision that shapes the whole module is the compose provider. Measured on this machine
-(2026-10-06, spec "Detecção"): `podman compose` here is a thin wrapper that shells out to an
-external docker-compose, and that wrapper needs the Podman API socket to be live. But `podman
-info` reports `remoteSocket.exists: true` even when the socket file is not there (the lie logged
-as M3), so `exists` is never read. The only verdict trusted is `socket_alive`, which connects to
-the path with a short timeout. When the socket is dead and the wrapper would fail, `podman-compose`
-(standalone, needs no socket) is the fallback; when it is not installed, the problem names the
-socket and the fix starts it.
+The command runner (`Completed`, `Runner`, `SubprocessRunner`) lives in `stack.process`; it is
+re-exported here so the earlier tasks and the tests keep importing it from `stack.runtimes`
+(review round R2, item m10).
+
+The compose provider has two DISTINCT failure modes (review round R2):
+  * `podman compose version` FAILS: podman looked for a compose provider, found none, and never
+    touched the API socket. The cause is the missing provider; the fix is to install one.
+  * `podman compose version` SUCCEEDS but runs an EXTERNAL docker-compose: that wrapper needs the
+    live API socket. `podman info` reports `remoteSocket.exists: true` even when the socket file
+    is not there (the lie logged as M3), so `exists` is never read; the only verdict trusted is
+    `socket_alive`, which connects to the path with a short timeout. When the socket is dead and
+    the wrapper would fail, `podman-compose` (standalone, needs no socket) is the fallback; when
+    it is not installed, the fix starts the socket.
 """
 import json
 import os
 import re
 import shutil
 import socket
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from . import StackError
+# Re-exported so `from stack.runtimes import Completed, Runner, SubprocessRunner` keeps working
+# (R2 item m10): the runner itself lives in `stack.process`.
+from .process import Completed, Runner, SubprocessRunner  # noqa: F401
 
 #: `podman info` and the version commands are cheap; the bounds come from the plan's Global
 #: Constraints (30 s for info/version).
@@ -40,44 +47,6 @@ def _as_which(which: Callable | Mapping[str, str]):
     if callable(which):
         return which
     return which.get
-
-
-@dataclass(frozen=True)
-class Completed:
-    """The result of one command: a return code and, when captured, the streams."""
-    returncode: int
-    stdout: str = ""
-    stderr: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return self.returncode == 0
-
-
-class Runner(Protocol):
-    def run(self, argv: list[str], *, timeout: float, stream: bool = False) -> Completed: ...
-
-
-class SubprocessRunner:
-    """`Runner` that shells out. A missing binary is a 127, not an exception: the caller decides
-    whether an absent engine is an error (it usually is `None` from `engine()`), and a timeout is a
-    `StackError`, because a hung command is never a normal answer."""
-
-    def __init__(self, which=shutil.which):
-        self.which = which
-
-    def run(self, argv: list[str], *, timeout: float, stream: bool = False) -> Completed:
-        if self.which(argv[0]) is None:
-            return Completed(127, "", f"{argv[0]}: not found")
-        try:
-            if stream:
-                # inherit the terminal's stdout/stderr; the progress bar is the provider's
-                return Completed(subprocess.run(argv, timeout=timeout).returncode)
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise StackError(
-                f"timed out after {timeout}s: {' '.join(argv)}", step="runtime") from None
-        return Completed(proc.returncode, proc.stdout, proc.stderr)
 
 
 def normalize_arch(machine: str) -> str:
@@ -100,6 +69,10 @@ class EngineInfo:
     kernel: str = ""
     vm: str | None = None
     socket: str | None = None
+    #: The memory the CONTAINERS actually get, in bytes. On macOS that is the machine VM's
+    #: (2048 MiB by default), not the Mac's, so the engine reports it, not `hw.memsize`
+    #: (R2 item I6). None when the engine does not publish a figure.
+    memory_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +141,29 @@ def parse_size(text: str) -> int | None:
 _BANNER = re.compile(r'Executing external compose provider "([^"]+)"')
 
 
+def _docker_compose_via(stdout: str, stderr: str) -> bool:
+    """Whether `podman compose` runs an EXTERNAL docker-compose (R2 item I1).
+
+    Either signal suffices: the stderr banner names a `docker-compose` binary, or stdout starts
+    with `Docker Compose version`. The banner can be switched off (`compose_warning_logs = false`
+    in containers.conf, or `PODMAN_COMPOSE_WARNING_LOGS=false`), but the stdout line stays
+    (measured 2026-10-06 with `PODMAN_COMPOSE_WARNING_LOGS=false podman compose version`).
+    """
+    banner = _BANNER.search(stderr)
+    if banner is not None and os.path.basename(banner.group(1)).startswith("docker-compose"):
+        return True
+    return stdout.lstrip().startswith("Docker Compose version")
+
+
+def _tool_failed(tool: str, out: Completed) -> StackError:
+    """A failed `stats`: the tool's own first stderr line is the message (R2 item m5)."""
+    first = next((line.strip() for line in out.stderr.splitlines() if line.strip()), "")
+    message = f"{tool} stats failed"
+    if first:
+        message += f": {first}"
+    return StackError(message, step="runtime")
+
+
 class Docker:
     name = "docker"
 
@@ -186,13 +182,25 @@ class Docker:
             info = json.loads(out.stdout)
         except json.JSONDecodeError:
             return None  # an engine whose info is not JSON does not answer
-        # rootless is a security option here, not a dedicated field
-        rootless = any("rootless" in opt for opt in info.get("SecurityOptions", []))
+        if not isinstance(info, dict):
+            return None
+        # R2 items C1 and I3: Docker CLI 23.0 to 28.0 exits 0 when the daemon does not answer,
+        # printing zero-valued fields and "SecurityOptions": null; and a `docker` that is a
+        # podman-docker shim prints podman's info, which has no ServerVersion. Neither is a
+        # Docker engine answering, so the guard is the JSON, not the exit code: the engine
+        # counts only when ServerVersion is non-empty and ServerErrors is empty.
+        if not str(info.get("ServerVersion") or "").strip():
+            return None
+        if info.get("ServerErrors"):
+            return None
+        rootless = any("rootless" in opt for opt in (info.get("SecurityOptions") or []))
         # `OSType` is the engine's OS (`OperatingSystem` is a label such as "Docker
-        # Desktop"); the kernel is what tells WSL apart (`platform_of`)
+        # Desktop"); the kernel is what tells WSL apart (`platform_of`). `MemTotal` is what
+        # the containers get (R2 item I6).
         return EngineInfo("docker", info.get("ServerVersion", ""), info.get("OSType", ""),
                           normalize_arch(info.get("Architecture", "")), rootless,
-                          kernel=info.get("KernelVersion", ""))
+                          kernel=info.get("KernelVersion", ""),
+                          memory_bytes=info.get("MemTotal"))
 
     def compose_provider(self) -> ProviderInfo:
         out = self.runner.run(["docker", "compose", "version"], timeout=_INFO_TIMEOUT)
@@ -204,8 +212,11 @@ class Docker:
             if binary.ok:
                 return ProviderInfo(Provider(("docker-compose",), "docker-compose",
                                              _compose_version(binary.stdout)))
-        return ProviderInfo(None, problem="no docker compose provider answers "
-                          "(`docker compose version` failed and there is no `docker-compose` binary)")
+        return ProviderInfo(None,
+                            problem="no docker compose provider answers "
+                                    "(`docker compose version` failed and there is no "
+                                    "`docker-compose` binary)",
+                            fix="install the Docker Compose plugin (docker-compose-plugin)")
 
     def compose(self, provider: Provider, project: str, file: Path, *args: str,
                 timeout: float, stream: bool = False) -> Completed:
@@ -218,6 +229,8 @@ class Docker:
         out = self.runner.run(["docker", "stats", "--no-stream", "--format", _DOCKER_JSON,
                                *names],
                               timeout=_INFO_TIMEOUT)
+        if not out.ok:
+            raise _tool_failed("docker", out)
         # one JSON object per line
         result: dict[str, int] = {}
         try:
@@ -260,7 +273,8 @@ class Podman:
         return EngineInfo("podman", info.get("version", {}).get("Version", ""),
                           host.get("os", ""), normalize_arch(host.get("arch", "")),
                           host.get("security", {}).get("rootless", False),
-                          kernel=host.get("kernel", ""), vm=vm, socket=socket_path)
+                          kernel=host.get("kernel", ""), vm=vm, socket=socket_path,
+                          memory_bytes=host.get("memTotal"))
 
     def _machine(self) -> tuple[str | None, str | None]:
         """The VM type and the host side API socket of the machine in use (macOS).
@@ -297,23 +311,15 @@ class Podman:
     def compose_provider(self) -> ProviderInfo:
         out = self.runner.run(["podman", "compose", "version"], timeout=_INFO_TIMEOUT)
         if not out.ok:
-            # the wrapper itself failed: whether the fix is the socket or a missing
-            # provider is decided by the socket, so do not blame it when it is alive
-            socket_path = self._socket_path()
-            return self._standalone_or_problem(
-                cause="socket" if not self.socket_alive(socket_path) else "wrapper",
-                socket=socket_path)
-        banner = _BANNER.search(out.stderr)
-        if banner:
-            binary = os.path.basename(banner.group(1))
+            # R2 item I2: a failing `version` means podman found no compose provider at all.
+            # podman looks the provider up before `version` runs, and `version` never touches
+            # the API socket, so the socket is not the cause here.
+            return self._no_provider_or_standalone(out.stderr)
+        if _docker_compose_via(out.stdout, out.stderr):
             # the docker-compose wrapper needs the live API socket; a native provider does not
-            if binary.startswith("docker-compose"):
-                socket_path = self._socket_path()
-                if not self.socket_alive(socket_path):
-                    return self._standalone_or_problem(
-                        note="podman compose runs docker-compose, which needs the API socket; "
-                             "falling back to the standalone podman-compose",
-                        socket=socket_path)
+            socket_path = self._socket_path()
+            if not self.socket_alive(socket_path):
+                return self._socket_problem(socket_path)
         return ProviderInfo(Provider(("podman", "compose"), "podman compose",
                                      _compose_version(out.stdout)))
 
@@ -321,29 +327,37 @@ class Podman:
         engine = self.engine()
         return engine.socket if engine else None
 
-    def _standalone_or_problem(self, note: str | None = None,
-                               cause: str = "socket",
-                               socket: str | None = None) -> ProviderInfo:
-        if socket is None:
-            socket = self._socket_path()
+    def _no_provider_or_standalone(self, stderr: str) -> ProviderInfo:
+        """`podman compose version` failed: no compose provider. Try the standalone
+        `podman-compose`; when that is absent too, the fix is to install one (R2 item I2)."""
         if self.which("podman-compose") is not None:
             out = self.runner.run(["podman-compose", "version"], timeout=_INFO_TIMEOUT)
             if out.ok:
                 return ProviderInfo(Provider(("podman-compose",), "podman-compose",
-                                             _compose_version(out.stdout)), note=note)
-        if cause == "wrapper":
-            # a live socket cannot be the fault: the wrapper is missing or broken
-            problem = ("no compose provider: `podman compose` failed"
-                       f" (the API socket at {socket} answers)" if socket
-                       else "no compose provider: `podman compose` failed")
-            fix = "check the docker-compose binary `podman compose` delegates to"
-        else:
-            problem = ("no compose provider: `podman compose` needs the API socket at "
-                       f"{socket}" if socket
-                       else "no compose provider: `podman compose` failed")
-            fix = ("systemctl --user enable --now podman.socket" if self.host_system == "linux"
-                   else "podman machine start")
-        return ProviderInfo(None, problem=problem, fix=fix, note=note)
+                                             _compose_version(out.stdout)))
+        first = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        problem = "podman compose found no compose provider"
+        if first:
+            problem += f": {first}"
+        return ProviderInfo(None, problem=problem,
+                            fix="install podman-compose (or docker-compose)")
+
+    def _socket_problem(self, socket_path: str | None) -> ProviderInfo:
+        """The wrapper is docker-compose and the API socket is dead: try the standalone
+        `podman-compose`; when it is absent too, the fix starts the socket (M3)."""
+        if self.which("podman-compose") is not None:
+            out = self.runner.run(["podman-compose", "version"], timeout=_INFO_TIMEOUT)
+            if out.ok:
+                return ProviderInfo(Provider(("podman-compose",), "podman-compose",
+                                             _compose_version(out.stdout)),
+                                    note="podman compose runs docker-compose, which needs the "
+                                         "API socket; falling back to the standalone "
+                                         "podman-compose")
+        problem = ("podman compose needs the API socket at " + str(socket_path)) \
+            if socket_path else "podman compose needs the API socket"
+        fix = ("systemctl --user enable --now podman.socket" if self.host_system == "linux"
+               else "podman machine start")
+        return ProviderInfo(None, problem=problem, fix=fix)
 
     def compose(self, provider: Provider, project: str, file: Path, *args: str,
                 timeout: float, stream: bool = False) -> Completed:
@@ -355,6 +369,8 @@ class Podman:
             return {}
         out = self.runner.run(["podman", "stats", "--no-stream", "--format", "json", *names],
                               timeout=_INFO_TIMEOUT)
+        if not out.ok:
+            raise _tool_failed("podman", out)
         # a JSON list of objects (lowercase keys), unlike docker's one-object-per-line
         try:
             rows = json.loads(out.stdout)
@@ -376,14 +392,14 @@ def _compose_argv(provider: Provider, project: str, file: Path, args: tuple[str,
 
 def _compose_version(stdout: str) -> str:
     """The token after `version` on the line that names compose: "Docker Compose version
-    v5.2.0", or the second line of podman-compose's "podman version 5.7.0\npodman-compose
+    v5.2.0", or the second line of podman-compose's "podman version 5.7.0\\npodman-compose
     version 1.6.0" (measured here: the podman line comes first)."""
     for line in stdout.splitlines():
         parts = line.split()
         if "compose" in line.lower() and "version" in parts:
             index = parts.index("version")
             if index + 1 < len(parts):
-                return parts[index + 1]
+                return parts[index + 1].rstrip(",")
     return ""
 
 
@@ -395,13 +411,17 @@ def _before_slash(text: str) -> str:
 def discover(runner: Runner, which=shutil.which,
              host_system: str = "linux") -> list["ContainerRuntime"]:
     """Docker before Podman, only the engines whose binary exists and answers `info`. A binary
-    present but whose `info` does not answer is skipped, not an error: the other engine may work."""
+    present but whose `info` does not answer, or hangs, is skipped, not an error: the other
+    engine may work (R2 item m1)."""
     which = _as_which(which)
-    found = []
-    docker = Docker(runner, which=which)
-    if docker.engine() is not None:
-        found.append(docker)
-    podman = Podman(runner, which=which, host_system=host_system)
-    if podman.engine() is not None:
-        found.append(podman)
+    found: list[ContainerRuntime] = []
+    for factory in (lambda: Docker(runner, which=which),
+                    lambda: Podman(runner, which=which, host_system=host_system)):
+        runtime = factory()
+        try:
+            engine = runtime.engine()
+        except StackError:
+            engine = None  # a hung `info` (timeout) is not an answering engine
+        if engine is not None:
+            found.append(runtime)
     return found
