@@ -31,7 +31,7 @@ def make_state(**changes) -> state.StackState:
     """A full `StackState`, the way the installer would build one after the
     probe: `cpu` on Docker, the catalogue's ports and images, phase `running`.
     `changes` overrides a field."""
-    fields = dict(role="local", listen="127.0.0.1:6333", platform="linux",
+    fields = dict(role="local", listen="127.0.0.1", platform="linux",
                   runtime="docker", provider=["docker-compose"], profile="cpu",
                   device=None, gpu_index=None, ports=dict(catalog.PORTS),
                   images=dict(catalog.IMAGES),

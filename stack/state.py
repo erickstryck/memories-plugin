@@ -33,7 +33,7 @@ renders it.
 """
 import json
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -73,8 +73,10 @@ class StackState:
     """What `qctx stack up` repeats when it runs without `--upgrade`: the exact install
     that was verified, stored so a re-run rebuilds the same endpoints.
 
-    `role` is `local` in phase 1 (`server` arrives in phase 2); `listen` is the address the
-    endpoints are published on. `profile` is the backend chosen at the menu; `device` the
+    `role` is `local` in phase 1 (`server` arrives in phase 2); `listen` is the host the
+    endpoints are published on (the bare address, not a `host:port`: the ports already live
+    in `ports`, one per service, and the phase-2 exposure classifier reads hosts). `profile`
+    is the backend chosen at the menu; `device` the
     `-dev` value (None on cpu, which always pins `-dev none`); `gpu_index` the nvidia-smi
     index the nvidia profile needs. `provider` is the list of compose providers the runtime
     answered with, in the order the lifecycle uses them. `images` and `models` are what was
