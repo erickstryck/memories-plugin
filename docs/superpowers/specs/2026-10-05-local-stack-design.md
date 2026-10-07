@@ -103,7 +103,7 @@ oficial de pacotes do Ubuntu e issues dos projetos. Nada foi executado em contai
 | o plugin instala como hoje | sim | nenhuma etapa existente muda de comportamento |
 | o `qctx` instala as dependências | sim | etapa nova no `qctx install` e grupo `qctx stack` |
 | "só precisa de Docker ou Podman" | sim para CPU; com ressalvas | precisa de um provider de compose: o Docker traz o seu; o Podman precisa de docker-compose ou podman-compose, e o docker-compose fala com o socket da API do Podman, que tem de estar ativo. GPU NVIDIA exige, no host, o driver com o componente Vulkan e o NVIDIA Container Toolkit (CDI no Podman). Apple GPU exige Podman com provider libkrun. O `qctx` detecta e explica cada um; não instala nenhum |
-| identificar SO e hardware | sim, com stdlib | `platform`, `/sys/class/drm/*/device/vendor` (0x1002 AMD, 0x8086 Intel, 0x10de NVIDIA), `nvidia-smi`, `podman machine info` e `podman machine inspect`. A detecção é só pista: a prova é o próprio container listar a GPU |
+| identificar SO e hardware | sim, com stdlib | `platform`, o barramento PCI `/sys/bus/pci/devices/*` (classe `0x03` e vendor 0x1002 AMD, 0x8086 Intel, 0x10de NVIDIA), `/dev/dri` (os nós de render), `nvidia-smi`, `podman machine info` e `podman machine inspect`. Lê o PCI, não o `/sys/class/drm`, porque um `cardN` só aparece lá quando um driver já está anexado, e uma placa sem driver (o caso do NVIDIA sem driver) ficaria invisível. A detecção é só pista: a prova é o próprio container listar a GPU |
 | o usuário escolhe onde rodar | sim | menu com o estado de cada opção e onde ela funciona: Docker, Podman ou os dois (ver "Compatibilidade", em "Perfis de backend") |
 | compose específico por SO e hardware | sim, e necessário | NVIDIA: o Docker usa `deploy.resources.reservations.devices`, e o `podman compose` ignora esse bloco e exige CDI (podman #28309, #28436). AMD e Intel precisam de `/dev/dri`. Apple, via krunkit. No macOS com Docker Desktop, nenhuma GPU chega ao container; a GPU Apple exige o Podman. No Windows, o Vulkan da imagem oficial não chega à GPU, e por isso o Windows usa a imagem própria (fase 3) |
 | Qdrant sempre em CPU | sim | imagem multi-arch (amd64, arm64), 71 MiB |
@@ -179,8 +179,9 @@ dependências apontam num sentido só: `cli -> stack -> core`.
 | módulo | responsabilidade única |
 |---|---|
 | `stack/catalog.py` | só dados: imagens (tag + digest do índice), GGUFs (repo, revisão, arquivo, bytes, sha256), flags por papel, portas e nomes padrão. O procedimento de bump vive aqui |
-| `stack/facts.py` | `HostFacts`: SO, arch, WSL, RAM, disco, GPUs por vendor, `/dev/dri`, SELinux, portas ocupadas. Coletado por primitivas injetadas |
-| `stack/runtimes.py` | `Docker` e `Podman` atrás do mesmo Protocol: engine, provider de compose, compose, stats; descoberta do que responde |
+| `stack/process.py` | `Completed`, `Runner` e `SubprocessRunner`: o runner que shella, com timeout que mata o grupo de processos inteiro |
+| `stack/facts.py` | `HostFacts`: SO, arch, WSL, RAM (no Linux; `None` no macOS, que lê o número do engine), disco, GPUs pelo barramento PCI, `/dev/dri`, SELinux, portas ocupadas. Coletado por primitivas injetadas |
+| `stack/runtimes.py` | `Docker` e `Podman` atrás do mesmo Protocol: engine (com a memória que os containers usam), provider de compose, compose, stats; descoberta do que responde. Reexporta o runner do `stack/process.py` |
 | `stack/backends.py` | perfis `Cpu`, `DriGpu` (AMD e Intel), `NvidiaGpu` e `AppleGpu` atrás do Protocol `Backend`; registro `BACKENDS`; a compatibilidade de cada perfil com Docker e Podman, por plataforma |
 | `stack/compose.py` | `render(plan) -> dict`, puro, e o emissor YAML |
 | `stack/fetch.py` | download com retomada e sha256, com transporte HTTP injetado; a barra de progresso (decisão 16) é dele: porcentagem, MiB baixado/total, velocidade e ETA, com reescrita da linha em TTY e uma linha por fatia fora dele |
@@ -207,7 +208,7 @@ class Transport(Protocol):       # HTTP GET em pedaços, a partir de um byte
 
 class ContainerRuntime(Protocol):
     name: str                                   # "docker" | "podman"
-    def engine(self) -> EngineInfo: ...         # versão, os/arch do engine, rootless, VM (libkrun, wsl...)
+    def engine(self) -> EngineInfo: ...         # versão, os/arch do engine, rootless, VM (libkrun, wsl...), a memória que os containers usam (memTotal/MemTotal)
     def compose_provider(self) -> ProviderInfo: ...
     def compose(self, project: str, file: Path, *args: str, stream: bool = False) -> Completed: ...
     def stats(self, project: str) -> dict[str, int]: ...   # bytes de memória por serviço
@@ -320,7 +321,11 @@ exposição é a publicação só em `127.0.0.1`.
   escolha antes de seguir.
 - Diretório: `$QCTX_STACK_DIR`, ou `${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`, com
   `models/`, `compose.yaml` e `stack.json`. Fica sob `$HOME`, que o Docker Desktop e a VM do
-  Podman compartilham por padrão.
+  Podman compartilham por padrão. O caminho não pode levar `:` (quebra a sintaxe curta de volume
+  nos dois providers) nem caractere fora do Plano Multilíngue Básico (um emoji, que o
+  podman-compose corrompe e o docker-compose rejeita); a etapa recusa com um `StackError` que
+  aponta para `QCTX_STACK_DIR`, em vez de mudar para a sintaxe longa. Aceento dentro do BMP
+  funciona nos dois e é aceito (medido 2026-10-06 nos dois providers com arquivos descartáveis).
 - Projeto compose `memories-plugin`, serviços `qdrant`, `embed` e `rerank`, volume nomeado
   `memories-plugin-qdrant`. Os dois providers prefixam o volume com o projeto, então o nome real
   no engine é `memories-plugin_memories-plugin-qdrant` (medido no docker-compose e no
@@ -355,9 +360,9 @@ container.
 | perfil | o serviço recebe | oferecido quando | prova |
 |---|---|---|---|
 | `cpu` | nenhum device | sempre | `/health` 200 |
-| `amd`, `intel` | `devices: /dev/dri`; no Podman rootless, também a anotação `run.oci.keep_original_groups: "1"` | Linux nativo com GPU do vendor em `/sys/class/drm` e `/dev/dri/renderD*` | `--list-devices` lista um `Vulkan<n>` do vendor |
-| `nvidia` | Docker: `deploy.resources.reservations.devices` com driver `nvidia`, `device_ids` e `capabilities: [gpu, compute, utility, graphics]`; Podman: `devices: nvidia.com/gpu=<i>` (CDI) | Linux nativo com NVIDIA visível (`nvidia-smi`), o ICD Vulkan da NVIDIA no host (`nvidia_icd.json` em `/usr/share/vulkan/icd.d` ou `/etc/vulkan/icd.d`) e o toolkit pronto (Docker: `nvidia-container-runtime-hook` ou `nvidia-cdi-hook` no PATH; Podman: spec CDI em `/etc/cdi` ou `/var/run/cdi`) | `--list-devices` lista um `Vulkan<n>` NVIDIA |
-| `apple` (experimental) | `devices: /dev/dri` dentro da VM | macOS arm64 com `podman machine` em VMType libkrun | `--list-devices` lista o Venus |
+| `amd`, `intel` | `devices: /dev/dri`; no Podman, também a anotação `run.oci.keep_original_groups: "1"` (exigida rootless, inócua rootful, por isso sem ramo) | Linux nativo com GPU do vendor no barramento PCI (classe `0x03`, vendor conhecido) e `/dev/dri/renderD*` | `--list-devices` lista um `Vulkan<n>` do vendor |
+| `nvidia` | Docker: `deploy.resources.reservations.devices` com driver `nvidia`, `device_ids` e `capabilities: [gpu, compute, utility, graphics]`; Podman: `devices: nvidia.com/gpu=<i>` (CDI) | Linux nativo com NVIDIA visível (`nvidia-smi`), o ICD Vulkan da NVIDIA no host (`nvidia_icd.json` em `/usr/share/vulkan/icd.d` ou `/etc/vulkan/icd.d`) e o toolkit pronto (Docker: `nvidia-container-runtime-hook` no PATH, ou `nvidia-cdi-hook` a partir do Docker 29.2; Podman: spec CDI em `/etc/cdi` ou `/var/run/cdi`, gerado por `nvidia-ctk`) | `--list-devices` lista um `Vulkan<n>` NVIDIA |
+| `apple` (experimental) | `devices: /dev/dri` dentro da VM; no Podman, também a anotação `run.oci.keep_original_groups: "1"` | macOS arm64 com `podman machine` em VMType libkrun | `--list-devices` lista o Venus |
 | `amd`, `intel`, `nvidia` no Windows (fase 3) | imagem `llama-dzn`; `devices: /dev/dxg`; `/usr/lib/wsl:/usr/lib/wsl:ro`; `LD_LIBRARY_PATH=/usr/lib/wsl/lib` | engine no WSL2 (Docker Desktop ou `podman machine` com WSL) e GPU do vendor no host | `--list-devices` lista um `Vulkan<n>` `Microsoft Direct3D12 (<GPU do vendor>)`, e a verificação numérica passa |
 
 **Compatibilidade: Docker, Podman ou os dois.** Toda opção diz onde funciona (decisão 15). A fonte
@@ -375,17 +380,29 @@ fixtures e a tabela do `docs/install.md`, e um teste as mantém de acordo.
 | Windows (fase 3) | CPU, como reserva | sim | sim | Docker e Podman | nada |
 
 Só o `apple` é de um runtime só. No Podman 6 (2026-06-24) em diante, libkrun é o provider padrão
-no macOS, e `podman machine init --provider libkrun` cria uma máquina com ele. No Podman 5, o
-padrão é applehv, e a troca é `CONTAINERS_MACHINE_PROVIDER=libkrun podman machine init`. Isso foi
-lido em `pkg/machine/provider/platform_darwin.go` nas tags `v5.7.0` e `v6.0.0` do Podman. O
+no macOS, e no Podman 5 o padrão é applehv. A troca de provider precisa FICAR GRAVADA na
+configuração, não ser um comando de uma vez só: o `podman machine info` (o `Host.VMType`) e o
+`podman machine start` leem o provider CONFIGURADO (a tabela `[machine]` de
+`~/.config/containers/containers.conf` ou a variável `CONTAINERS_MACHINE_PROVIDER` do ambiente de
+cada comando). Um `CONTAINERS_MACHINE_PROVIDER=libkrun podman machine init` deixa o próximo
+`machine info` dizendo applehv de novo, e o `machine start` nem acha a máquina nova; e no Podman 6
+o applehv só aparece quando a config ou o ambiente o fixam, o que a flag `--provider libkrun` no
+`init` não muda. A correção durável, igual para os dois, é: gravar `provider = "libkrun"` na
+tabela `[machine]` (e tirar um `CONTAINERS_MACHINE_PROVIDER` exportado) e depois
+`podman machine init --now`. Isso foi lido no fonte do Podman nas tags `v5.7.0` e `v6.0.0`
+(`pkg/machine/provider/platform_darwin.go`, `cmd/podman/machine/info.go` e `start.go`). O
 instalador oficial (`.pkg`) traz o krunkit: a `v6.1.3` empacota a 1.3.2
 (`contrib/pkginstaller/Makefile`).
 
 **NVIDIA no Docker.** O daemon só aceita pedido de GPU NVIDIA se achar um dos dois hooks do
 toolkit no PATH, e tenta o CDI antes do modo legado (`daemon/devices_nvidia_linux.go` do moby).
-No modo legado, as capacidades do pedido além de `gpu` viram o `NVIDIA_DRIVER_CAPABILITIES`, e o
-daemon só define essa variável quando o pedido lista alguma. Por isso o `graphics` vai explícito:
-sem ele, o ICD não entra. No CDI, vale o que o spec gerado contém.
+O hook legado (`nvidia-container-runtime-hook`) vale em qualquer versão do Docker; o hook de CDI
+(`nvidia-cdi-hook`) o daemon reconhece só a partir da 29.2 (lido no fonte do moby nas tags
+`v28.3.2`, `v28.5.2`, `docker-v29.1.0` e `docker-v29.2.0`), e uma versão que não dá para ler não
+conta o hook de CDI. No modo legado, as capacidades do pedido além de `gpu` viram o
+`NVIDIA_DRIVER_CAPABILITIES`, e o daemon só define essa variável quando o pedido lista alguma.
+Por isso o `graphics` vai explícito: sem ele, o ICD não entra. No CDI, vale o que o spec
+gerado contém.
 
 **GPU no Windows (fase 3).** O `/dev/dxg` é o device genérico do GPU-PV, o mesmo para os três
 vendors, e o dzn chega à GPU pelas bibliotecas D3D12 do Windows, montadas de `/usr/lib/wsl`. A
@@ -472,7 +489,7 @@ services:
   rerank:
     # igual ao embed, com --reranking, o outro GGUF e 127.0.0.1:8004:8080
 volumes:
-  memories-plugin-qdrant: {}
+  "memories-plugin-qdrant": {}
 ```
 
 Fixtures golden, uma por renderização distinta. Na fase 1, nove: `linux-docker-{cpu,dri,nvidia}`,
@@ -513,7 +530,10 @@ de fato enxergou. O consentimento para baixar vem da pergunta de entrada, ou do 
    docker-compose, confere também o socket da API.
 2. Detecta o hardware e calcula, pelo lado do host, a disponibilidade de cada perfil em cada
    runtime: pronto para provar, falta X (com a correção), não atendido por este runtime (com o
-   runtime que ele exige) ou não suportado aqui (com o motivo). Confere portas, disco e RAM. Se
+   runtime que ele exige) ou não suportado aqui (com o motivo). Confere portas e disco; a RAM
+   confere pelo número do engine (o `memTotal` do Podman, o `MemTotal` do Docker), porque é ele
+   que os containers usam: no macOS o host tem mais memória, mas os containers rodam na VM da
+   máquina do Podman, que por padrão tem 2 GiB. Se
    os dois runtimes respondem, pergunta qual usar, e cada linha diz o que ele atende nesta
    máquina. Não pergunta com `--runtime`, nem quando o `--stack` pedido só é atendido por um
    runtime (o `apple`, só pelo Podman). Com `--yes`, e como padrão da pergunta, fica o Docker
@@ -613,12 +633,17 @@ usuário, como o wizard já faz com o PATH.
   isso numa linha. Sem nenhum dos dois, a correção no Linux é habilitar o `podman.socket` do
   usuário. O provider usado fica gravado no `stack.json`, e o ciclo de vida usa sempre o
   gravado: os dois providers rotulam os containers de forma diferente.
-- **Hardware, no Linux nativo**: o vendor de `/sys/class/drm/card*/device` (o ASPEED de BMC é
-  ignorado), `/dev/dri/renderD*` e `nvidia-smi -L`. A prontidão da NVIDIA tem duas partes, cada
+- **Hardware, no Linux nativo**: o barramento PCI `/sys/bus/pci/devices/*` (classe `0x03`, os
+  vendors 0x1002 AMD, 0x8086 Intel e 0x10de NVIDIA; o ASPEED de BMC, 0x1a03, e as funções de
+  áudio, classe `0x04`, são ignorados), `/dev/dri/renderD*` e `nvidia-smi -L`. Lê o PCI, não o
+  `/sys/class/drm`, porque um `cardN` só aparece lá com um driver anexado, e a placa sem driver
+  (o caso do NVIDIA sem driver) ficaria invisível. A prontidão da NVIDIA tem duas partes, cada
   uma com a correção nomeada quando falta:
-  - o toolkit: no Docker, um dos hooks no PATH; no Podman, o spec CDI, gerado por
+  - o toolkit: no Docker, o `nvidia-container-runtime-hook` no PATH (qualquer versão) ou o
+    `nvidia-cdi-hook` a partir do Docker 29.2; no Podman, o spec CDI, gerado por
     `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`, como root (sem `--output`, o
-    comando só imprime o spec e não grava nada);
+    comando só imprime o spec e não grava nada); quando o toolkit não está instalado, a
+    correção diz primeiro para instalá-lo;
   - o ICD Vulkan da NVIDIA no host. Sem ele, a correção é instalar o componente GL/Vulkan do
     driver (no Ubuntu, `libnvidia-gl-<versão>`) e, no Podman, regenerar o spec CDI.
 
@@ -642,7 +667,8 @@ usuário, como o wizard já faz com o PATH.
   dentro da VM. No Docker Desktop, ou com máquina applehv, ele aparece no menu
   como "só Podman", indisponível, com a correção da versão instalada (ver "Compatibilidade"). Em
   Mac com Intel não há caminho de GPU para container: o menu mostra a CPU e diz por quê.
-- **Outros**: RAM e disco livre antes de baixar; portas por `bind` em `127.0.0.1`; SELinux por
+- **Outros**: disco livre antes de baixar; a RAM é o número do engine (o que os containers
+  usam, não o do host, que no macOS é maior); portas por `bind` em `127.0.0.1`; SELinux por
   `/sys/fs/selinux/enforce`.
 
 ## Download dos modelos **[a validar]**

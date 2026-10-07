@@ -278,21 +278,27 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 
 **Files:**
 - Create: `stack/runtimes.py`
+- Create: `stack/process.py` (`Completed`, `Runner`, `SubprocessRunner`; o `runtimes` os
+  reexporta)
 - Create: `tests/stack_fakes.py` (`FakeRunner`, `FakeRuntime`)
 - Test: `tests/test_stack_runtimes.py`
 
 **Interfaces:**
-- Produces:
+- Produces (em `stack/process.py`, reexportados pelo `stack/runtimes.py`):
   - `@dataclass(frozen=True) class Completed: returncode: int; stdout: str = ""; stderr: str = ""`,
     com `ok` (`returncode == 0`);
   - `class Runner(Protocol): def run(self, argv: list[str], *, timeout: float, stream: bool =
     False) -> Completed`; `class SubprocessRunner` (binário ausente vira `Completed(127, "",
     "<argv0>: not found")`; `TimeoutExpired` vira `StackError(step="runtime")` com o comando e o
-    tempo; `stream=True` herda stdout e stderr do terminal);
+    tempo, e mata o grupo de processos inteiro (`start_new_session` + `os.killpg`), para o
+    backend que o provider de compose sobe como filho também morrer; `stream=True` herda stdout e
+    stderr do terminal; um `OSError` no `exec` vira `StackError(step="runtime")`);
   - `normalize_arch(machine: str) -> str` (`x86_64`/`amd64` -> `"amd64"`, `aarch64`/`arm64` ->
     `"arm64"`, o resto em minúsculas);
   - `@dataclass(frozen=True) class EngineInfo: name: str; version: str; os: str; arch: str;
-    rootless: bool; kernel: str = ""; vm: str | None = None; socket: str | None = None`;
+    rootless: bool; kernel: str = ""; vm: str | None = None; socket: str | None = None;
+    memory_bytes: int | None = None` (a `memory_bytes` é o que os containers usam: no Docker o
+    `MemTotal`, no Podman o `host.memTotal`; é a que a checagem de RAM lê no macOS);
   - `@dataclass(frozen=True) class Provider: argv: tuple[str, ...]; name: str; version: str`;
   - `@dataclass(frozen=True) class ProviderInfo: provider: Provider | None; problem: str | None =
     None; fix: str | None = None; note: str | None = None`;
@@ -348,7 +354,12 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   `remoteSocket` do `podman info` é o caminho dentro da VM, e o `machine inspect` não tem VMType
   (lido no código do Podman v5.7.0 e v6.0.0). No Docker, `docker info --format '{{json .}}'`
   (o atalho `json` não existe nos CLIs antigos), `OSType` em `engine().os` e `KernelVersion` em
-  `engine().kernel`. A versão do provider é a da linha que nomeia o compose: o
+  `engine().kernel`. O engine responde só pelo JSON, não pelo exit code: o CLI do Docker 23.0 a
+  28.0 sai 0 com os campos zerados e `"SecurityOptions": null` quando o daemon não responde, e um
+  atalho `docker` que é o shim do Podman imprime o info do Podman (sem `ServerVersion`); então
+  `engine()` exige `ServerVersion` não vazio e `ServerErrors` vazio, e lê `SecurityOptions` com
+  `or []` (senão dá `TypeError` e o `discover` cai, mesmo com o Podman funcionando). A versão do
+  provider é a da linha que nomeia o compose: o
   `podman-compose version` daqui imprime `podman version 5.7.0` ANTES de
   `podman-compose version 1.6.0`.
 - [ ] **Step 4:** testes passam.
@@ -361,39 +372,51 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 - Test: `tests/test_stack_facts.py`
 
 **Interfaces:**
-- Consumes: `Runner`, `Completed`, `normalize_arch` (Task 3).
+- Consumes: `Runner`, `Completed`, `SubprocessRunner`, `normalize_arch` (Task 3).
 - Produces:
-  - `@dataclass(frozen=True) class Gpu: vendor: str; card: str`;
+  - `@dataclass(frozen=True) class Gpu: vendor: str; card: str` (o `card` é o endereço PCI);
   - `@dataclass(frozen=True) class NvidiaFacts: gpus: tuple[str, ...] = (); icd: bool = False;
-    docker_hook: bool = False; cdi_spec: bool = False`;
+    docker_hook: bool = False; cdi_hook: bool = False; cdi_spec: bool = False; ctk: bool = False`;
   - `@dataclass(frozen=True) class HostFacts: system: str; arch: str; wsl: bool;
     ram_bytes: int | None; disk_free_bytes: int | None; gpus: tuple[Gpu, ...];
     render_nodes: tuple[str, ...]; selinux: bool; nvidia: NvidiaFacts = NvidiaFacts()`;
   - `VENDORS = {"0x1002": "amd", "0x8086": "intel", "0x10de": "nvidia"}`;
   - `@dataclass class Probe: root: Path = Path("/"); system: Callable[[], str] =
     platform.system; machine: Callable[[], str] = platform.machine; which = shutil.which;
-    runner: Runner | None = None`;
+    runner: Runner = field(default_factory=SubprocessRunner);
+    disk_usage: Callable[[Path], Any] = shutil.disk_usage` (o `runner` com um
+    `SubprocessRunner` de verdade faz o `collect` de produção rodar o `nvidia-smi`; um teste
+    injeta um falso; o `disk_usage` injetado mantém o teste do disco sem tocar no disco real);
   - `normalize_system(name: str) -> str` (`Linux` -> `"linux"`, `Darwin` -> `"macos"`,
     `Windows` -> `"windows"`);
   - `collect(probe: Probe, stack_dir: Path) -> HostFacts`;
   - `port_free(port: int, host: str = "127.0.0.1") -> bool`;
   - `platform_of(facts: HostFacts, engine_kernel: str = "") -> str` (`"macos"`; `"windows"`
-    quando o sistema é Windows, ou WSL, ou o kernel do engine contém `microsoft`; senão `"linux"`).
+    quando o sistema é Windows, ou WSL, ou o kernel do engine contém `microsoft` (em
+    minúsculas); senão `"linux"`).
 
 - [ ] **Step 1: testes que falham**, com árvores `/sys` e `/proc` falsas sob um tmp passado como
   `Probe.root`:
-  - `test_this_machines_shape_two_intel_one_amd_and_the_bmc_ignored` (`card0..card3` com vendors
-    `0x8086`, `0x1002`, `0x8086`, `0x1a03`; `card0-DP-1` ignorado; três `Gpu`);
+  - `test_this_machines_shape_two_intel_one_amd_and_the_bmc_ignored` (os devices de vídeo do
+    barramento PCI desta máquina, lidos de `/sys/bus/pci/devices/*`: dois `0x8086`, um `0x1002`,
+    um `0x1a03` (BMC, ignorado) e as funções de áudio, classe `0x04`, também ignoradas; três
+    `Gpu`, com o `card` sendo o endereço PCI);
+  - `test_a_driverless_nvidia_is_on_the_bus_and_visible` (uma placa NVIDIA sem driver, que o
+    `/sys/class/drm` não listaria, aparece no PCI) e `test_a_non_display_function_is_not_a_gpu`;
   - `test_render_nodes_are_listed`;
   - `test_wsl_is_read_from_the_kernel_release` (`/proc/sys/kernel/osrelease` com `microsoft`;
     o `/etc/os-release` é o da distro e não nomeia o WSL);
   - `test_ram_is_mem_available_on_linux` (`MemAvailable: 1000 kB` -> 1024000) e
-    `test_ram_on_macos_comes_from_sysctl`;
-  - `test_disk_is_measured_at_the_nearest_existing_ancestor`;
+    `test_ram_on_macos_is_not_the_host_figure` (no macOS o `ram_bytes` é `None`: o que os
+    containers usam é o número do engine, não o `hw.memsize` do host);
+  - `test_disk_is_measured_at_the_nearest_existing_ancestor` e os dois do walk, com
+    `Probe.disk_usage` injetado (nenhum lê o disco de verdade);
   - `test_selinux_enforcing_is_read`;
-  - `test_nvidia_readiness_has_its_three_parts` (nvidia-smi `-L` pelo `FakeRunner`; ICD em
-    `usr/share/vulkan/icd.d/nvidia_icd.json`; hook pelo `which`; spec CDI em `etc/cdi/` contendo
-    `nvidia.com/gpu`);
+  - `test_nvidia_readiness_has_its_parts` (nvidia-smi `-L` pelo `FakeRunner`; ICD em
+    `usr/share/vulkan/icd.d/nvidia_icd.json`; `docker_hook`, `cdi_hook` e `ctk` pelo `which`;
+    spec CDI em `etc/cdi/` contendo `nvidia.com/gpu`);
+  - `test_the_default_probe_points_at_the_real_root_and_runner` (o `Probe()` padrão tem um
+    `SubprocessRunner` de verdade, não `None`);
   - `test_normalize_and_platform_of`;
   - `test_port_free_says_no_for_a_bound_port`.
 - [ ] **Step 2:** rodar; esperado `No module named 'stack.facts'`.
@@ -446,22 +469,28 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   - `test_availability_table` (subTests: Dri sem GPU do vendor -> UNSUPPORTED; sem `renderD` ->
     MISSING com fix; Linux pronto -> READY; NVIDIA sem placa NVIDIA no host -> UNSUPPORTED;
     placa que o `nvidia-smi` não lista -> MISSING com o driver; NVIDIA sem ICD -> MISSING com
-    `install libnvidia-gl-<version>` (no Podman, seguido do `CDI_GENERATE`); Docker sem hook ->
-    MISSING; Podman sem CDI -> MISSING com
-    `CDI_GENERATE = "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (as root)"`; a
+    `install the driver's GL/Vulkan package (libnvidia-gl-<version> on Ubuntu)` (no Podman,
+    seguido do `CDI_GENERATE`); Docker sem hook -> MISSING (o hook de CDI só conta a partir do
+    Docker 29.2); Podman sem CDI -> MISSING com
+    `CDI_GENERATE = "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (as root)"`, ou com
+    `install nvidia-container-toolkit, then CDI_GENERATE` quando o `nvidia-ctk` não está no
+    PATH; a
     palavra do comando de root fica fora do código, porque o scanner do hermes a marca como
     high num módulo;
     Apple no Docker -> RUNTIME com `needs == "podman"`; Apple com VM
-    `applehv` no Podman 5 -> MISSING com `CONTAINERS_MACHINE_PROVIDER=libkrun podman machine
-    init`, no Podman 6 -> `podman machine init --provider libkrun`; Mac Intel -> UNSUPPORTED;
+    `applehv`, no Podman 5 ou 6, -> MISSING com UMA fix única: gravar
+    `provider = "libkrun"` na tabela `[machine]` de
+    `~/.config/containers/containers.conf` (e tirar o `CONTAINERS_MACHINE_PROVIDER` exportado) e
+    depois `podman machine init --now`; Mac Intel -> UNSUPPORTED;
     libkrun em arm64 -> READY, também com o Python sob Rosetta, porque vale o arch do
     engine; CPU fora de Linux e macOS -> UNSUPPORTED);
   - `test_service_patches` (Dri no Podman: `/dev/dri:/dev/dri`, a forma do exemplo da spec e
     das fixtures validadas nos providers, mais a anotação
     `run.oci.keep_original_groups: "1"`; no Docker, só o device; NVIDIA no Docker: o bloco
     `deploy` com `device_ids ["1"]` e `capabilities [gpu, compute, utility, graphics]`; no Podman:
-    `devices ["nvidia.com/gpu=1"]`; NVIDIA sem índice -> `StackError`; Apple: `/dev/dri:/dev/dri`;
-    Cpu: `{}`);
+    `devices ["nvidia.com/gpu=1"]`; NVIDIA sem índice -> `StackError`; Apple no Podman:
+    `/dev/dri:/dev/dri` mais a mesma anotação (a máquina roda rootless por padrão); no Docker,
+    só o device; Cpu: `{}`);
   - `test_devices_seen_filters_by_vendor`;
   - `test_default_is_the_most_free_memory_and_never_experimental` (M5: entre Intel 29268 e 29289
     e AMD 4018, `Vulkan2`; uma Apple READY nunca é o padrão; sem GPU, `cpu`);
@@ -485,7 +514,10 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   - `@dataclass(frozen=True) class Plan: platform: str; runtime: str; backend: str;
     device: str | None; gpu_index: int | None; ports: dict[str, int]; stack_dir: Path;
     images: dict[str, str]; selinux: bool = False; project: str = PROJECT`;
-  - `render(plan: Plan) -> dict` (puro); `emit(doc: dict) -> str`; `dump(plan: Plan) -> str`;
+  - `render(plan: Plan) -> dict` (puro; recusa um `stack_dir` com `:` ou com caractere fora do
+    Plano Multilíngue Básico, `StackError(step="compose")`, porque a sintaxe curta de volume
+    `<host>:/models:ro` quebra nos dois providers); `emit(doc: dict) -> str`; `dump(plan: Plan)
+    -> str`;
   - `container_name(project: str, service: str) -> str` (`f"{project}-{service}"`);
   - `volume_name(project: str) -> str` (`f"{project}_{VOLUME}"`, o nome real nos dois providers).
 
@@ -517,6 +549,10 @@ no Linux e `/Users/me/.local/share/memories-plugin/stack` no macOS; sem SELinux.
     `devices`);
   - `test_ports_bind_loopback_only`; `test_selinux_adds_the_z_label`;
   - `test_container_and_volume_names_carry_the_project` (M6).
+  - `test_a_stack_dir_with_a_colon_is_refused` e `test_a_stack_dir_with_a_non_bmp_character_is
+    refused` (R2-9: `render` levanta `StackError(step="compose")` com a fix apontando para
+    `QCTX_STACK_DIR`), e `test_an_accented_stack_dir_is_accepted` (acento dentro do BMP não
+    recusa).
   Regeneração: `python3 tests/test_stack_compose.py --regen` reescreve as 9.
 - [ ] **Step 2:** rodar; esperado `No module named 'stack.compose'`.
 - [ ] **Step 3:** implementar e gerar as fixtures com `--regen`; ler as 9 uma vez, à mão, contra o
@@ -706,7 +742,9 @@ Etapas, uma função privada cada, na ordem da spec ("O que ela faz, em ordem"):
    `MISSING` nele). A `note` do provider vai para o `reporter.info`.
 2. plataforma (Windows recusado com o caminho do README), disponibilidade de cada backend,
    portas (`choose_ports`, cada porta movida relatada), disco (bloqueia abaixo de
-   `MODELS_BYTES + 400 MiB` menos o que já está baixado), RAM (aviso abaixo de 6 GiB).
+   `MODELS_BYTES + 400 MiB` menos o que já está baixado), RAM (aviso abaixo de 6 GiB; o número
+   vem do engine, `EngineInfo.memory_bytes`: é ele que os containers usam, e no macOS o host tem
+   mais memória do que a VM da máquina do Podman).
 3. `<stack>/models` criado; compose de cada perfil `READY` em `<stack>/probe/`; `compose config`
    em cada um.
 4. `compose pull` com `stream=True` e 1800 s.
