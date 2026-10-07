@@ -15,13 +15,15 @@ line is `loginctl show-user <user> --property=Linger`, which prints `Linger=yes`
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from stack import StackError, catalog, compose, lifecycle, state, verify  # noqa: E402
+from stack import StackError, catalog, compose, health, lifecycle, state, verify  # noqa: E402
 from stack.engine import EngineInfo, Provider, ProviderInfo  # noqa: E402
 from stack.runtimes import Completed  # noqa: E402
 from tests.stack_fakes import (FakeConfigSink, FakeRunner, FakeRuntime,  # noqa: E402
@@ -127,7 +129,13 @@ class TestStatus(_LifecycleCase):
 
     def test_status_healthy_exits_0(self):
         st = make_state()
-        deps = make_deps(self.stack, state_obj=st, status_fn=lambda url: 200)
+        # A probe that answers like the real services do: 200 on the readiness
+        # endpoints, 404 on the config URLs (b11382 has no GET route for /v1 or
+        # /v1/rerank - server.cpp at the tag). The blanket lambda url: 200 would
+        # pass either way and could not see the probe target.
+        endpoints = health.endpoints(st.ports)
+        status_fn = lambda url: 200 if url in endpoints.values() else 404
+        deps = make_deps(self.stack, state_obj=st, status_fn=status_fn)
         result, code = lifecycle.status(deps)
         self.assertEqual(code, 0)
         self.assertTrue(result["managed"])
@@ -142,11 +150,57 @@ class TestStatus(_LifecycleCase):
         self.assertFalse(result["outdated_pins"])
         self.assertIn("boot", result)
 
+    def test_status_probes_the_health_endpoints_not_the_config_urls(self):
+        # R6: the real health.http_status probes loopback stubs that mirror the
+        # pinned b11382 route table (tools/server/server.cpp at the tag): GET
+        # /health answers, there is NO GET /v1, and /v1/rerank is POST-only, so a
+        # GET at the config URL is a 404; Qdrant exposes /readyz. A stack that
+        # just passed `up`'s readiness must report healthy and exit 0 - probing
+        # the config URLs would report it unhealthy forever (measured 2026-10-07).
+        requested = []
+
+        def make_stub(ok_path):
+            class Stub(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    requested.append(self.path)
+                    self.send_response(200 if self.path == ok_path else 404)
+                    self.end_headers()
+
+                def log_message(self, format, *args):
+                    pass
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+            self.addCleanup(server.shutdown)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            return server
+
+        servers = (make_stub("/readyz"), make_stub("/health"), make_stub("/health"))
+        ports = {name: s.server_address[1]
+                 for name, s in zip(("qdrant", "embed", "rerank"), servers)}
+        st = make_state(ports=ports)
+        deps = make_deps(self.stack, state_obj=st, status_fn=health.http_status)
+        result, code = lifecycle.status(deps)
+        self.assertEqual(code, 0)
+        self.assertTrue(result["healthy"])
+        for service in catalog.SERVICES:
+            self.assertEqual(result["services"][service]["status"], 200)
+        # the live probe went to the readiness endpoints, the config URL stayed
+        # the informational field
+        self.assertIn("/readyz", requested)
+        self.assertIn("/health", requested)
+        self.assertNotIn("/v1", requested)
+        self.assertNotIn("/v1/rerank", requested)
+        urls = verify.stack_urls(ports)
+        self.assertEqual(result["services"]["embed"]["url"], urls["api_base_url"])
+        self.assertEqual(result["services"]["rerank"]["url"], urls["rerank_url"])
+
     def test_one_endpoint_down_exits_1(self):
         st = make_state()
-        down_url = verify.stack_urls(st.ports)["api_base_url"]
-        deps = make_deps(self.stack, state_obj=st,
-                         status_fn=lambda url: None if url == down_url else 200)
+        endpoints = health.endpoints(st.ports)
+        down_url = endpoints["embed"]  # the readiness endpoint, not the config URL
+        status_fn = (lambda url: None if url == down_url
+                     else (200 if url in endpoints.values() else 404))
+        deps = make_deps(self.stack, state_obj=st, status_fn=status_fn)
         result, code = lifecycle.status(deps)
         self.assertEqual(code, 1)
         self.assertFalse(result["healthy"])

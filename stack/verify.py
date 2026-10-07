@@ -86,6 +86,19 @@ def stack_urls(ports: Mapping[str, int]) -> dict[str, str]:
     }
 
 
+def config_url_pairs(eff: Config, ports: Mapping[str, int]) -> list[tuple[str, str, str]]:
+    """The three (field, the value the config carries, the URL the stack owns)
+    pairs, for the fields that name a host -- `embed_url` kept out because the
+    stack always clears it to `""`. This is the one home of the pairing; a caller
+    that asks "does the config still point at this stack" (the `status` line,
+    the `remove` warning) computes it from these instead of re-listing the
+    fields. The stack URLs come from `stack_urls`, so the two cannot drift."""
+    urls = stack_urls(ports)
+    return [("qdrant_url", eff.qdrant_url, urls["qdrant_url"]),
+            ("api_base_url", eff.api_base_url, urls["api_base_url"]),
+            ("rerank_url", eff.rerank_url, urls["rerank_url"])]
+
+
 def stack_config(ports: Mapping[str, int], *, vector_size: int = EMBED_DIM) -> Config:
     """The `Config` the verification runs with: defaults plus the stack's URLs.
 

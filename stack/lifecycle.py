@@ -63,9 +63,15 @@ def status(deps: LifeDeps) -> tuple[dict, int]:
     if st is None:
         return {"managed": False}, 0
     urls = verify.stack_urls(st.ports)
-    url_by_service = {"qdrant": urls["qdrant_url"], "embed": urls["api_base_url"],
-                      "rerank": urls["rerank_url"]}
-    services = {name: {"url": url_by_service[name], "status": deps.status(url_by_service[name])}
+    endpoints = health.endpoints(st.ports)
+    # The displayed `url` is the config URL the plugin points at (what Task 12
+    # shows); the live probe is the READINESS endpoint, the same one `up` waits
+    # on. The pinned b11382 has no GET route for `/v1` or `/v1/rerank` (POST-only)
+    # or a bare `/`, so probing the config URL 404s on a healthy llama-server --
+    # a stack that just passed `up` would report unhealthy forever (R6).
+    services = {name: {"url": urls[{"qdrant": "qdrant_url", "embed": "api_base_url",
+                                    "rerank": "rerank_url"}[name]],
+                       "status": deps.status(endpoints[name])}
                 for name in catalog.SERVICES}
     healthy = all(s["status"] == 200 for s in services.values())
     outdated = [role for role in catalog.IMAGES
@@ -81,7 +87,8 @@ def status(deps: LifeDeps) -> tuple[dict, int]:
         "services": services,
         "healthy": healthy,
         "outdated_pins": outdated,
-        "config_points_here": _config_points_here(deps.config.effective(), st.ports),
+        "config_points_here": all(got == want for _f, got, want
+                                  in verify.config_url_pairs(deps.config.effective(), st.ports)),
         "boot": boot_status(st, deps.runner),
     }, (0 if healthy else 1)
 
@@ -293,24 +300,11 @@ def _delete_files(deps: LifeDeps, purge_models: bool) -> list[str]:
     return deleted
 
 
-def _config_points_here(eff: Config, ports: dict[str, int]) -> bool:
-    """Whether the effective config still points at the stack's own URLs -- the three that
-    name a host, `embed_url` kept out because the stack always clears it to `""`."""
-    urls = verify.stack_urls(ports)
-    pairs = [("qdrant_url", eff.qdrant_url, urls["qdrant_url"]),
-             ("api_base_url", eff.api_base_url, urls["api_base_url"]),
-             ("rerank_url", eff.rerank_url, urls["rerank_url"])]
-    return all(got == want for _name, got, want in pairs)
-
-
 def _report_still_points_here(reporter: Reporter, eff: Config, ports: dict[str, int]) -> None:
     """`remove` never edits the config, so a config that pointed at the stack now points at
     nothing: each field that still carries the stack's URL is named with its value."""
-    urls = verify.stack_urls(ports)
-    pairs = [("qdrant_url", eff.qdrant_url, urls["qdrant_url"]),
-             ("api_base_url", eff.api_base_url, urls["api_base_url"]),
-             ("rerank_url", eff.rerank_url, urls["rerank_url"])]
-    matching = [(name, want) for name, got, want in pairs if got == want]
+    matching = [(name, want) for name, got, want in verify.config_url_pairs(eff, ports)
+                if got == want]
     if matching:
         for name, want in matching:
             reporter.warn(f"your config still points at the deleted stack: {name}={want}")
