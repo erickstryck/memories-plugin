@@ -111,8 +111,8 @@ class FakeTransport:
     that many bytes (a connection that dropped).
 
     Every call is recorded in `.starts` as `(url, start)`, so a test asserts the
-    resume point by reading the call. Tasks 10 and 11 reuse this fake for the
-    installer's download steps (Ruling 1).
+    resume point by reading the call. Task 10 reuses this fake for the installer's
+    download step (Ruling 1).
     """
 
     def __init__(self, content: bytes, cut_after: int | None = None,
