@@ -170,8 +170,13 @@ class TestStatus(_LifecycleCase):
                     pass
 
             server = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
-            self.addCleanup(server.shutdown)
+            server.daemon_threads = True
             threading.Thread(target=server.serve_forever, daemon=True).start()
+            # the suite's idiom (tests/fakes.py): server_close closes the
+            # listening socket, shutdown stops the loop; cleanups run in
+            # reverse order, so the loop stops before the socket closes
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
             return server
 
         servers = (make_stub("/readyz"), make_stub("/health"), make_stub("/health"))
