@@ -285,7 +285,47 @@ class TheRenderTest(unittest.TestCase):
                     render(fixture_plan("linux", "docker", "cpu", stack_dir=bad))
                 self.assertEqual("compose", ctx.exception.step)
                 self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
-                self.assertIn(":", ctx.exception.fix)
+
+    def test_a_relative_stack_dir_is_refused(self):
+        # R4: both providers treat a relative host path as a project volume and fail
+        # with a misleading "undefined volume rel/stack/models" (measured 2026-10-07).
+        with self.assertRaises(StackError) as ctx:
+            render(fixture_plan("linux", "docker", "cpu", stack_dir=Path("rel/stack")))
+        self.assertEqual("compose", ctx.exception.step)
+        self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
+
+    def test_a_tilde_stack_dir_is_refused(self):
+        # R4: docker-compose expands a leading '~' to the invoking user's home while
+        # podman-compose keeps it literally (measured 2026-10-07). A '~' path is not
+        # absolute, so it is refused too.
+        with self.assertRaises(StackError) as ctx:
+            render(fixture_plan("linux", "docker", "cpu", stack_dir=Path("~/stack")))
+        self.assertEqual("compose", ctx.exception.step)
+        self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
+
+    def test_a_stack_dir_with_a_dollar_is_refused(self):
+        # R4: both providers interpolate '$VAR' and '${VAR}' in the host path.
+        # '/home/me/a$zzqq/stack' mounts '/home/me/a/stack', exit 0 in both, docker-compose
+        # only warning that the variable is unset (measured 2026-10-07 with docker-compose
+        # v5.2.0 and podman-compose 1.6.0). '$$' is not a workaround: docker-compose kept
+        # 'a$$b' while podman-compose resolved it to 'a$b'.
+        for bad in (Path("/home/me/a$zzqq/stack"), Path("/home/me/x/${HOME}/stack"),
+                    Path("/home/me/x/$HOME/stack"), Path("/home/me/a$$b/stack")):
+            with self.subTest(stack_dir=bad):
+                with self.assertRaises(StackError) as ctx:
+                    render(fixture_plan("linux", "docker", "cpu", stack_dir=bad))
+                self.assertEqual("compose", ctx.exception.step)
+                self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
+
+    def test_a_stack_dir_with_a_surrogate_is_refused(self):
+        # R4: a lone surrogate is what surrogateescape makes of a non-UTF-8 path byte.
+        # docker-compose rejects the file ("invalid Unicode character escape code");
+        # podman-compose exits 0 and keeps the escape (measured 2026-10-07).
+        with self.assertRaises(StackError) as ctx:
+            render(fixture_plan("linux", "docker", "cpu",
+                                stack_dir=Path("/home/me/caf\udce9")))
+        self.assertEqual("compose", ctx.exception.step)
+        self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
 
     def test_a_stack_dir_with_a_non_bmp_character_is_refused(self):
         # R2 item R2-9: a code point above 0xFFFF (an emoji) is rejected by
@@ -295,7 +335,6 @@ class TheRenderTest(unittest.TestCase):
                                 stack_dir=Path("/home/me/\U0001F4A4")))  # an emoji
         self.assertEqual("compose", ctx.exception.step)
         self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
-        self.assertIn("emoji", ctx.exception.fix)
 
     def test_an_accented_stack_dir_is_accepted(self):
         # R2 item R2-9: an accented path (code points inside the BMP) works in both

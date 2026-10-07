@@ -84,30 +84,43 @@ def render(plan: Plan) -> dict:
 
 
 def _check_stack_dir(stack_dir: Path) -> None:
-    """Refuse a `stack_dir` the short volume syntax cannot carry (R2 item R2-9).
+    """Refuse a `stack_dir` the short volume syntax `<host>:/models:ro` cannot carry in both
+    providers.
 
-    The models mount is the SHORT form `<host path>:/models:ro`, which both providers
-    split on `:`. Measured 2026-10-06 on this machine with docker-compose v5.2.0 and
-    podman-compose 1.6.0 `config` on throwaway files:
-      * a `:` ANYWHERE in the host path breaks the parse in BOTH providers;
-      * a character outside the Basic Multilingual Plane (an emoji, code point above
-        0xFFFF) is rejected by docker-compose and garbled by podman-compose.
-    Accented characters (the Latin-1 supplement and beyond, still inside the BMP) work in
-    both. Rather than switch to the long volume syntax, the step refuses the directory
-    with a named fix.
+    `json.dumps` escapes nothing a provider would rewrite, so every one of these was
+    measured on throwaway compose files (both providers, `config` only, never `up`):
+    2026-10-06 (R2-9): a `:` anywhere breaks the parse in BOTH; a code point above 0xFFFF
+    is rejected by docker-compose and garbled by podman-compose. 2026-10-07 (R4):
+    `docker-compose v5.2.0` and `podman-compose 1.6.0` interpolate `$VAR` and `${VAR}` in the
+    host path (`/x/$HOME/stack` resolved to the real home in both, exit 0, no warning;
+    `a$zzqq` lost the variable name; `a$$b` stayed `a$$b` in docker-compose but became
+    `a$b` in podman-compose, so even writing `$$` is not portable); a relative path fails with
+    a misleading "undefined volume rel/stack/models" in both; a leading `~` is expanded by
+    docker-compose and kept literally by podman-compose; a lone surrogate (surrogateescape
+    for a non-UTF-8 byte) is rejected by docker-compose and kept by podman-compose.
+    Accented characters inside the BMP work in both and stay accepted.
     """
     path = str(stack_dir)
-    if ":" in path:
+    if not path.startswith("/"):
+        # A relative or `~` path is not the directory the user means: docker-compose
+        # expands a leading `~` and a relative path becomes a project volume.
         raise StackError(
-            f"the stack directory {path!r} contains ':', which breaks the compose "
-            "volume syntax in both providers",
-            step="compose", fix="set QCTX_STACK_DIR to a path without ':'")
+            f"the stack directory {path!r} is not absolute",
+            step="compose", fix=_STACK_DIR_FIX)
     for char in path:
-        if ord(char) > 0xFFFF:
+        code = ord(char)
+        if char == ":" or char == "$" or 0xD800 <= code <= 0xDFFF or code > 0xFFFF:
+            # ':' and '$' are special to the volume syntax and to provider
+            # interpolation; surrogates and non-BMP code points break the file in one
+            # provider or the other.
             raise StackError(
-                f"the stack directory {path!r} has a character outside the basic "
-                "multilingual plane, which one compose provider garbles",
-                step="compose", fix="set QCTX_STACK_DIR to a path without emoji")
+                f"the stack directory {path!r} cannot be used as a compose source path",
+                step="compose", fix=_STACK_DIR_FIX)
+
+
+#: One fix for every refused directory: the check above is the whole policy.
+_STACK_DIR_FIX = ("set QCTX_STACK_DIR to an absolute path without ':', '$' or characters "
+                  "outside the basic multilingual plane")
 
 
 def dump(plan: Plan) -> str:
