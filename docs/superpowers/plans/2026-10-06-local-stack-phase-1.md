@@ -277,22 +277,36 @@ def test_flags_beat_env_beat_catalog(self):
 Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 
 **Files:**
-- Create: `stack/runtimes.py`
-- Create: `stack/process.py` (`Completed`, `Runner`, `SubprocessRunner`; o `runtimes` os
-  reexporta)
+- Create: `stack/process.py` (`Completed`, `Runner`, `SubprocessRunner`)
+- Create: `stack/engine.py` (o contrato dos runtimes e o que os dois engines compartilham)
+- Create: `stack/docker.py` (`Docker`) e `stack/podman.py` (`Podman`)
+- Create: `stack/runtimes.py` (a porta de entrada: `discover` e as reexportações)
 - Create: `tests/stack_fakes.py` (`FakeRunner`, `FakeRuntime`)
 - Test: `tests/test_stack_runtimes.py`
 
 **Interfaces:**
-- Produces (em `stack/process.py`, reexportados pelo `stack/runtimes.py`):
+- Direção: `process` <- `engine` <- `docker`, `podman` <- `runtimes`. O `stack/runtimes.py`
+  reexporta `Completed`, `Runner`, `SubprocessRunner`, `EngineInfo`, `Provider`, `ProviderInfo`,
+  `ContainerRuntime`, `Docker`, `Podman`, `normalize_arch`, `socket_alive` e `parse_size`, que as
+  tarefas seguintes e os testes importam dele; dentro de `stack/`, `facts` e `backends` importam
+  o contrato de `stack/process.py` e `stack/engine.py`, nunca da porta.
+- Produces em `stack/process.py`:
   - `@dataclass(frozen=True) class Completed: returncode: int; stdout: str = ""; stderr: str = ""`,
     com `ok` (`returncode == 0`);
   - `class Runner(Protocol): def run(self, argv: list[str], *, timeout: float, stream: bool =
     False) -> Completed`; `class SubprocessRunner` (binário ausente vira `Completed(127, "",
-    "<argv0>: not found")`; `TimeoutExpired` vira `StackError(step="runtime")` com o comando e o
-    tempo, e mata o grupo de processos inteiro (`start_new_session` + `os.killpg`), para o
-    backend que o provider de compose sobe como filho também morrer; `stream=True` herda stdout e
-    stderr do terminal; um `OSError` no `exec` vira `StackError(step="runtime")`);
+    "<argv0>: not found")`; o comando roda como líder de uma sessão própria
+    (`start_new_session`); `TimeoutExpired` vira `StackError(step="runtime")` com o comando e o
+    tempo, e mata o grupo de processos inteiro (`os.killpg`), para o backend que o provider de
+    compose sobe como filho também morrer; qualquer outra exceção na espera, o Ctrl-C acima de
+    tudo, para o grupo inteiro antes de seguir: como o comando está noutra sessão, o Ctrl-C do
+    terminal só chega ao Python, então o runner manda ao grupo o SIGINT que o terminal entregaria
+    a um grupo em primeiro plano, espera até 5 s, manda SIGKILL ao que sobrar, colhe o processo,
+    fecha os pipes e deixa a exceção seguir, nos dois modos; um segundo Ctrl-C na espera vai
+    direto ao SIGKILL; `stream=True` herda stdout e stderr do terminal; um `OSError` no `exec`
+    vira `StackError(step="runtime")`. Um `nvidia-smi` travado chega ao `collect` da Task 4 como
+    o `StackError` do timeout, e o `collect` o lê como um que não lista placa nenhuma);
+- Produces em `stack/engine.py`:
   - `normalize_arch(machine: str) -> str` (`x86_64`/`amd64` -> `"amd64"`, `aarch64`/`arm64` ->
     `"arm64"`, o resto em minúsculas);
   - `@dataclass(frozen=True) class EngineInfo: name: str; version: str; os: str; arch: str;
@@ -306,21 +320,29 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
     `compose_provider() -> ProviderInfo`; `compose(provider: Provider, project: str, file: Path,
     *args: str, timeout: float, stream: bool = False) -> Completed`;
     `stats(names: list[str]) -> dict[str, int]`;
-  - `Docker(runner: Runner, which=shutil.which)`, `Podman(runner: Runner, which=shutil.which,
-    host_system: str = "linux", socket_alive=socket_alive)`;
   - `socket_alive(path: str | None) -> bool` (connect AF_UNIX, timeout 2 s);
   - `parse_size(text: str) -> int | None`;
-  - `discover(runner: Runner, which=shutil.which, host_system: str = "linux") ->
-    list[ContainerRuntime]` (Docker antes de Podman; só os que têm binário e cujo `engine()`
-    responde);
-  - em `tests/stack_fakes.py`: `FakeRunner(responses: dict[tuple[str, ...], Completed])` (casa
-    pelo prefixo mais longo do argv e grava `calls`) e `FakeRuntime(name, engine, provider_info,
-    list_devices: dict[str, str], fail: dict[str, Completed])` (grava cada `compose` em `calls`;
-    para `run ... --list-devices` devolve a saída registrada para o arquivo de prova do perfil).
+  - os auxiliares que os dois engines usam, sem sublinhado na frente porque cruzam módulos:
+    `as_which`, `INFO_TIMEOUT`, `compose_argv`, `compose_version` (o token depois de `version` na
+    linha que nomeia o compose, sem a vírgula do v1), `first_line` (a primeira linha não vazia da
+    saída de uma ferramenta), `before_slash` e `stats_failed` (o `StackError` de um `stats` que
+    falhou, com a primeira linha do stderr da ferramenta);
+- Produces em `stack/docker.py` e `stack/podman.py`: `Docker(runner: Runner,
+  which=shutil.which)`, `Podman(runner: Runner, which=shutil.which, host_system: str = "linux",
+  socket_alive=socket_alive)`;
+- Produces em `stack/runtimes.py`: `discover(runner: Runner, which=shutil.which, host_system:
+  str = "linux") -> list[ContainerRuntime]` (Docker antes de Podman; só os que têm binário e cujo
+  `engine()` responde);
+- Produces em `tests/stack_fakes.py`: `FakeRunner(responses: dict[tuple[str, ...], Completed])`
+  (casa pelo prefixo mais longo do argv e grava `calls`) e `FakeRuntime(name, engine,
+  provider_info, list_devices: dict[str, str], fail: dict[str, Completed])` (grava cada `compose`
+  em `calls`; para `run ... --list-devices` devolve a saída registrada para o arquivo de prova do
+  perfil).
 
-- [ ] **Step 1: testes que falham**, com saídas reais gravadas como constantes no teste (o JSON
-  do `podman info` desta máquina, reduzido aos campos lidos; o `podman compose version` com o
-  banner no stderr; um `docker info` de exemplo):
+- [ ] **Step 1: testes que falham**, com saídas reais gravadas como constantes no teste, cada
+  uma dizendo como foi obtida (o comando medido e a data, ou o arquivo e a tag do fonte lido): o
+  JSON do `podman info` desta máquina, reduzido aos campos lidos; o `podman compose version` com
+  o banner no stderr; um `docker info` de exemplo, rotulado como exemplo:
   - `test_contract_every_runtime_builds_the_same_compose_argv` (Docker, Podman e `FakeRuntime`:
     `[*provider.argv, "-p", "p", "-f", "/x/compose.yaml", "up", "-d"]`);
   - `test_podman_engine_reads_version_os_arch_rootless_and_socket`;
@@ -342,12 +364,24 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
     Podman com `name`/`mem_usage`; devolve bytes da parte antes de `" / "`);
   - `test_the_subprocess_runner_turns_a_timeout_into_a_stack_error` e
     `test_a_missing_binary_is_127`;
+  - `test_a_ctrl_c_stops_the_whole_group_in_capture_mode` e `..._in_stream_mode`,
+    `test_the_command_gets_the_sigint_first_and_stops_on_its_own` e
+    `test_a_second_ctrl_c_cuts_the_grace_short` (de ponta a ponta: um processo intermediário de
+    verdade, com o tratador padrão de SIGINT instalado e stderr em DEVNULL, roda
+    `sh -c 'sleep 30 & echo $! > <arquivo>; wait'`; o SIGINT vai só para ele; o neto some dentro
+    da espera mais 2 s, e o intermediário morre do Ctrl-C que segue; um comando que trata o SIGINT
+    para sozinho bem antes dos 5 s; um segundo SIGINT encurta a espera. O tratador é instalado à
+    mão porque um job em segundo plano de um shell não interativo herda o SIGINT IGNORADO, e aí o
+    sinal nunca chega e o teste não prova nada);
   - `test_discover_skips_a_runtime_whose_engine_does_not_answer`.
 - [ ] **Step 2:** rodar; esperado `No module named 'stack.runtimes'`.
 - [ ] **Step 3:** implementar. `Podman.compose_provider`: `podman compose version`; o caminho do
   banner `Executing external compose provider "<p>"` decide: basename começando por
-  `docker-compose` exige `socket_alive(engine.socket)`; parado, `podman-compose` no PATH vira o
-  provider com `note`; sem ele, `problem` e `fix` (no macOS o fix é `podman machine start`).
+  `docker-compose` exige `socket_alive(engine.socket)`; com o banner desligado, a linha de versão
+  do docker-compose no stdout decide, nas duas grafias e sem diferenciar maiúsculas
+  (`Docker Compose version` do v2 em diante, `docker-compose version` no v1); parado,
+  `podman-compose` no PATH vira o provider com `note`; sem ele, `problem` e `fix` (no macOS o fix
+  é `podman machine start`).
   `podman compose version` falhando, tenta `podman-compose version`. No macOS, `engine().vm` vem
   do `Host.VMType` de `podman machine info` (em minúsculas), e `engine().socket` do
   `ConnectionInfo.PodmanSocket.Path` de `podman machine inspect <Host.CurrentMachine>`: o
@@ -372,7 +406,8 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 - Test: `tests/test_stack_facts.py`
 
 **Interfaces:**
-- Consumes: `Runner`, `Completed`, `SubprocessRunner`, `normalize_arch` (Task 3).
+- Consumes: `Runner`, `Completed`, `SubprocessRunner` (de `stack/process.py`), `normalize_arch`
+  (de `stack/engine.py`) (Task 3).
 - Produces:
   - `@dataclass(frozen=True) class Gpu: vendor: str; card: str` (o `card` é o endereço PCI);
   - `@dataclass(frozen=True) class NvidiaFacts: gpus: tuple[str, ...] = (); icd: bool = False;
@@ -389,7 +424,10 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
     injeta um falso; o `disk_usage` injetado mantém o teste do disco sem tocar no disco real);
   - `normalize_system(name: str) -> str` (`Linux` -> `"linux"`, `Darwin` -> `"macos"`,
     `Windows` -> `"windows"`);
-  - `collect(probe: Probe, stack_dir: Path) -> HostFacts`;
+  - `collect(probe: Probe, stack_dir: Path) -> HostFacts` (um `nvidia-smi` que trava, e o
+    runner então levanta `StackError` no timeout, ou que falha, é um driver que não lista placa
+    nenhuma: `NvidiaFacts.gpus == ()`, que o perfil nvidia lê como "install the NVIDIA driver";
+    a detecção segue, porque a CPU continua sendo a reserva em todo host);
   - `port_free(port: int, host: str = "127.0.0.1") -> bool`;
   - `platform_of(facts: HostFacts, engine_kernel: str = "") -> str` (`"macos"`; `"windows"`
     quando o sistema é Windows, ou WSL, ou o kernel do engine contém `microsoft` (em
@@ -414,9 +452,17 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
   - `test_selinux_enforcing_is_read`;
   - `test_nvidia_readiness_has_its_parts` (nvidia-smi `-L` pelo `FakeRunner`; ICD em
     `usr/share/vulkan/icd.d/nvidia_icd.json`; `docker_hook`, `cdi_hook` e `ctk` pelo `which`;
-    spec CDI em `etc/cdi/` contendo `nvidia.com/gpu`);
+    spec CDI em `etc/cdi/` no formato do teste do próprio nvidia-container-toolkit,
+    `cmd/nvidia-ctk/cdi/generate/generate_test.go` na tag v1.18.0, com o `kind` que o comando
+    grava por padrão, `nvidia.com/gpu`);
+  - `test_a_cdi_file_that_is_not_utf8_is_read_as_bytes` (um arquivo que não é UTF-8 em
+    `etc/cdi/`, sozinho, dá `False` sem exceção; ao lado do spec de verdade, `True`) e
+    `test_a_hung_or_failing_nvidia_smi_lists_no_gpu` (um runner que levanta `StackError`, e um
+    que sai com erro: `gpus == ()`, e os fatos de arquivo continuam lidos);
   - `test_the_default_probe_points_at_the_real_root_and_runner` (o `Probe()` padrão tem um
-    `SubprocessRunner` de verdade, não `None`);
+    `SubprocessRunner` de verdade, não `None`; os outros padrões são comparados por identidade,
+    `platform.system`, `platform.machine`, `shutil.which` e `shutil.disk_usage`, sem chamar
+    nenhum, para o teste não depender da máquina);
   - `test_normalize_and_platform_of`;
   - `test_port_free_says_no_for_a_bound_port`.
 - [ ] **Step 2:** rodar; esperado `No module named 'stack.facts'`.
@@ -427,18 +473,23 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 ### Task 5: os perfis de backend
 
 **Files:**
-- Create: `stack/backends.py`
+- Create: `stack/devices.py` (`Device`, `parse_devices`, `vendor_of`: a leitura do que o
+  `--list-devices` de um container imprimiu)
+- Create: `stack/backends.py` (importa os três de `stack/devices.py` e os reexporta)
 - Test: `tests/test_stack_backends.py`
 
 **Interfaces:**
-- Consumes: `HostFacts`, `EngineInfo`.
-- Produces:
+- Consumes: `HostFacts` (Task 4), `EngineInfo` (de `stack/engine.py`, Task 3).
+- Produces em `stack/devices.py` (reexportados pelo `stack/backends.py`):
   - `@dataclass(frozen=True) class Device: index: int; name: str; total_mib: int; free_mib: int`,
     com `id` (`f"Vulkan{index}"`) e `vendor` (`vendor_of(name)`);
   - `parse_devices(output: str) -> list[Device]` (tolera `\r`, ignora o que não casa, `(none)` dá
     lista vazia);
   - `vendor_of(name: str) -> str | None` (`NVIDIA` -> nvidia; `AMD` ou `RADV` -> amd; `Intel` ->
-    intel; `Virtio`, `Venus` ou `Apple` -> apple; llvmpipe -> `None`);
+    intel; `Virtio`, `Venus` ou `Apple` -> apple; llvmpipe -> `None`; o device do dzn, na fase 3,
+    embrulha o nome do adaptador, `Microsoft Direct3D12 (<adaptador>)`, então valem os mesmos
+    tokens);
+- Produces em `stack/backends.py`:
   - `READY, MISSING, RUNTIME, UNSUPPORTED = "ready", "missing", "runtime", "unsupported"`;
     `@dataclass(frozen=True) class Availability: state: str; reason: str = ""; fix: str | None =
     None; needs: str | None = None`;
@@ -462,7 +513,10 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
     29268, `Vulkan1` RADV 16368/4018, `Vulkan2` Intel 32656/29289);
   - `test_parse_devices_none_crlf_and_noise` (`(none)` -> `[]`; a mesma saída com `\r\n`; uma
     linha de log no meio é ignorada);
-  - `test_vendor_of` (inclui `"NVIDIA GeForce RTX 4090"` e `"Virtio-GPU Venus (Apple M2 Pro)"`);
+  - `test_vendor_of` (inclui `"NVIDIA GeForce RTX 4090"`, `"Virtio-GPU Venus (Apple M2 Pro)"` e
+    o nome real de um dzn, `"Microsoft Direct3D12 (NVIDIA GeForce GTX 1080)"` -> nvidia, com a
+    procedência: o `dzn_device.c` do Mesa na tag mesa-26.0.3 e o comentário de 2026-02-20 na
+    issue 1215 do microsoft/wslg);
   - `test_the_compatibility_matrix_is_the_specs` (absoluto: Linux `cpu/amd/intel/nvidia` x
     `docker/podman`; macOS `cpu` x `docker/podman` e `apple` x `podman`; nada mais, nem a CPU
     no Windows, que a fase 1 recusa em vez de oferecer CPU);
@@ -549,8 +603,9 @@ no Linux e `/Users/me/.local/share/memories-plugin/stack` no macOS; sem SELinux.
     `devices`);
   - `test_ports_bind_loopback_only`; `test_selinux_adds_the_z_label`;
   - `test_container_and_volume_names_carry_the_project` (M6).
-  - `test_a_stack_dir_with_a_colon_is_refused` e `test_a_stack_dir_with_a_non_bmp_character_is
-    refused` (R2-9: `render` levanta `StackError(step="compose")` com a fix apontando para
+  - `test_a_stack_dir_with_a_colon_is_refused` e
+    `test_a_stack_dir_with_a_non_bmp_character_is_refused` (R2-9: `render` levanta
+    `StackError(step="compose")` com a fix apontando para
     `QCTX_STACK_DIR`), e `test_an_accented_stack_dir_is_accepted` (acento dentro do BMP não
     recusa).
   Regeneração: `python3 tests/test_stack_compose.py --regen` reescreve as 9.

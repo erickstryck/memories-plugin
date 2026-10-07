@@ -179,10 +179,14 @@ dependências apontam num sentido só: `cli -> stack -> core`.
 | módulo | responsabilidade única |
 |---|---|
 | `stack/catalog.py` | só dados: imagens (tag + digest do índice), GGUFs (repo, revisão, arquivo, bytes, sha256), flags por papel, portas e nomes padrão. O procedimento de bump vive aqui |
-| `stack/process.py` | `Completed`, `Runner` e `SubprocessRunner`: o runner que shella, com timeout que mata o grupo de processos inteiro |
+| `stack/process.py` | `Completed`, `Runner` e `SubprocessRunner`: o runner que roda cada comando como processo filho, com timeout que mata o grupo de processos inteiro e Ctrl-C que para esse grupo antes de seguir (ver "Detecção") |
+| `stack/engine.py` | o contrato dos runtimes (`EngineInfo`, `Provider`, `ProviderInfo` e o Protocol `ContainerRuntime`) e o que os dois engines compartilham: `normalize_arch`, `socket_alive`, `parse_size` e os auxiliares de compose (o argv, o token de versão, a primeira linha da saída de uma ferramenta, a parte antes de ` / `) |
+| `stack/docker.py` | `Docker` atrás do contrato: engine (com a memória que os containers usam), provider de compose, compose, stats |
+| `stack/podman.py` | `Podman` atrás do contrato: a escolha do provider de compose, o socket da API e a máquina do macOS |
+| `stack/runtimes.py` | a porta de entrada: `discover`, a descoberta do que responde, e a reexportação dos nomes que as tarefas anteriores e os testes importam dele |
 | `stack/facts.py` | `HostFacts`: SO, arch, WSL, RAM (no Linux; `None` no macOS, que lê o número do engine), disco, GPUs pelo barramento PCI, `/dev/dri`, SELinux, portas ocupadas. Coletado por primitivas injetadas |
-| `stack/runtimes.py` | `Docker` e `Podman` atrás do mesmo Protocol: engine (com a memória que os containers usam), provider de compose, compose, stats; descoberta do que responde. Reexporta o runner do `stack/process.py` |
-| `stack/backends.py` | perfis `Cpu`, `DriGpu` (AMD e Intel), `NvidiaGpu` e `AppleGpu` atrás do Protocol `Backend`; registro `BACKENDS`; a compatibilidade de cada perfil com Docker e Podman, por plataforma |
+| `stack/devices.py` | o que o `--list-devices` de um container imprimiu: `Device`, `parse_devices` e `vendor_of` |
+| `stack/backends.py` | perfis `Cpu`, `DriGpu` (AMD e Intel), `NvidiaGpu` e `AppleGpu` atrás do Protocol `Backend`; registro `BACKENDS`; a compatibilidade de cada perfil com Docker e Podman, por plataforma. Lê os devices pelo `stack/devices.py` e os reexporta |
 | `stack/compose.py` | `render(plan) -> dict`, puro, e o emissor YAML |
 | `stack/fetch.py` | download com retomada e sha256, com transporte HTTP injetado; a barra de progresso (decisão 16) é dele: porcentagem, MiB baixado/total, velocidade e ETA, com reescrita da linha em TTY e uma linha por fatia fora dele |
 | `stack/health.py` | espera de prontidão, com relógio injetado |
@@ -194,6 +198,12 @@ dependências apontam num sentido só: `cli -> stack -> core`.
 | `stack/keys.py` (fase 2) | gera, grava e roda as chaves da stack; nunca as escreve no compose, no `stack.json` ou no config |
 | `stack/connect.py` (fase 2) | caso de uso: apontar o plugin para uma stack remota |
 | `stack/cli.py` | apresentação e raiz de composição: registra `qctx stack`, expõe `install_step()` para o `cmd_install`, injeta as implementações concretas. Recebe do `cli/qctx.py` a gravação de segredos que o wizard já usa, para não importar `cli` |
+
+Dentro do pacote, as dependências também apontam num sentido só: `process` <- `engine` <-
+`docker` e `podman` <- `runtimes`. O `facts` e o `backends` importam o contrato de `process` e de
+`engine`, nunca da porta `runtimes`, que existe para quem já importava dela. Um engine novo é um
+módulo e uma classe; um módulo que passa de ~300 linhas (regra do plano) ganhou uma
+responsabilidade que não é dele.
 
 ### Contratos **[a validar]**
 
@@ -324,7 +334,7 @@ exposição é a publicação só em `127.0.0.1`.
   Podman compartilham por padrão. O caminho não pode levar `:` (quebra a sintaxe curta de volume
   nos dois providers) nem caractere fora do Plano Multilíngue Básico (um emoji, que o
   podman-compose corrompe e o docker-compose rejeita); a etapa recusa com um `StackError` que
-  aponta para `QCTX_STACK_DIR`, em vez de mudar para a sintaxe longa. Aceento dentro do BMP
+  aponta para `QCTX_STACK_DIR`, em vez de mudar para a sintaxe longa. Acento dentro do BMP
   funciona nos dois e é aceito (medido 2026-10-06 nos dois providers com arquivos descartáveis).
 - Projeto compose `memories-plugin`, serviços `qdrant`, `embed` e `rerank`, volume nomeado
   `memories-plugin-qdrant`. Os dois providers prefixam o volume com o projeto, então o nome real
@@ -617,6 +627,14 @@ usuário, como o wizard já faz com o PATH.
 
 ## Detecção **[a validar]**
 
+- **Comandos**: todo comando da etapa (`info`, `version`, `compose`, `nvidia-smi`) roda com
+  timeout, como processo filho que lidera uma sessão própria, para que o timeout mate o grupo de
+  processos inteiro: o provider de compose roda o backend como filho dele. Por estar noutra
+  sessão, o Ctrl-C do terminal chega só ao Python; então o runner repassa um SIGINT ao grupo do
+  comando (o que o terminal teria entregado a um grupo em primeiro plano), espera até 5 s, manda
+  SIGKILL ao que sobrar e só então deixa o Ctrl-C seguir. Um segundo Ctrl-C durante a espera vai
+  direto ao SIGKILL. Sem isso, o comando interrompido seguia rodando, solto (medido em 2026-10-07
+  com o runner anterior: o neto do comando sobreviveu ao Ctrl-C do processo que o rodava).
 - **Runtimes**: `docker info` e `podman info` em JSON, com timeout. Deles saem versão, os/arch do
   engine (é o que vale para a imagem e os devices, porque no macOS e no Windows o engine roda numa
   VM), kernel, rootless e socket. No Docker, `--format '{{json .}}'`, que toda versão aceita: o
@@ -624,7 +642,9 @@ usuário, como o wizard já faz com o PATH.
   sistema do engine é o `OSType`; o `OperatingSystem` é um rótulo, como "Docker Desktop".
 - **Provider de compose**: `docker compose version`, senão `docker-compose version`;
   `podman compose version`, senão `podman-compose version`. O `podman compose` diz no stderr qual
-  provider externo executa (`Executing external compose provider "<caminho>"`). Com o
+  provider externo executa (`Executing external compose provider "<caminho>"`); com esse aviso
+  desligado, o docker-compose se reconhece pela linha de versão no stdout, nas duas grafias
+  (`Docker Compose version` do v2 em diante, `docker-compose version` no v1). Com o
   docker-compose atrás do Podman, o socket da API precisa responder, e a etapa confere
   **conectando nele**, não pelo `podman info`: no Podman 5.7.0, o `remoteSocket.exists` do
   `podman info` veio `true` com o socket inexistente, e o `podman compose` então falhou com
@@ -648,7 +668,9 @@ usuário, como o wizard já faz com o PATH.
     driver (no Ubuntu, `libnvidia-gl-<versão>`) e, no Podman, regenerar o spec CDI.
 
   Sem placa NVIDIA no host, o perfil não é oferecido. Com a placa no barramento e o `nvidia-smi`
-  sem listá-la (nouveau, ou driver nenhum), a correção é o driver da NVIDIA.
+  sem listá-la (nouveau, ou driver nenhum), a correção é o driver da NVIDIA. Um `nvidia-smi` que
+  trava (um driver quebrado pode travá-lo, e o runner desiste no timeout de 30 s) ou que falha
+  conta como um que não lista placa nenhuma: a detecção segue, e a CPU continua no menu.
 
   A prova continua sendo o `--list-devices` do container.
 - **Windows (WSL2, com Docker Desktop ou Podman)**: entra na fase 3, já com os perfis de GPU da
@@ -664,9 +686,10 @@ usuário, como o wizard já faz com o PATH.
   dele sai o socket da API do lado do host, `ConnectionInfo.PodmanSocket.Path`, da máquina que o
   `machine info` dá em `Host.CurrentMachine`. É esse socket que o `podman compose` passa ao
   docker-compose no Mac (`cmd/podman/compose.go`); o `remoteSocket` do `podman info` é o caminho
-  dentro da VM. No Docker Desktop, ou com máquina applehv, ele aparece no menu
-  como "só Podman", indisponível, com a correção da versão instalada (ver "Compatibilidade"). Em
-  Mac com Intel não há caminho de GPU para container: o menu mostra a CPU e diz por quê.
+  dentro da VM. No Docker Desktop, ele aparece no menu como "só Podman"; com máquina applehv,
+  indisponível, com uma correção só, a mesma no Podman 5 e no 6: gravar o provider libkrun no
+  `containers.conf` e recriar a máquina (ver "Compatibilidade"). Em Mac com Intel não há caminho
+  de GPU para container: o menu mostra a CPU e diz por quê.
 - **Outros**: disco livre antes de baixar; a RAM é o número do engine (o que os containers
   usam, não o do host, que no macOS é maior); portas por `bind` em `127.0.0.1`; SELinux por
   `/sys/fs/selinux/enforce`.
@@ -873,6 +896,9 @@ Offline e herméticos, como o resto da suíte (`tests/isolation.py`):
   `podman machine info` e `podman machine inspect`, por plataforma.
 - `runtimes`: teste de contrato. `Docker`, `Podman` e `Fake` produzem o mesmo formato de argv e
   interpretam as saídas de versão e info.
+- `process`: o timeout e o Ctrl-C param o grupo de processos inteiro, provados com processos de
+  verdade (o Ctrl-C, por um processo intermediário com o tratador padrão de SIGINT, que é quem
+  recebe o sinal).
 - `backends`: a matriz de disponibilidade. `devices_seen` sobre amostras de `--list-devices` no
   formato da `b11382` (RADV, ANV, NVIDIA, Venus e `(none)`), e o desempate pelo `uma:`. A matriz
   de compatibilidade: há fixture para plataforma, runtime e perfil se e só se `runtimes()` inclui
