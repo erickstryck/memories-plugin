@@ -8,10 +8,15 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
 from . import StackError
+
+#: How long a command gets to stop on the SIGINT a Ctrl-C forwards to its group, before the
+#: SIGKILL (review round R3, item R3-1).
+_STOP_GRACE = 5.0
 
 
 @dataclass(frozen=True)
@@ -57,12 +62,46 @@ def _kill_group(proc: subprocess.Popen) -> None:
                 pass
 
 
+def _stop_group(proc: subprocess.Popen) -> None:
+    """Stop the command's WHOLE group when anything, a Ctrl-C above all, interrupts the wait.
+
+    The command leads its own session, so the SIGINT a terminal sends on Ctrl-C reaches
+    Python alone: `communicate()` raises KeyboardInterrupt and, without this, the group goes
+    on running, detached (measured at 7e5342a: a sleeping grandchild outlived the Ctrl-C of
+    the process that ran it; review round R3, item R3-1). So the group gets the SIGINT the
+    terminal would have delivered to a foreground group, and up to `_STOP_GRACE` seconds to
+    stop; what is still there then gets the SIGKILL of `_kill_group`, which also reaps and
+    closes the pipes. A second Ctrl-C during the grace goes straight to that SIGKILL.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except OSError:
+        pass  # nobody left to interrupt; `_kill_group` still reaps and closes
+    try:
+        deadline = time.monotonic() + _STOP_GRACE
+        while time.monotonic() < deadline and _group_alive(proc):
+            time.sleep(0.05)
+    finally:
+        _kill_group(proc)
+
+
+def _group_alive(proc: subprocess.Popen) -> bool:
+    """Whether any process is left in the command's group (signal 0 signals nobody)."""
+    proc.poll()  # reap the leader once it exits: its zombie would count as a member
+    try:
+        os.killpg(proc.pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 class SubprocessRunner:
-    """`Runner` that shells out. A missing binary is a 127, not an exception: the caller
-    decides whether an absent engine is an error (it usually is `None` from `engine()`).
-    A hung command is never a normal answer: it is a `StackError`, and the command's
-    whole process group is killed on the way. An `OSError` at exec is a `StackError`
-    naming the command, not a traceback."""
+    """`Runner` that runs the command as a child process. A missing binary is a 127, not an
+    exception: the caller decides whether an absent engine is an error (it usually is `None`
+    from `engine()`). A hung command is never a normal answer: it is a `StackError`, and the
+    command's whole process group is killed on the way. Anything else that interrupts the
+    wait, a Ctrl-C above all, stops the whole group (`_stop_group`) and then goes on. An
+    `OSError` at exec is a `StackError` naming the command, not a traceback."""
 
     def __init__(self, which=shutil.which):
         self.which = which
@@ -86,6 +125,9 @@ class SubprocessRunner:
             _kill_group(proc)
             raise StackError(f"timed out after {timeout}s: {' '.join(argv)}",
                              step="runtime") from None
+        except BaseException:
+            _stop_group(proc)
+            raise
         if stream:
             return Completed(proc.returncode)
         return Completed(proc.returncode,

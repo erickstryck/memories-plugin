@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import StackError
 from .engine import normalize_arch
 from .process import Runner, SubprocessRunner
 
@@ -226,18 +227,24 @@ def _selinux(probe: Probe) -> bool:
 
 
 def _nvidia_facts(probe: Probe, gpus: tuple[Gpu, ...]) -> NvidiaFacts:
-    """The NVIDIA readiness, filled only when a nvidia GPU is present. A missing
-    runner skips the `nvidia-smi` read (the file-based parts still hold) rather
-    than crash: the file facts are enough to say the driver is half there."""
+    """The NVIDIA readiness, filled only when a nvidia GPU is present.
+
+    A hung `nvidia-smi` (a broken driver can hang it, and the runner then raises
+    `StackError`) or a failing one is a driver that lists no GPU: `gpus` stays empty,
+    which the nvidia profile reads as "install the NVIDIA driver". It is not the end of
+    host detection, because the CPU stays on offer on every host (review round R3,
+    item R3-6).
+    """
     if not any(g.vendor == "nvidia" for g in gpus):
         return NvidiaFacts()
-    names = ()
-    if probe.runner is not None:
+    names: tuple[str, ...] = ()
+    try:
         out = probe.runner.run(["nvidia-smi", "-L"], timeout=30.0)
+    except StackError:
+        pass  # hung: no GPU listed
+    else:
         if out.ok:
-            names = tuple(_nvidia_name(line)
-                          for line in out.stdout.splitlines()
-                          if (n := _nvidia_name(line)))
+            names = tuple(name for name in map(_nvidia_name, out.stdout.splitlines()) if name)
     icd = _nvidia_icd(probe)
     docker_hook = probe.which("nvidia-container-runtime-hook") is not None
     cdi_hook = probe.which("nvidia-cdi-hook") is not None
@@ -266,15 +273,15 @@ def _nvidia_name(line: str) -> str:
     if match is None:
         return ""
     name = match.group(1).strip()
-    return re.sub(r"\s*\(?(?:UUID|uuid):\s*[^)]*\)\s*$", "", name).strip()
+    return re.sub(r"\s*\((?:UUID|uuid):\s*[^)]*\)\s*$", "", name).strip()
 
 
 def _cdi_spec(probe: Probe) -> bool:
     """A CDI spec naming an nvidia GPU (spec, "Detecção"): it lives in `/etc/cdi`
     or `/var/run/cdi`, in either container runtime's hand, so either directory
     makes the profile possible. The files are read as bytes and searched for the
-    marker `nvidia.com/gpu`, because a generated spec is not guaranteed UTF-8
-    (review round R2, item m9)."""
+    marker `nvidia.com/gpu`: the directories may hold any file, and one that is not
+    UTF-8 crashed a text read (review round R2, item m9)."""
     marker = b"nvidia.com/gpu"
     for cdi_dir in (probe.root / "etc" / "cdi", probe.root / "var" / "run" / "cdi"):
         if not cdi_dir.is_dir():

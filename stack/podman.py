@@ -19,25 +19,30 @@ from pathlib import Path
 
 from . import StackError
 from .engine import (INFO_TIMEOUT, EngineInfo, Provider, ProviderInfo, as_which, before_slash,
-                     compose_argv, compose_version, normalize_arch, parse_size, socket_alive,
-                     stats_failed)
+                     compose_argv, compose_version, first_line, normalize_arch, parse_size,
+                     socket_alive, stats_failed)
 from .process import Completed, Runner
 
 _BANNER = re.compile(r'Executing external compose provider "([^"]+)"')
+#: The first line docker-compose prints for `version`: v2 and later say `Docker Compose
+#: version v5.2.0` (measured here), v1 says `docker-compose version 1.29.2, build 5becea4c`
+#: (docker/compose 1.29.2, compose/cli/utils.py `get_version_info`).
+_DOCKER_COMPOSE_VERSION_LINE = re.compile(r"docker[ -]compose version", re.IGNORECASE)
 
 
 def _docker_compose_via(stdout: str, stderr: str) -> bool:
     """Whether `podman compose` runs an EXTERNAL docker-compose (R2 item I1).
 
     Either signal suffices: the stderr banner names a `docker-compose` binary, or stdout starts
-    with `Docker Compose version`. The banner can be switched off (`compose_warning_logs = false`
-    in containers.conf, or `PODMAN_COMPOSE_WARNING_LOGS=false`), but the stdout line stays
-    (measured 2026-10-06 with `PODMAN_COMPOSE_WARNING_LOGS=false podman compose version`).
+    with docker-compose's version line, in either spelling (review round R3, item R3-m5). The
+    banner can be switched off (`compose_warning_logs = false` in containers.conf, or
+    `PODMAN_COMPOSE_WARNING_LOGS=false`), but the stdout line stays (measured 2026-10-06 with
+    `PODMAN_COMPOSE_WARNING_LOGS=false podman compose version`).
     """
     banner = _BANNER.search(stderr)
     if banner is not None and os.path.basename(banner.group(1)).startswith("docker-compose"):
         return True
-    return stdout.lstrip().startswith("Docker Compose version")
+    return _DOCKER_COMPOSE_VERSION_LINE.match(stdout.lstrip()) is not None
 
 
 class Podman:
@@ -120,16 +125,23 @@ class Podman:
         engine = self.engine()
         return engine.socket if engine else None
 
+    def _standalone(self) -> Provider | None:
+        """The standalone `podman-compose`, when it is on the PATH and answers `version`."""
+        if self.which("podman-compose") is None:
+            return None
+        out = self.runner.run(["podman-compose", "version"], timeout=INFO_TIMEOUT)
+        if not out.ok:
+            return None
+        return Provider(("podman-compose",), "podman-compose", compose_version(out.stdout))
+
     def _no_provider_or_standalone(self, stderr: str) -> ProviderInfo:
         """`podman compose version` failed: no compose provider. Try the standalone
         `podman-compose`; when that is absent too, the fix is to install one (R2 item I2)."""
-        if self.which("podman-compose") is not None:
-            out = self.runner.run(["podman-compose", "version"], timeout=INFO_TIMEOUT)
-            if out.ok:
-                return ProviderInfo(Provider(("podman-compose",), "podman-compose",
-                                             compose_version(out.stdout)))
-        first = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        standalone = self._standalone()
+        if standalone is not None:
+            return ProviderInfo(standalone)
         problem = "podman compose found no compose provider"
+        first = first_line(stderr)
         if first:
             problem += f": {first}"
         return ProviderInfo(None, problem=problem,
@@ -138,14 +150,12 @@ class Podman:
     def _socket_problem(self, socket_path: str | None) -> ProviderInfo:
         """The wrapper is docker-compose and the API socket is dead: try the standalone
         `podman-compose`; when it is absent too, the fix starts the socket (M3)."""
-        if self.which("podman-compose") is not None:
-            out = self.runner.run(["podman-compose", "version"], timeout=INFO_TIMEOUT)
-            if out.ok:
-                return ProviderInfo(Provider(("podman-compose",), "podman-compose",
-                                             compose_version(out.stdout)),
-                                    note="podman compose runs docker-compose, which needs the "
-                                         "API socket; falling back to the standalone "
-                                         "podman-compose")
+        standalone = self._standalone()
+        if standalone is not None:
+            return ProviderInfo(standalone,
+                                note="podman compose runs docker-compose, which needs the "
+                                     "API socket; falling back to the standalone "
+                                     "podman-compose")
         problem = ("podman compose needs the API socket at " + str(socket_path)) \
             if socket_path else "podman compose needs the API socket"
         fix = ("systemctl --user enable --now podman.socket" if self.host_system == "linux"

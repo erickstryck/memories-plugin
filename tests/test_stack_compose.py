@@ -292,7 +292,7 @@ class TheRenderTest(unittest.TestCase):
         # docker-compose and garbled by podman-compose (measured 2026-10-06).
         with self.assertRaises(StackError) as ctx:
             render(fixture_plan("linux", "docker", "cpu",
-                                stack_dir=Path("/home/me/\U0001F4A4")))  # a face
+                                stack_dir=Path("/home/me/\U0001F4A4")))  # an emoji
         self.assertEqual("compose", ctx.exception.step)
         self.assertIn("QCTX_STACK_DIR", ctx.exception.fix)
         self.assertIn("emoji", ctx.exception.fix)

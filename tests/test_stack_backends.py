@@ -122,10 +122,14 @@ class VendorOfTest(unittest.TestCase):
         self.assertEqual("apple", vendor_of("Virtio-GPU Venus (Apple M2 Pro)"))
         self.assertEqual("apple", vendor_of("Venus (Apple M3)"))
         self.assertIsNone(vendor_of("llvmpipe (LLVM 19.1.7, 256 bits)"))
-        # The dzn device (Windows, phase 3) names itself `Microsoft Direct3D12
-        # (...)`; that prefix is not a phase-1 token, so a dzn name is unknown
-        # here (the spec's Windows row names the format; recognition is phase 3).
-        self.assertIsNone(vendor_of("Microsoft Direct3D12 (RTX 4090)"))
+        # The dzn device (Windows, phase 3) wraps the adapter's own name: Mesa's
+        # src/microsoft/vulkan/dzn_device.c at mesa-26.0.3, line 1071, names it
+        # "Microsoft Direct3D12 (%s)" with the adapter's description, and a WSL2
+        # container printed `deviceName = Microsoft Direct3D12 (NVIDIA GeForce GTX
+        # 1080)` (microsoft/wslg issue 1215, comment of 2026-02-20). The vendor's own
+        # token is inside, so the same tokens apply.
+        self.assertEqual("nvidia",
+                         vendor_of("Microsoft Direct3D12 (NVIDIA GeForce GTX 1080)"))
         # The tokens are matched case-sensitively, as llama.cpp prints them.
         self.assertIsNone(vendor_of("nvidia geforce rtx 4090"))
         self.assertIsNone(vendor_of("intel(R) graphics"))

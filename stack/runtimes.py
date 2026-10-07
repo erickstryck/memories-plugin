@@ -24,9 +24,8 @@ def discover(runner: Runner, which=shutil.which,
     engine may work (R2 item m1)."""
     which = as_which(which)
     found: list[ContainerRuntime] = []
-    for factory in (lambda: Docker(runner, which=which),
-                    lambda: Podman(runner, which=which, host_system=host_system)):
-        runtime = factory()
+    for runtime in (Docker(runner, which=which),
+                    Podman(runner, which=which, host_system=host_system)):
         try:
             engine = runtime.engine()
         except StackError:

@@ -1,15 +1,18 @@
-"""Docker and Podman behind one runtime contract: the engine, the compose provider, the stats.
+"""Docker and Podman behind one runtime contract: the engine, the compose provider, the stats,
+and the process groups of the runner.
 
-The real command outputs below were measured on this machine on 2026-10-06 (spec, "Detecção"):
-a `podman info --format json` reduced to the fields that are read, a `podman compose version`
-whose docker-compose banner lands in stderr, and a `docker info --format json`. What is pinned
-here is behaviour, not the bytes: an engine that reports a DIFFERENT but well-formed output
-still passes, and the M3 lie (`remoteSocket.exists: true` while the socket file is gone) is
-pinned by `socket_alive`, which is the only verdict the code trusts.
+Each fixture of tool output below says, beside it, how it was obtained: measured on this
+machine (the command and the date), read in the tool's source at a named tag, or labelled as an
+example (there is no Docker engine here, so the `docker info` of a live daemon is an example).
+What is pinned here is behaviour, not the bytes: an engine that reports a DIFFERENT but
+well-formed output still passes, and the M3 lie (`remoteSocket.exists: true` while the socket
+file is gone) is pinned by `socket_alive`, which is the only verdict the code trusts.
 """
 import json
 import os
+import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -32,6 +35,7 @@ from stack.runtimes import (  # noqa: E402
     parse_size,
     socket_alive,
 )
+from tests.isolation import hermetic_env  # noqa: E402
 from tests.stack_fakes import FakeRunner, FakeRuntime  # noqa: E402
 
 # -- measured on this machine, 2026-10-06 -----------------------------------
@@ -43,6 +47,7 @@ PODMAN_INFO = {
         "os": "linux",
         "arch": "amd64",
         "kernel": "7.0.0-34-generic",
+        "memTotal": 132484689920,  # measured again 2026-10-07, same command
         "security": {"rootless": True},
         "remoteSocket": {
             "path": "/run/user/1000/podman/podman.sock",
@@ -51,13 +56,31 @@ PODMAN_INFO = {
     },
 }
 
-#: The real `podman compose version` here: the banner announces the external
-#: docker-compose provider in stderr.
+#: The real `podman compose version` here (measured 2026-10-07, stdout and stderr each sent to
+#: a file): the banner announces the external docker-compose provider in stderr, underlined
+#: with ANSI escapes even when stderr is not a terminal.
 PODMAN_COMPOSE_VERSION = Completed(
-    0, "Docker Compose version v5.2.0",
-    '>>>> Executing external compose provider "/usr/local/bin/docker-compose". '
-    'Please see podman-compose(1) for how to disable this message. <<<<')
-PODMAN_COMPOSE_VERSION_FAILED = Completed(1, "", "no such command: podman compose")
+    0, "Docker Compose version v5.2.0\n",
+    '\x1b[4m>>>> Executing external compose provider "/usr/local/bin/docker-compose". '
+    'Please see podman-compose(1) for how to disable this message. <<<<\n\n\x1b[0m')
+#: `podman compose version` when podman finds no compose provider, measured 2026-10-07 with
+#: both providers hidden: `env PATH=/usr/bin:/bin podman compose version` exits 125. The one
+#: change is the HOME in the first path, which is the repo's placeholder.
+PODMAN_COMPOSE_VERSION_FAILED = Completed(125, "", (
+    "Error: looking up compose provider failed\n"
+    "7 errors occurred:\n"
+    "\t* exec: \"/home/me/.docker/cli-plugins/docker-compose\": stat "
+    "/home/me/.docker/cli-plugins/docker-compose: no such file or directory\n"
+    "\t* exec: \"/usr/local/lib/docker/cli-plugins/docker-compose\": stat "
+    "/usr/local/lib/docker/cli-plugins/docker-compose: no such file or directory\n"
+    "\t* exec: \"/usr/local/libexec/docker/cli-plugins/docker-compose\": stat "
+    "/usr/local/libexec/docker/cli-plugins/docker-compose: no such file or directory\n"
+    "\t* exec: \"/usr/lib/docker/cli-plugins/docker-compose\": stat "
+    "/usr/lib/docker/cli-plugins/docker-compose: no such file or directory\n"
+    "\t* exec: \"/usr/libexec/docker/cli-plugins/docker-compose\": stat "
+    "/usr/libexec/docker/cli-plugins/docker-compose: no such file or directory\n"
+    "\t* exec: \"docker-compose\": executable file not found in $PATH\n"
+    "\t* exec: \"podman-compose\": executable file not found in $PATH\n"))
 
 #: The real `podman-compose version` here (podman 5.7.0, podman-compose 1.6.0): the podman
 #: line comes FIRST, so the provider's version is the one on the line that names compose.
@@ -74,6 +97,7 @@ DOCKER_INFO = {
     "OperatingSystem": "Ubuntu 24.04.3 LTS",
     "KernelVersion": "6.8.0-45-generic",
     "Architecture": "x86_64",
+    "MemTotal": 33406828544,
     "SecurityOptions": ["name=seccomp,profile=default", "name=rootless"],
 }
 DOCKER_INFO_ROOTFUL = {**DOCKER_INFO, "SecurityOptions": ["name=seccomp,profile=default"]}
@@ -112,9 +136,16 @@ MACOS_RESPONSES = {
                              "PodmanPipe": None}}])),
     ("podman", "compose", "version"): PODMAN_COMPOSE_VERSION,
 }
-DOCKER_COMPOSE_VERSION = Completed(0, "Docker Compose version v2.35.0")
-DOCKER_COMPOSE_VERSION_FAILED = Completed(1, "", "docker: 'compose' is not a docker command.")
-DOCKER_COMPOSE_BINARY_VERSION = Completed(0, "docker-compose version 2.35.0")
+#: The plugin's `docker compose version`, an example with a version of its own: the plugin is
+#: the same program as the standalone binary, whose line is measured below.
+DOCKER_COMPOSE_VERSION = Completed(0, "Docker Compose version v2.35.0\n")
+#: `docker compose version` with no compose plugin, measured 2026-10-07 with the Docker CLI
+#: 27.5.1 and a HOME without cli-plugins: exit 1, two stderr lines.
+DOCKER_COMPOSE_VERSION_FAILED = Completed(
+    1, "", "docker: 'compose' is not a docker command.\nSee 'docker --help'\n")
+#: The standalone binary, measured 2026-10-07: `docker-compose version` prints the plugin's
+#: line, `Docker Compose version v5.2.0`, and nothing on stderr.
+DOCKER_COMPOSE_BINARY_VERSION = Completed(0, "Docker Compose version v5.2.0\n")
 
 #: The real `podman stats --no-stream --format json`: a JSON LIST of objects.
 PODMAN_STATS = json.dumps([
@@ -122,7 +153,15 @@ PODMAN_STATS = json.dumps([
     {"name": "memories-plugin-embed", "mem_usage": "2.0GiB / 132.5GB"},
 ])
 
-#: The Docker shape: one JSON object per line.
+#: `podman stats` of a container that does not exist, measured 2026-10-07 (podman 5.7.0):
+#:   podman stats --no-stream --format json qctx-r3-missing-ctr
+#: exits 125 with this ONE stderr line and nothing on stdout.
+PODMAN_STATS_NO_SUCH_CONTAINER = Completed(
+    125, "",
+    'Error: unable to get list of containers: unable to look up container qctx-r3-missing-ctr: '
+    'no container with name or ID "qctx-r3-missing-ctr" found: no such container\n')
+
+#: The Docker shape, an example (there is no Docker engine here): one JSON object per line.
 DOCKER_STATS = (
     '{"Name": "memories-plugin-qdrant", "MemUsage": "1.8GiB / 125GiB"}\n'
     '{"Name": "memories-plugin-embed", "MemUsage": "2.0GiB / 125GiB"}\n')
@@ -145,6 +184,70 @@ def _podman_provider(info, which, alive, compose_version, standalone=None):
         responses[("podman-compose", "version")] = standalone
     return Podman(FakeRunner(responses), which=which,
                   host_system="linux", socket_alive=alive)
+
+
+# -- real processes, for the process-group tests of the runner ----------------
+
+#: The shell (the command) starts `sleep 30` (its child: a provider's backend in real life),
+#: records the child's pid in "$1/pid" and waits on it. A background job of a non-interactive
+#: shell starts with SIGINT ignored, so the child outlives any SIGINT: only a SIGKILL to the
+#: group takes it.
+GRANDCHILD = 'sleep 30 & echo $! > "$1/pid"; wait'
+
+#: A command that stops cleanly on SIGINT: it traps it, leaves "$1/stopped" and exits.
+TRAPS_SIGINT = ("trap 'echo stopped > \"$1/stopped\"; exit 0' INT; echo $$ > \"$1/pid\"; "
+                "while :; do sleep 0.1; done")
+
+#: The driver a Ctrl-C test runs as a real process: argv is the repo, the script, the temp
+#: directory and the mode. It installs the SIGINT handler an interactive Python has, because
+#: a parent that is a non-interactive shell's background job hands SIGINT down as IGNORED,
+#: and then the signal never arrives and the test proves nothing (R3-1).
+CTRL_C_DRIVER = """
+import signal, sys
+sys.path.insert(0, sys.argv[1])
+signal.signal(signal.SIGINT, signal.default_int_handler)
+from stack.process import SubprocessRunner
+SubprocessRunner().run(["sh", "-c", sys.argv[2], "sh", sys.argv[3]],
+                       timeout=60.0, stream=sys.argv[4] == "stream")
+"""
+
+#: The grace the ruling gives a command between the forwarded SIGINT and the SIGKILL (R3-1).
+GRACE = 5.0
+
+
+def recorded_pid(pid_file: Path, timeout: float = 10.0) -> int | None:
+    """The pid a shell wrote, once its whole line is there; None if it never comes."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            text = pid_file.read_text()
+        except OSError:
+            text = ""
+        if text.endswith("\n"):
+            return int(text)
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.02)
+
+
+def gone_by(pid: int, deadline: float) -> bool:
+    """Whether `pid` no longer exists by `deadline`; signal 0 asks without signalling."""
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def kill_if_alive(pid: int) -> None:
+    """A failed run must not leave its command behind, as the RED run of R3-1 would."""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 class TestTheComposeContract(unittest.TestCase):
@@ -187,8 +290,18 @@ class TestTheEngine(unittest.TestCase):
     def test_podman_engine_is_none_when_the_binary_or_info_is_gone(self):
         missing = Podman(FakeRunner({}), which={}, host_system="linux")
         self.assertIsNone(missing.engine())
-        no_info = Podman(FakeRunner({("podman", "info", "--format", "json"):
-                                     Completed(1, "", "cannot connect")}),
+        # measured 2026-10-07, what a podman that talks to a dead socket prints (on a Mac
+        # the client always does): `podman --remote --url unix:///nonexistent.sock info
+        # --format json` exits 125, with the client part (not JSON) on stdout
+        dead = Completed(
+            125, "OS: linux/amd64\nbuildOrigin: Ubuntu\nprovider: qemu\nversion: 5.7.0\n\n",
+            "Cannot connect to Podman. Please verify your connection to the Linux system "
+            "using `podman system connection list`, or try `podman machine init` and "
+            "`podman machine start` to manage a new Linux VM\n"
+            "Error: unable to connect to Podman socket: Get "
+            "\"http://d/v5.7.0/libpod/_ping\": dial unix /nonexistent.sock: connect: no such "
+            "file or directory: unix:///nonexistent.sock\n")
+        no_info = Podman(FakeRunner({("podman", "info", "--format", "json"): dead}),
                          which={"podman": "/usr/bin/podman"}, host_system="linux")
         self.assertIsNone(no_info.engine())
 
@@ -238,9 +351,9 @@ class TestTheEngine(unittest.TestCase):
         self.assertEqual(engine.arch, "arm64")
 
     def test_on_macos_a_machine_that_does_not_answer_leaves_vm_and_socket_unknown(self):
+        # an invented failure: only the exit code of `podman machine info` is read
         responses = {**MACOS_RESPONSES,
-                     ("podman", "machine", "info", "--format", "json"):
-                         Completed(125, "", "Error: no machine")}
+                     ("podman", "machine", "info", "--format", "json"): Completed(125)}
         podman = Podman(FakeRunner(responses),
                         which={"podman": "/opt/podman/bin/podman"}, host_system="macos")
         engine = podman.engine()
@@ -328,18 +441,23 @@ class TestTheComposeProvider(unittest.TestCase):
         self.assertEqual(asked, [MACOS_HOST_SOCKET])
 
     def test_a_native_podman_compose_needs_no_socket(self):
-        # The banner names something that is not docker-compose: `podman compose` talks to
-        # the engine in-process, so a dead socket is no obstacle.
+        # The banner names podman-compose, which drives the `podman` CLI and needs no API
+        # socket, so a dead socket is no obstacle. Measured 2026-10-07 with docker-compose
+        # hidden and podman-compose on the PATH (its Homebrew prefix):
+        #   env PATH=/usr/bin:/bin:/home/linuxbrew/.linuxbrew/bin podman compose version
         runtime = _podman_provider(
             _info(False),
             which={"podman": "/usr/bin/podman"},
             alive=lambda path: False,
             compose_version=Completed(
-                0, "podman-compose version 1.6.0",
-                '>>>> Executing external compose provider "/usr/local/bin/podman-compose".'))
+                0, "podman version 5.7.0\npodman-compose version 1.6.0\n",
+                '\x1b[4m>>>> Executing external compose provider '
+                '"/home/linuxbrew/.linuxbrew/bin/podman-compose". Please see '
+                'podman-compose(1) for how to disable this message. <<<<\n\n\x1b[0m'))
         info = runtime.compose_provider()
 
         self.assertEqual(info.provider.argv, ("podman", "compose"))
+        self.assertEqual(info.provider.version, "1.6.0")  # the compose line, not podman's
 
     def test_when_the_wrapper_fails_the_standalone_binary_is_tried(self):
         runtime = _podman_provider(
@@ -371,7 +489,7 @@ class TestTheComposeProvider(unittest.TestCase):
                                "docker-compose": "/usr/local/bin/docker-compose"})
         info = binary.compose_provider()
         self.assertEqual(info.provider.argv, ("docker-compose",))
-        self.assertEqual(info.provider.version, "2.35.0")
+        self.assertEqual(info.provider.version, "v5.2.0")
 
         none = Docker(FakeRunner({("docker", "compose", "version"):
                                   DOCKER_COMPOSE_VERSION_FAILED}),
@@ -461,32 +579,112 @@ class TestTheSubprocessRunner(unittest.TestCase):
         # command. A plain timeout kills only the direct child and leaves the
         # backend alive. `start_new_session` makes the command a session leader
         # and the kill goes to the whole group, so the grandchild dies too.
-        pid_file = Path(tempfile.gettempdir()) / "qctx-r2-grandchild"
-        # the direct child is the shell; it spawns `sleep 30` (the grandchild)
-        # and records its pid, then waits. The command hangs on the `wait`.
-        script = f"sleep 30 & echo $! > {pid_file}; wait"
-        with self.assertRaises(StackError):
-            SubprocessRunner().run(["sh", "-c", script], timeout=1.0)
-        if not pid_file.exists():
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(StackError):
+                SubprocessRunner().run(["sh", "-c", GRANDCHILD, "sh", tmp], timeout=1.0)
+            grandchild = recorded_pid(Path(tmp) / "pid", timeout=0.0)
+        if grandchild is None:
             self.fail("the command was killed before it recorded the grandchild pid")
-        grandchild = int(pid_file.read_text().strip())
-        pid_file.unlink()
-        # poll: the grandchild must be reaped by the group kill, not linger
-        for _ in range(20):
+        # the grandchild must be reaped by the group kill, not linger
+        if not gone_by(grandchild, time.monotonic() + 2.0):
+            kill_if_alive(grandchild)
+            self.fail(f"grandchild {grandchild} survived the timeout kill")
+
+
+class TestACtrlC(unittest.TestCase):
+    """R3-1: a Ctrl-C reaches Python only, because the command runs in its own session. The
+    runner stops the command's whole group before the interrupt goes on: SIGINT to the
+    group, up to `GRACE` seconds, then SIGKILL. Each test runs a real driver process with
+    the default SIGINT handler and sends the SIGINT to the driver only, as a terminal sends
+    it to the foreground group the driver is in."""
+
+    def run_driver(self, tmp: str, script: str, mode: str) -> subprocess.Popen:
+        driver = subprocess.Popen(
+            [sys.executable, "-c", CTRL_C_DRIVER, str(REPO), script, tmp, mode],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=hermetic_env(tmp))
+        self.addCleanup(self.reap, driver)
+        return driver
+
+    @staticmethod
+    def reap(driver: subprocess.Popen) -> None:
+        if driver.poll() is None:
+            driver.kill()
+        driver.wait()
+
+    def recorded(self, tmp: str) -> int:
+        pid = recorded_pid(Path(tmp) / "pid")
+        if pid is None:
+            self.fail("the command never recorded a pid")
+        return pid
+
+    def assert_the_group_is_gone_after_a_ctrl_c(self, mode: str) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = self.run_driver(tmp, GRANDCHILD, mode)
+            grandchild = self.recorded(tmp)
+
+            os.kill(driver.pid, signal.SIGINT)
+            sent = time.monotonic()
+
+            if not gone_by(grandchild, sent + GRACE + 2.0):
+                kill_if_alive(grandchild)
+                self.fail(f"grandchild {grandchild} survived the Ctrl-C ({mode} mode)")
+            # the interrupt goes on once the group is stopped: the driver dies of it
+            driver.wait(timeout=10.0)
+            self.assertEqual(driver.returncode, -signal.SIGINT)
+
+    def test_a_ctrl_c_stops_the_whole_group_in_capture_mode(self):
+        self.assert_the_group_is_gone_after_a_ctrl_c("capture")
+
+    def test_a_ctrl_c_stops_the_whole_group_in_stream_mode(self):
+        self.assert_the_group_is_gone_after_a_ctrl_c("stream")
+
+    def test_the_command_gets_the_sigint_first_and_stops_on_its_own(self):
+        # What the terminal would have delivered reaches the command: one that traps
+        # SIGINT stops cleanly, long before the grace is up, with no SIGKILL needed.
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = self.run_driver(tmp, TRAPS_SIGINT, "capture")
+            command = self.recorded(tmp)
+
+            os.kill(driver.pid, signal.SIGINT)
+            sent = time.monotonic()
             try:
-                os.kill(grandchild, 0)  # signal 0: does the process exist?
-            except OSError:
-                return  # gone: the group kill reached it
-            time.sleep(0.1)
-        self.fail(f"grandchild {grandchild} survived the timeout kill")
+                driver.wait(timeout=GRACE + 2.0)
+            except subprocess.TimeoutExpired:
+                pass
+            stopped = (Path(tmp) / "stopped").exists()
+            if not gone_by(command, time.monotonic()):
+                kill_if_alive(command)
+            self.assertTrue(stopped, "the command never received the SIGINT")
+            self.assertLess(time.monotonic() - sent, GRACE)
+            self.assertEqual(driver.returncode, -signal.SIGINT)
+
+    def test_a_second_ctrl_c_cuts_the_grace_short(self):
+        # An impatient second Ctrl-C during the grace goes straight to the SIGKILL: the
+        # child that ignores SIGINT is gone well before the grace would have ended.
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = self.run_driver(tmp, GRANDCHILD, "capture")
+            grandchild = self.recorded(tmp)
+
+            os.kill(driver.pid, signal.SIGINT)
+            first = time.monotonic()
+            time.sleep(1.0)  # the runner is now inside the grace
+            os.kill(driver.pid, signal.SIGINT)
+
+            if not gone_by(grandchild, first + GRACE - 1.0):
+                kill_if_alive(grandchild)
+                self.fail(f"grandchild {grandchild} outlived the second Ctrl-C")
+            driver.wait(timeout=10.0)
+            self.assertEqual(driver.returncode, -signal.SIGINT)
 
 
 class TestDiscover(unittest.TestCase):
     def test_discover_skips_a_runtime_whose_engine_does_not_answer(self):
-        # docker: binary present, `docker info` does not answer -> skipped.
+        # docker: binary present, `docker info` does not answer (a CLI from 28.1, which
+        # exits 1 on a connection error) -> skipped.
         # podman: binary present, `podman info` answers -> kept.
         responses = {
-            ("docker", "info", "--format", DOCKER_JSON): Completed(1, "", "permission denied"),
+            ("docker", "info", "--format", DOCKER_JSON): DOCKER_INFO_DEAD_DAEMON_28_1,
             ("podman", "info", "--format", "json"): Completed(0, json.dumps(_info(True))),
         }
         runtimes_found = discover(FakeRunner(responses),
@@ -560,24 +758,37 @@ class TestTheFakes(unittest.TestCase):
 
 # -- measured for review round R2, 2026-10-06 ---------------------------------
 # The fields of `docker info --format '{{json .}}'` when the Docker CLI is present
-# but the DAEMON does not answer. Measured 2026-10-06 with the real Docker CLI
-# 27.5.1 (downloaded to the scratch dir) run against a missing socket:
+# but the DAEMON does not answer. Measured with the static Docker CLI 27.5.1 run
+# against a missing socket, on 2026-10-06 and again on 2026-10-07 (same bytes):
 #   DOCKER_HOST=unix:///nonexistent.sock docker info --format '{{json .}}'; echo rc=$?
 # The CLI EXITS 0 and prints the client part with zero-valued server fields and
 # "SecurityOptions": null (R2 items C1 and I3): iterating SecurityOptions then
 # raises TypeError, and discover crashes although Podman works. The guard is
 # therefore the JSON (a non-empty ServerVersion and no ServerErrors), not the
-# exit code. Trimmed here to the keys `engine()` reads, with ServerErrors.
+# exit code. The values are the measured ones, in the order printed, trimmed to the
+# keys `engine()` reads plus ServerErrors and SecurityOptions.
 DOCKER_INFO_DEAD_DAEMON = {
-    "ServerVersion": "",
+    "KernelVersion": "",
     "OSType": "",
     "Architecture": "",
-    "KernelVersion": "",
-    "SecurityOptions": None,
-    "ServerErrors": ["Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
-                     "Is the docker daemon running?"],
     "MemTotal": 0,
+    "ServerVersion": "",
+    "SecurityOptions": None,
+    "ServerErrors": ["Cannot connect to the Docker daemon at unix:///nonexistent.sock. "
+                     "Is the docker daemon running?"],
 }
+#: The same dead daemon under a Docker CLI from 28.1, which EXITS 1 instead. Read in
+#: docker/cli v28.1.0: cli/command/system/info.go (`addServerInfo` returns a connection
+#: error instead of appending it to ServerErrors, a field tagged `json:",omitempty"`, and
+#: `runInfo` still prints the format of the zero-valued `system.Info`) and cmd/docker/
+#: docker.go (prints the error on stderr, exits 1). The stderr line is moby v28.1.0
+#: client/errors.go `connectionFailed`, at the default host of client/client_unix.go.
+DOCKER_INFO_DEAD_DAEMON_28_1 = Completed(
+    1,
+    json.dumps({"KernelVersion": "", "OSType": "", "Architecture": "", "MemTotal": 0,
+                "ServerVersion": "", "SecurityOptions": None}),
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+    "Is the docker daemon running?\n")
 #: A `docker` that is the podman-docker shim (`docker` = a script doing
 #: `exec podman "$@"`, podman v5.7.0 docker/docker.in): `docker info` prints
 #: PODMAN's info, which has no ServerVersion, so the engine() guard must reject
@@ -645,19 +856,19 @@ class TestReviewRoundR2(unittest.TestCase):
         docker = Docker(FakeRunner({("docker", "info", "--format", DOCKER_JSON):
                                     Completed(0, json.dumps(DOCKER_INFO))}),
                         which={"docker": "/usr/bin/docker"})
-        self.assertIsNone(docker.engine().memory_bytes)  # DOCKER_INFO has no MemTotal
+        self.assertEqual(docker.engine().memory_bytes, 33406828544)
 
         podman = _podman_provider(_info(True), which={"podman": "/usr/bin/podman"},
                                   alive=lambda path: True,
                                   compose_version=PODMAN_COMPOSE_VERSION)
-        # PODMAN_INFO has no memTotal: the field is None, not a guess
-        self.assertIsNone(podman.engine().memory_bytes)
-        with_mem = json.loads(json.dumps(PODMAN_INFO))
-        with_mem["host"]["memTotal"] = 2147483648
-        podman2 = _podman_provider(with_mem, which={"podman": "/usr/bin/podman"},
+        self.assertEqual(podman.engine().memory_bytes, 132484689920)  # measured here
+        # an engine that publishes no figure: None, not a guess
+        without = _info(True)
+        without["host"].pop("memTotal", None)
+        podman2 = _podman_provider(without, which={"podman": "/usr/bin/podman"},
                                    alive=lambda path: True,
                                    compose_version=PODMAN_COMPOSE_VERSION)
-        self.assertEqual(podman2.engine().memory_bytes, 2147483648)
+        self.assertIsNone(podman2.engine().memory_bytes)
 
     # ---- I1: docker-compose is recognised by the banner OR the stdout ----
     def test_banner_off_still_detects_docker_compose_and_needs_the_socket(self):
@@ -668,6 +879,21 @@ class TestReviewRoundR2(unittest.TestCase):
             which={"podman": "/usr/bin/podman"},  # no podman-compose on PATH
             alive=lambda path: False,
             compose_version=Completed(0, "Docker Compose version v5.2.0", ""))
+        info = runtime.compose_provider()
+        self.assertIsNone(info.provider)
+        self.assertEqual(info.fix, "systemctl --user enable --now podman.socket")
+
+    def test_banner_off_with_a_v1_docker_compose_needs_the_socket_too(self):
+        # R3-m5: a v1 docker-compose is a wrapper that needs the API socket as well, and
+        # its stdout spells itself `docker-compose version` (docker/compose 1.29.2,
+        # compose/cli/utils.py `get_version_info`: 'docker-compose version {}, build {}';
+        # the build is the short sha of the tag's commit, 5becea4ca9f6).
+        runtime = _podman_provider(
+            _info(False),
+            which={"podman": "/usr/bin/podman"},  # no podman-compose on PATH
+            alive=lambda path: False,
+            compose_version=Completed(0, "docker-compose version 1.29.2, build 5becea4c\n",
+                                      ""))
         info = runtime.compose_provider()
         self.assertIsNone(info.provider)
         self.assertEqual(info.fix, "systemctl --user enable --now podman.socket")
@@ -684,24 +910,17 @@ class TestReviewRoundR2(unittest.TestCase):
 
     # ---- I2: a failing `podman compose version` means no provider ----
     def test_a_failed_version_is_a_missing_provider_not_the_socket(self):
-        # the real stderr, measured 2026-10-06 with both providers hidden on
-        # PATH (env PATH=/usr/bin:/bin podman compose version; rc=125). The
+        # the real answer with both providers hidden (PODMAN_COMPOSE_VERSION_FAILED). The
         # socket is NOT the cause: `version` never touches it.
-        real_stderr = ("Error: looking up compose provider failed\n"
-                       "7 errors occurred:\n"
-                       "\t* exec: \"/home/me/.docker/cli-plugins/docker-compose\": "
-                       "stat /home/me/.docker/cli-plugins/docker-compose: no such file "
-                       "or directory\n"
-                       "\t* exec: \"docker-compose\": executable file not found in $PATH\n"
-                       "\t* exec: \"podman-compose\": executable file not found in $PATH")
         runtime = _podman_provider(
             _info(True),  # a LIVE socket: the old code blamed the socket anyway
             which={"podman": "/usr/bin/podman"},  # no podman-compose on PATH
             alive=lambda path: True,
-            compose_version=Completed(125, "", real_stderr))
+            compose_version=PODMAN_COMPOSE_VERSION_FAILED)
         info = runtime.compose_provider()
         self.assertIsNone(info.provider)
-        self.assertIn("looking up compose provider failed", info.problem)
+        self.assertEqual(info.problem, "podman compose found no compose provider: "
+                                       "Error: looking up compose provider failed")
         self.assertEqual(info.fix, "install podman-compose (or docker-compose)")
 
     def test_a_failed_version_falls_back_to_podman_compose(self):
@@ -710,7 +929,7 @@ class TestReviewRoundR2(unittest.TestCase):
             which={"podman": "/usr/bin/podman",
                    "podman-compose": "/usr/bin/podman-compose"},
             alive=lambda path: True,
-            compose_version=Completed(125, "", "Error: looking up compose provider failed"),
+            compose_version=PODMAN_COMPOSE_VERSION_FAILED,
             standalone=PODMAN_COMPOSE_VERSION_STANDALONE)
         info = runtime.compose_provider()
         self.assertEqual(info.provider.argv, ("podman-compose",))
@@ -718,27 +937,30 @@ class TestReviewRoundR2(unittest.TestCase):
 
     # ---- m5: a failed stats carries the tool's own first stderr line ----
     def test_a_failed_stats_carries_the_tools_first_stderr_line(self):
-        # measured: podman stats on a missing container exits 125 and names it
         podman = Podman(FakeRunner({("podman", "stats", "--no-stream", "--format", "json"):
-                                    Completed(125, "", "time=\"now\" level=warning msg=\"no "
-                                                       "such container\"\nError: no such "
-                                                       "container: gone")}),
+                                    PODMAN_STATS_NO_SUCH_CONTAINER}),
                         which={"podman": "/usr/bin/podman"})
         with self.assertRaises(StackError) as ctx:
-            podman.stats(["gone"])
+            podman.stats(["qctx-r3-missing-ctr"])
         self.assertEqual(ctx.exception.step, "runtime")
-        self.assertIn("podman stats failed", str(ctx.exception))
-        self.assertIn("no such container", str(ctx.exception))
+        self.assertEqual(str(ctx.exception), "runtime: podman stats failed: "
+                         + PODMAN_STATS_NO_SUCH_CONTAINER.stderr.strip())
 
     def test_a_failed_docker_stats_is_a_stack_error_not_a_traceback(self):
+        # measured 2026-10-07 with the Docker CLI 27.5.1 against a missing socket:
+        #   DOCKER_HOST=unix:///nonexistent.sock docker stats --no-stream \
+        #     --format '{{json .}}' memories-plugin-qdrant
+        # exits 1 with this one stderr line
+        dead = Completed(1, "", "Cannot connect to the Docker daemon at "
+                                "unix:///nonexistent.sock. Is the docker daemon running?\n")
         docker = Docker(FakeRunner({("docker", "stats", "--no-stream", "--format",
-                                     DOCKER_JSON): Completed(1, "", "Cannot connect to "
-                                                                    "the Docker daemon")}),
+                                     DOCKER_JSON): dead}),
                         which={"docker": "/usr/bin/docker"})
         with self.assertRaises(StackError) as ctx:
-            docker.stats(["gone"])
+            docker.stats(["memories-plugin-qdrant"])
         self.assertEqual(ctx.exception.step, "runtime")
-        self.assertIn("docker stats failed", str(ctx.exception))
+        self.assertEqual(str(ctx.exception),
+                         "runtime: docker stats failed: " + dead.stderr.strip())
 
     # ---- m7: the compose version token strips a trailing comma ----
     def test_the_compose_version_strips_a_trailing_comma(self):

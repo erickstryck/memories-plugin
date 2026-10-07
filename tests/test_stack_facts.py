@@ -14,6 +14,8 @@ with `cat /sys/bus/pci/devices/*/class /sys/bus/pci/devices/*/vendor`: two Intel
 one AMD (amdgpu), an ASPEED BMC that must be ignored, and the class-`0x04` audio
 functions that share a GPU's card number, which must not be mistaken for GPUs.
 """
+import platform
+import shutil
 import socket
 import sys
 import tempfile
@@ -24,6 +26,7 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from stack import StackError  # noqa: E402
 from stack import runtimes  # noqa: E402
 from stack.facts import (  # noqa: E402
     Gpu,
@@ -38,6 +41,26 @@ from stack.facts import (  # noqa: E402
 )
 from stack.runtimes import normalize_arch  # noqa: E402
 from tests.stack_fakes import FakeRunner  # noqa: E402
+
+#: A CDI spec in the shape `nvidia-ctk cdi generate` writes, trimmed: the expected spec of
+#: nvidia-container-toolkit's own test, cmd/nvidia-ctk/cdi/generate/generate_test.go at tag
+#: v1.18.0 (from line 68). That test passes `example.com` and `device` as vendor and class;
+#: the kind here is the one the command writes by default, `nvidia.com/gpu`, from the
+#: defaults of its `--vendor` and `--class` flags, "nvidia.com" and "gpu", in
+#: cmd/nvidia-ctk/cdi/generate/generate.go at v1.18.0 (lines 187 and 195).
+NVIDIA_CDI_SPEC = """\
+---
+cdiVersion: 0.5.0
+kind: nvidia.com/gpu
+devices:
+    - name: "0"
+      containerEdits:
+        deviceNodes:
+            - path: /dev/nvidia0
+containerEdits:
+    deviceNodes:
+        - path: /dev/nvidiactl
+"""
 
 
 def make_pci(root: Path, addr: str, vendor: str, cls: str) -> None:
@@ -221,9 +244,9 @@ class TestTheOsFacts(unittest.TestCase):
         def refusing(path):
             raise OSError("no filesystem")
 
-        facts = collect(linux_probe(Path(tempfile.mkdtemp()),
-                                    disk_usage=refusing),
-                        Path("/nonexistent/a/stack"))
+        with tempfile.TemporaryDirectory() as raw:
+            facts = collect(linux_probe(Path(raw), disk_usage=refusing),
+                            Path("/nonexistent/a/stack"))
         self.assertIsNone(facts.disk_free_bytes)
 
     def test_selinux_enforcing_is_read(self):
@@ -258,13 +281,7 @@ class TestNvidiaReadiness(unittest.TestCase):
             (root / "usr" / "share" / "vulkan" / "icd.d" / "nvidia_icd.json").write_text(
                 '{"file_format_version": "1.0.0"}\n')
             (root / "etc" / "cdi").mkdir(parents=True)
-            (root / "etc" / "cdi" / "gpu.nvidia.yaml").write_text(
-                # the device class an nvidia CDI spec is generated with; the code
-                # looks for the `nvidia.com/gpu` marker in it (m7: `kind: RuntimeClass`
-                # was an invention, this is the real nvidia-ctk output)
-                "kind: nvidia.com/gpu\n"
-                "metadata:\n  name: gpu0\n"
-                "containers:\n  - type: cdiv1\n")
+            (root / "etc" / "cdi" / "nvidia.yaml").write_text(NVIDIA_CDI_SPEC)
 
             def fake_which(name):
                 if name in ("nvidia-container-runtime-hook", "nvidia-cdi-hook",
@@ -302,8 +319,7 @@ class TestNvidiaReadiness(unittest.TestCase):
             (root / "etc" / "vulkan" / "icd.d" / "nvidia_icd.json").write_text(
                 '{"file_format_version": "1.0.0"}\n')
             (root / "var" / "run" / "cdi").mkdir(parents=True)
-            (root / "var" / "run" / "cdi" / "nvidia.yaml").write_text(
-                "containers:\n  - name: nvidia.com/gpu\n")
+            (root / "var" / "run" / "cdi" / "nvidia.yaml").write_text(NVIDIA_CDI_SPEC)
 
             probe = linux_probe(root, runner=FakeRunner({
                 ("nvidia-smi", "-L"): runtimes.Completed(0, "")}))
@@ -317,6 +333,23 @@ class TestNvidiaReadiness(unittest.TestCase):
         self.assertFalse(facts.nvidia.cdi_hook)
         self.assertFalse(facts.nvidia.ctk)
 
+    def test_a_cdi_file_that_is_not_utf8_is_read_as_bytes(self):
+        """R2 item m9 had no test: a file in `/etc/cdi` that is not UTF-8 used to crash
+        the spec search. Alone it is no spec, and it does not hide the real one."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            make_pci(root, "0000:65:00.0", "0x10de", "0x030000")  # NVIDIA
+            cdi = root / "etc" / "cdi"
+            cdi.mkdir(parents=True)
+            (cdi / "broken.yaml").write_bytes(b"kind: \xff\xfe\xc3\x28\n")
+            probe = linux_probe(root, runner=FakeRunner({
+                ("nvidia-smi", "-L"): runtimes.Completed(0, "")}))
+
+            self.assertFalse(collect(probe, root / "stack").nvidia.cdi_spec)
+
+            (cdi / "nvidia.yaml").write_text(NVIDIA_CDI_SPEC)
+            self.assertTrue(collect(probe, root / "stack").nvidia.cdi_spec)
+
     def test_without_a_nvidia_card_the_facts_stay_the_empty_default(self):
         """No nvidia in the tree: no nvidia-smi call, no file reads, the default stands."""
         with tempfile.TemporaryDirectory() as raw:
@@ -329,6 +362,32 @@ class TestNvidiaReadiness(unittest.TestCase):
 
         self.assertEqual(facts.nvidia, NvidiaFacts())
         self.assertEqual(runner.calls, [])
+
+    def test_a_hung_or_failing_nvidia_smi_lists_no_gpu(self):
+        """R3-6: a broken driver can hang `nvidia-smi`, and the real runner then raises
+        `StackError` after its timeout. That is a driver that lists no GPU (`gpus=()`,
+        which the nvidia profile reads as MISSING "install the NVIDIA driver"), not the
+        end of host detection: the CPU must stay on offer. The file facts still read."""
+        class HangingRunner:
+            def run(self, argv, *, timeout, stream=False):
+                raise StackError(f"timed out after {timeout}s: {' '.join(argv)}",
+                                 step="runtime")
+
+        failing = FakeRunner({("nvidia-smi", "-L"):  # any non-zero exit; only `ok` is read
+                              runtimes.Completed(1)})
+        for name, runner in (("hung", HangingRunner()), ("failing", failing)):
+            with self.subTest(runner=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                make_pci(root, "0000:65:00.0", "0x10de", "0x030000")  # NVIDIA
+                (root / "usr" / "share" / "vulkan" / "icd.d").mkdir(parents=True)
+                (root / "usr" / "share" / "vulkan" / "icd.d" / "nvidia_icd.json").write_text(
+                    '{"file_format_version": "1.0.0"}\n')
+
+                facts = collect(linux_probe(root, runner=runner), root / "stack")
+
+                self.assertEqual(facts.gpus, (Gpu(vendor="nvidia", card="0000:65:00.0"),))
+                self.assertEqual(facts.nvidia.gpus, ())
+                self.assertTrue(facts.nvidia.icd)
 
 
 class TestNormalizeAndPlatformOf(unittest.TestCase):
@@ -355,12 +414,15 @@ class TestNormalizeAndPlatformOf(unittest.TestCase):
     def test_the_default_probe_points_at_the_real_root_and_runner(self):
         # R2 item I5: a production `Probe()` must run `nvidia-smi`, so `runner`
         # defaults to a real `SubprocessRunner`, not `None` (tests inject a fake).
-        self.assertEqual(Probe().root, Path("/"))
-        self.assertEqual(Probe().system(), "Linux")
-        self.assertIsNotNone(Probe().which("sh"))
-        self.assertIsInstance(Probe().runner, runtimes.SubprocessRunner)
-        # R2 item m8: the disk measurement is injected, defaulting to `shutil.disk_usage`.
-        self.assertIsNotNone(Probe().disk_usage)
+        # The defaults are compared by identity and none is called, so the answer does
+        # not depend on the machine the suite runs on (review round R3, item R3-4).
+        probe = Probe()
+        self.assertEqual(probe.root, Path("/"))
+        self.assertIs(probe.system, platform.system)
+        self.assertIs(probe.machine, platform.machine)
+        self.assertIs(probe.which, shutil.which)
+        self.assertIs(probe.disk_usage, shutil.disk_usage)
+        self.assertIsInstance(probe.runner, runtimes.SubprocessRunner)
 
 
 class TestPortFree(unittest.TestCase):

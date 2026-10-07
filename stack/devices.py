@@ -55,8 +55,8 @@ def vendor_of(name: str) -> str | None:
     """The vendor of a device name, by the tokens the native drivers print, matched
     case-sensitively: a name is the driver's, not a free text. `llvmpipe` is a
     CPU, and a name no profile knows belongs to no profile. The dzn device (Windows,
-    phase 3) names itself `Microsoft Direct3D12 (...)`, and that prefix is not a
-    phase-1 token, so a dzn name is unknown here: dzn recognition arrives in phase 3."""
+    phase 3) wraps the adapter's own name, `Microsoft Direct3D12 (<adapter>)` (Mesa
+    `dzn_device.c`), so the same tokens apply to it."""
     if "NVIDIA" in name:
         return "nvidia"
     if "AMD" in name or "RADV" in name:

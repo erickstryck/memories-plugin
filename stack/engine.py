@@ -120,10 +120,15 @@ def parse_size(text: str) -> int | None:
     return int(float(value) * factor)
 
 
+def first_line(text: str) -> str:
+    """The first line of a tool's output that is not blank, stripped; "" when there is none."""
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
 def stats_failed(tool: str, out: Completed) -> StackError:
     """A failed `stats`: the tool's own first stderr line is the message (R2 item m5)."""
-    first = next((line.strip() for line in out.stderr.splitlines() if line.strip()), "")
     message = f"{tool} stats failed"
+    first = first_line(out.stderr)
     if first:
         message += f": {first}"
     return StackError(message, step="runtime")
