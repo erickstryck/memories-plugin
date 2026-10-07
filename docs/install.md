@@ -208,3 +208,89 @@ There is no `pip install`: the core uses only the standard library. That is
 deliberate. This code runs inside hooks fired on every interaction, and a missing
 dependency would turn an environment failure into a silent loss of functionality.
 
+## The local stack
+
+The other way to reach the three endpoints: let the wizard stand up the
+infrastructure itself. With Docker or Podman already installed, run:
+
+```bash
+qctx install --stack auto
+```
+
+and the wizard does the whole local setup in one pass: it detects the runtimes
+that answer, proves which GPU profile (if any) the host serves, pulls the two
+images, downloads the two models, renders the compose file, brings the three
+containers up, verifies that the endpoints answer and that the calibration is
+within budget, and then points the configuration at the stack it just built.
+`auto` picks the best profile the host serves; the other choices are `cpu`,
+`amd`, `intel`, `nvidia` and `apple`, and `--runtime docker` or `--runtime
+podman` decides when both runtimes answer.
+
+**What it costs, measured.** The download is the llama.cpp server image, 294 MiB
+for the amd64 build and 290 MiB for the arm64 build, the Qdrant image, about
+71 MiB, and the two models, 836 MiB together (bge-m3 at 437,778,496 bytes and
+bge-reranker-v2-m3 at 438,376,864 bytes, both Q4_K_M). The two llama-servers
+measure about 1.8 GB of resident memory for the embed server and about 2.8 GB
+for the rerank server on the cpu, and about 200 MB per container on a GPU. The
+disk gate keeps 400 MiB of headroom beyond the models, because the Qdrant
+volume grows in it.
+
+**The ports.** Everything publishes on 127.0.0.1 only, so nothing leaves the
+machine: Qdrant on 6333, the embed server on 8003, the rerank server on 8004.
+A port that is already busy moves to the first free one at `port + 10000`, and
+the move is reported.
+
+**Where the data lives.** One directory holds the state, the compose file and
+the models: `$QCTX_STACK_DIR` when set, otherwise
+`${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`, and inside it
+`stack.json`, `compose.yaml` and `models/`. Qdrant's own data lives in a named
+volume the engine prefixes with the project:
+`memories-plugin_memories-plugin-qdrant` by default. `qctx stack down` stops
+the containers and keeps both; `qctx stack remove` deletes the files, and only
+deletes the models (`--purge-models`) and the volume (`--purge-data`) when
+asked.
+
+**After a reboot.** The containers carry `restart: always`, and how that
+survives depends on the runtime. On Docker the daemon has to start at boot, and
+that brings the containers back with it. On Podman on Linux, enable
+`podman-restart.service` for the session and linger, with
+`systemctl --user enable --now podman-restart.service` and
+`loginctl enable-linger $USER`. On the other Podman case (macOS), `podman
+machine start` brings the VM back and the containers come back with it.
+
+**Where each option runs.** The profiles and their runtimes, one row per
+platform:
+
+| platform | option | Docker | Podman | label | still needs |
+|---|---|---|---|---|---|
+| linux | cpu | yes | yes | Docker and Podman | nothing |
+| linux | amd | yes | yes | Docker and Podman | a DRI render node for that vendor |
+| linux | intel | yes | yes | Docker and Podman | a DRI render node for that vendor |
+| linux | nvidia | yes | yes | Docker and Podman | an NVIDIA driver that lists the card, plus the CDI spec |
+| linux | apple | - | - | not available here | not in phase 1 |
+| macos | cpu | yes | yes | Docker and Podman | nothing |
+| macos | amd | - | - | not available here | not in phase 1 |
+| macos | intel | - | - | not available here | not in phase 1 |
+| macos | nvidia | - | - | not available here | not in phase 1 |
+| macos | apple | - | yes | Podman only | an Apple GPU |
+
+The "still needs" column is the hardware prerequisite in plain words: the
+driver and node the container has to reach, or nothing for the cpu profile,
+which runs everywhere. The rows marked "not available here" are where the
+phase-1 matrix is the spec: the Apple profile is experimental and macOS-only,
+and the DRI and NVIDIA profiles are Linux-only, so a profile that does not run
+on a platform is simply not offered there, not offered and then refused.
+
+**Windows.** The local stack is not offered on Windows (WSL included) in phase
+1; it arrives in phase 3. Until then the step says so in one line and points at
+the manual path in [Local models, step by step](../README.md#local-models).
+
+**The environment trap.** The configuration resolves as environment variable,
+then file, then default, so a variable already exported in the shell wins over
+what the wizard just wrote to the file. The stack points the configuration at
+its own URLs, but a `QCTX_QDRANT_URL` or a legacy `QDRANT_URL` (and the same
+for the embedding, rerank and collection names) that still points elsewhere
+keeps winning every time the shell reasserts itself. The installer names each
+one of these, with its value, and tells you to remove its export from your
+shell rc; it never edits the rc for you, because the rc is yours.
+

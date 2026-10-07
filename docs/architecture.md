@@ -296,8 +296,16 @@ hosts/
   hermes/       the hermes-agent adapter: the provider object, its 22 tools, and skill registration
 skills/     memory, doc-index, repo-index
 scripts/    install.sh (the wizard), cutover.sh (claude-code), hermes_cutover.sh (hermes-agent)
+stack/      the local stack: the two images, the two models, and the three containers on this machine
 tests/      offline tests + integration tests
 ```
+
+`stack/` is one-way: `cli/` reaches into it (the `qctx stack` group and the `qctx install`
+step), and it reaches into `core/` and the standard library, never back the other way
+(`core/`, `hooks/` and `hosts/` never import `stack`). The module is stdlib-only at import
+time: the heavy modules (the installer, the lifecycle, the runtimes, the subprocess runner)
+are lazy-imported inside the functions that use them, so the parser build on every assistant
+message never loads them.
 
 ## Design
 

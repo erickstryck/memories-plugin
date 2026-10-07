@@ -32,6 +32,11 @@ DOCS = {
 }
 ALL_DOCS = README + "\n" + "\n".join(DOCS.values())
 
+# This is a test, not the parser path, so it may import the heavy `stack` modules
+# the parser must never load. `backends` is the single owner of WHERE a profile runs,
+# so the docs' compatibility table is checked against it, not against a copy of it.
+from stack import backends
+
 
 def load_cli():
     """Imports cli/qctx.py as a module. It is a script, not a package member, the same
@@ -273,6 +278,92 @@ class TheLocalStackStaysTrue(unittest.TestCase):
             self.assertIn(url, self.section("## Local models"))
         self.assertIn("ghcr.io/ggml-org/llama.cpp:server",
                       self.section("## Local models"))
+
+
+class TheCompatibilityTableIsTrue(unittest.TestCase):
+    """`docs/install.md` has a table of WHERE each option runs, one row per
+    platform and backend, and that table is checked against the code.
+
+    `stack.backends` is the single owner of the answer: `runtimes(platform)`
+    says which runtimes a profile runs on, and `runtime_label` is the menu's
+    words for that set. The table is the spec's "Compatibilidade", so a cell
+    that disagrees with the code is a wrong table, and this test is the one
+    that keeps it honest the day a profile changes the runtimes it serves.
+    The two directions are both covered: every Linux and macOS row the doc
+    states is checked against the code, and every backend in `BACKENDS` has a
+    row, so a profile added to the code cannot quietly miss the doc.
+
+    The table's header is a stable marker the test locates, and its cells are
+    read as-is: `yes`/`-` in the Docker and Podman columns, and the label the
+    menu prints verbatim in the last pinned column. The "still needs" prose is
+    not pinned: it is the hardware prerequisite in plain words, and the test
+    would only rot it.
+    """
+
+    TABLE_HEADER = "| platform | option | Docker | Podman | label | still needs |"
+    TABLE_SECTION = "## The local stack"
+
+    def _section_body(self):
+        text = DOCS["install"]
+        start = text.find(self.TABLE_SECTION)
+        self.assertNotEqual(start, -1,
+                            f"docs/install.md no longer has a {self.TABLE_SECTION!r} section")
+        # The table lives in that section, up to the next `## ` heading.
+        rest = text[start + len(self.TABLE_SECTION):]
+        nxt = rest.find("\n## ")
+        return rest[:nxt] if nxt != -1 else rest
+
+    def _rows(self):
+        """The table's rows as a list of 6-tuples (platform, option, docker,
+        podman, label, still_needs). The header and the separator row are
+        skipped; every other `|` row must be a data row."""
+        body = self._section_body()
+        lines = body.splitlines()
+        try:
+            header_i = next(i for i, line in enumerate(lines)
+                            if line.strip() == self.TABLE_HEADER)
+        except StopIteration:
+            self.fail("the compatibility table's header line is missing or moved: "
+                      + repr(self.TABLE_HEADER))
+        rows = []
+        for line in lines[header_i + 1:]:
+            stripped = line.strip()
+            if not stripped.startswith("|"):
+                continue
+            if set(stripped) <= {"|", "-", " ", ":"}:
+                continue  # the separator row
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if len(cells) != 6:
+                self.fail(f"table row is not 6 cells: {line!r}")
+            rows.append(tuple(cells))
+        self.assertTrue(rows, "the compatibility table has no rows")
+        return rows
+
+    def test_install_doc_table_matches_runtimes(self):
+        for platform, option, docker, podman, label, _needs in self._rows():
+            if platform not in ("linux", "macos"):
+                continue  # a phase-3 platform row is prose, not pinned here
+            runtimes = backends.BACKENDS[option].runtimes(platform)
+            want_docker = "yes" if "docker" in runtimes else "-"
+            want_podman = "yes" if "podman" in runtimes else "-"
+            want_label = backends.runtime_label(runtimes)
+            self.assertEqual(docker, want_docker,
+                             f"{platform}/{option}: Docker cell says {docker!r}, "
+                             f"the code says {want_docker!r}")
+            self.assertEqual(podman, want_podman,
+                             f"{platform}/{option}: Podman cell says {podman!r}, "
+                             f"the code says {want_podman!r}")
+            self.assertEqual(label, want_label,
+                             f"{platform}/{option}: label says {label!r}, "
+                             f"the code says {want_label!r}")
+
+    def test_every_backend_has_a_row(self):
+        rows = self._rows()
+        for platform in ("linux", "macos"):
+            for option in backends.BACKENDS:
+                self.assertIn((platform, option),
+                              {(r[0], r[1]) for r in rows},
+                              f"the table has no {platform}/{option} row")
 
 
 if __name__ == "__main__":

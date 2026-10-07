@@ -45,6 +45,11 @@ Three pieces, in order, on every OS:
 The wizard is the same on every OS: it is `bash` plus `python3`, nothing OS-specific.
 On Windows you run it under WSL or git-bash.
 
+With Docker or Podman already installed, the wizard stands the infrastructure up
+itself: `qctx install --stack auto` pulls the images, downloads the two models and
+brings the three containers up, then points the configuration at them. [The manual
+path](#local-models) below is the same setup done by hand.
+
 **Linux**
 
 ```bash
@@ -233,6 +238,20 @@ config file, which refuses them.
 
 The wizard writes the same settings, then re-checks the whole stack, including the path a
 process with no shell would read.
+
+### Or let the wizard do it
+
+Steps 1 to 4, in one command, with Docker or Podman already installed:
+
+```bash
+qctx install --stack auto
+```
+
+It picks the best profile the host serves, pulls the two images and downloads the
+two models, brings the three containers up, and writes the configuration that
+points the plugin at them. The manual path above is the same setup done by hand.
+The full picture, the measured cost and the compatibility table, are in
+[install.md, the local stack](docs/install.md#the-local-stack).
 
 ### Or use models in the cloud
 

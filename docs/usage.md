@@ -7,9 +7,10 @@ that tell you what is still missing. The [README](../README.md) covers installat
 
 ## Every command, at a glance
 
-Four groups. `memory` is curated facts, `docs` is documents you point at, `repos` is whole
-repositories, and the rest is configuration. Everything below exists on **both hosts**:
-the CLI name is on the left, the hermes tool name on the right.
+Four groups became five with the local stack. `memory` is curated facts, `docs` is documents
+you point at, `repos` is whole repositories, `stack` is the three endpoints running in
+containers on this machine, and the rest is configuration. Everything below exists on
+**both hosts**: the CLI name is on the left, the hermes tool name on the right.
 
 ### Memory: facts worth keeping
 
@@ -98,6 +99,31 @@ qctx repos quarantine clear my-project /path/to/one.json  # or just these
 It answers with how many it released, and `nothing held for 'my-project'` when there was nothing
 to do, so a mistyped name does not read as success. Releasing is not an exemption: the next
 attempt decides afresh, and a file that still cannot be indexed is simply held again.
+
+### The local stack
+
+The endpoints running in containers on this machine are a group of their own, stood up by
+`qctx install` and managed by `qctx stack`.
+
+| command | what it does |
+|---|---|
+| `qctx stack status` | the managed stack: phase, the health of the three endpoints, the pins, the config, the boot line |
+| `qctx stack up` | start it again from `stack.json`, repeating exactly the recorded images |
+| `qctx stack down` | stop it, keeping its volume and its models |
+| `qctx stack remove` | delete it; with `--purge-models` also the downloaded models, with `--purge-data` the Qdrant volume (the archive), and `--yes` to skip the confirmation |
+
+`qctx stack up` takes `--upgrade` to pull the catalogue's images (and the `--image` overrides)
+and `--image ROLE=REF` to override one image for that run; without `--upgrade` it repeats
+exactly what `stack.json` holds. `qctx stack remove` never touches the configuration: it names
+the fields that still point at the stack it just deleted, and with no readable state it tries
+a `down` on every runtime that answers so a corrupt install still cleans up.
+
+The install flags that stand the stack up in the first place are on `qctx install`:
+`--stack` is the profile (`auto` picks the best one the host serves, or `cpu`, `amd`, `intel`,
+`nvidia`, `apple`), `--runtime` is the runtime that serves it when both answer (`docker` or
+`podman`), and `--image ROLE=REF` overrides one image (it appends, so several may be given).
+With `--stack`, the wizard runs the whole provisioning pass: what it downloads and costs, the
+ports, and where the data lands are in [install.md, the local stack](install.md#the-local-stack).
 
 ### Configuration and diagnostics: CLI only
 
