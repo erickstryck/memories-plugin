@@ -295,7 +295,7 @@ def install_step(args, report: dict, *, budgets: list,
         print("  ..    Qdrant or the embedding endpoint is not answering; a local stack "
               "would stand them up:")
         print(f"        downloads {catalog.MODELS_BYTES / 2 ** 20:.0f} MiB of models "
-              f"into {stack_dir / 'models'}")
+              f"into {stack_dir / state.MODELS_DIR}")
         print("        ports: " + ", ".join(f"{name} on {port}"
                                             for name, port in catalog.PORTS.items()))
         print(f"        data: {stack_dir}")
