@@ -69,7 +69,9 @@ def status(deps: LifeDeps) -> tuple[dict, int]:
     No stack: `{"managed": False}` and 0. A stack: its phase, runtime and provider, the
     per-service URL and live status, whether every endpoint answers 200, whether the
     catalogue has moved past the recorded images, whether the config still points at these
-    URLs, and the boot line -- exit 1 when it is not healthy. A state the loader refuses is
+    URLs, and the boot line -- exit 1 when it is not healthy, and exit 1 for an install
+    that did not finish (the `compose` phase: the config does not point at it yet, so it
+    does not serve the plugin whatever its endpoints answer). A state the loader refuses is
     reported as corrupt with the one fix that deletes it, and exit 1: `status` is the verb
     that must name a broken install, not guess over it.
     """
@@ -107,7 +109,7 @@ def status(deps: LifeDeps) -> tuple[dict, int]:
         "config_points_here": all(got == want for _f, got, want
                                   in verify.config_url_pairs(deps.config.effective(), st.ports)),
         "boot": boot_status(st, deps.runner),
-    }, (0 if healthy else 1)
+    }, (0 if healthy and st.phase != state.PHASE_COMPOSE else 1)
 
 
 def up(deps: LifeDeps, *, upgrade: bool = False,

@@ -126,6 +126,16 @@ class _LifecycleCase(unittest.TestCase):
 
 
 class TestStatus(_LifecycleCase):
+    def test_status_of_an_unfinished_install_exits_1_even_when_it_answers(self):
+        # A `compose` phase is an install that did not finish: the config does not
+        # point at it yet, so the stack does not serve the plugin, whatever its
+        # endpoints answer. A script reading the exit code must not read "healthy".
+        st = make_state(phase=state.PHASE_COMPOSE)
+        deps = make_deps(self.stack, state_obj=st, status_fn=lambda url: 200)
+        result, code = lifecycle.status(deps)
+        self.assertTrue(result["healthy"], "the endpoints do answer")
+        self.assertEqual(code, 1)
+
     def test_status_without_a_stack_exits_0(self):
         deps = make_deps(self.stack)  # no state file
         result, code = lifecycle.status(deps)
