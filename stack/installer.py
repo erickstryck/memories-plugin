@@ -174,15 +174,16 @@ def choose_ports(wanted: dict[str, int],
     error that names its step: a stack that cannot bind is not a stack."""
     got: dict[str, int] = {}
     taken: set[int] = set()
+    off, width = catalog.PORT_FALLBACK_OFFSET, 100
     for service, port in wanted.items():
-        for candidate in [port, *(port + 10000 + i for i in range(100))]:
+        for candidate in [port, *(port + off + i for i in range(width))]:
             if candidate not in taken and port_free(candidate):
                 got[service] = candidate
                 taken.add(candidate)
                 break
         else:
             raise StackError(
-                f"port {port} and none of {port + 10000}..{port + 10099} is free "
+                f"port {port} and none of {port + off}..{port + off + width - 1} is free "
                 f"for {service}", step="ports",
                 fix="free one of those ports, or pass the free one")
     return got
