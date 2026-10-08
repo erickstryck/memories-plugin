@@ -309,19 +309,32 @@ def install_step(args, report: dict, *, budgets: list,
 
 def _step_managed(st, stack_dir, args, report, budgets, ask, installer, facts) -> None:
     """The managed-stack half of `install_step`: report, and offer the one action the
-    phase calls for. The pins are checked against the catalogue in either case."""
+    state calls for. The pins are checked against the catalogue in either case.
+
+    A `running` phase is not proof the stack is up: only `qctx stack down` writes
+    `stopped`, so a reboot leaves the phase `running` while every endpoint answers
+    nothing. For a `running` stack the section's health decides: healthy prints the
+    status and goes on; dead endpoints (the reboot case) offer the cheap restart. A
+    `stopped` stack is known-dead and offers the restart without a probe; the
+    interrupted `compose` phase resumes by provisioning again."""
     import stack.state as state
     outdated = [role for role in catalog.IMAGES
                 if st.images.get(role) != catalog.IMAGES[role]]
-    if st.phase == state.PHASE_RUNNING:
-        section, _code = _status_of(st, stack_dir)
-        for line in section_lines(section):
-            print(line)
-    elif st.phase == state.PHASE_STOPPED:
-        print(f"  ..    the stack is stopped; restart it with: qctx stack up")
+    if st.phase == state.PHASE_STOPPED:
+        print("  ..    the stack is stopped; restart it with: qctx stack up")
         if args.yes or _confirm(ask, "restart the stack now? [y/N] "):
             _restart(args, stack_dir, ask)
             return
+    elif st.phase == state.PHASE_RUNNING:
+        section, _code = _status_of(st, stack_dir)
+        if section.get("healthy") is False:
+            print("  ..    the stack is not answering (a reboot leaves the phase "
+                  "running); restart it with: qctx stack up")
+            if args.yes or _confirm(ask, "restart the stack now? [y/N] "):
+                _restart(args, stack_dir, ask)
+                return
+        for line in section_lines(section):
+            print(line)
     else:
         # An other phase (compose): the last install was interrupted. Resume by
         # provisioning again -- the flow is idempotent in every step that can be.
@@ -464,8 +477,23 @@ def section_lines(section: dict) -> list:
     if ports:
         lines.append("        ports: " + ", ".join(f"{name} {port}"
                                                    for name, port in ports.items()))
+    # The two fields only the `lifecycle.status` shape carries: the boot line
+    # (how the stack comes back after a reboot) and the config verdict. The
+    # install-report shape has neither, so both are rendered only when present.
+    if section.get("boot"):
+        lines.append(f"        boot: {section['boot']}")
+    if section.get("config_points_here") is not None:
+        points = ("points at this stack" if section["config_points_here"]
+                  else "does not point at this stack")
+        lines.append(f"        config: your plugin {points}")
     outdated = section.get("outdated_pins") or []
     if outdated:
         lines.append("  ..    newer catalogue pins for: " + ", ".join(outdated) +
                      " (qctx stack up --upgrade)")
+    # In EVERY case the verb must accuse a stopped stack and point at the fix
+    # (spec: `stack status` says it is down and points at `qctx stack up`).
+    # Not healthy covers both the `stopped` phase and the post-reboot case
+    # where the phase still says running but the endpoints answer nothing.
+    if section.get("healthy") is False:
+        lines.append("  ..    the stack is down; start it with: qctx stack up")
     return lines

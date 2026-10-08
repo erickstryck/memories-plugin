@@ -191,6 +191,50 @@ class StackGroupSubprocess(unittest.TestCase):
         self.assertIn("qdrant up", endpoints)
         self.assertNotIn("down", endpoints)
 
+    def test_section_lines_names_the_stop_points_at_up_and_renders_boot_and_config(self):
+        """`qctx stack status` is the verb that must name a broken install and
+        say how to fix it (spec: it shows the boot line and whether the config
+        still points at the stack, and in EVERY case it accuses a stopped stack
+        and points at `qctx stack up`). The boot and config fields only exist in
+        the `lifecycle.status` shape, so a section without them (the install
+        report) still renders, just without those two lines."""
+        from stack.cli import section_lines
+        base = {"managed": True, "phase": "stopped", "runtime": "podman",
+                "profile": "cpu", "ports": {"qdrant": 6333, "embed": 8003,
+                                            "rerank": 8004}}
+        # a stopped stack: the endpoints are down, and the section carries the
+        # boot line and the config verdict (the lifecycle.status shape)
+        down = dict(base)
+        down.update(healthy=False, services={
+            "qdrant": {"url": "http://127.0.0.1:6333", "status": None},
+            "embed": {"url": "http://127.0.0.1:8003/v1", "status": None},
+            "rerank": {"url": "http://127.0.0.1:8004/v1/rerank", "status": None}},
+            boot="podman-restart.service is disabled; linger is no",
+            config_points_here=False)
+        lines = section_lines(down)
+        joined = "\n".join(lines)
+        self.assertIn("qctx stack up", joined, "a stopped stack must name the fix")
+        self.assertIn("podman-restart.service is disabled", joined, "the boot line")
+        self.assertIn("does not point", joined, "the config does not point at the stack")
+        # a healthy stack does NOT point at `stack up`
+        up = dict(base)
+        up.update(phase="running", healthy=True, services={
+            "qdrant": {"url": "http://127.0.0.1:6333", "status": 200},
+            "embed": {"url": "http://127.0.0.1:8003/v1", "status": 200},
+            "rerank": {"url": "http://127.0.0.1:8004/v1/rerank", "status": 200}},
+            boot="the docker daemon must start at boot; restart: always "
+                 "brings the containers back",
+            config_points_here=True)
+        up_joined = "\n".join(section_lines(up))
+        self.assertNotIn("qctx stack up", up_joined)
+        self.assertIn("points at this stack", up_joined)
+        # the install-report shape (no boot / no config fields) still renders,
+        # with neither of those two lines
+        minimal = dict(base)
+        minimal.update(healthy=False,
+                       services={"qdrant": None, "embed": None, "rerank": None})
+        self.assertTrue(section_lines(minimal), "the minimal shape must not be empty")
+
     def test_stack_help_lists_the_four_commands(self):
         done = self.run_cli("stack", "--help")
         for verb in ("status", "up", "down", "remove"):
@@ -303,10 +347,12 @@ class TheInstallStep(unittest.TestCase):
         self.assertEqual(called[0].profile, "auto")
 
     def test_a_stopped_stack_restarts_not_provisions(self):
-        """A `stack.json` in the `stopped` phase is the common post-reboot case: the step
-        restarts it with the CHEAP `lifecycle.up` (re-render + `compose up -d`, the images
-        `stack.json` already holds), not a twelve-step re-provision. This is the round-7
-        fix: the stopped and the interrupted branches used to both call `_provision`."""
+        """A `stack.json` in the `stopped` phase (only `qctx stack down` writes it)
+        restarts with the CHEAP `lifecycle.up` (re-render + `compose up -d`, the
+        images `stack.json` already holds), not a twelve-step re-provision. The
+        post-reboot case -- phase still `running`, the endpoints answering
+        nothing -- is the next test. This is the round-7 fix: the stopped and
+        the interrupted branches used to both call `_provision`."""
         import stack.cli as stack_cli
         import stack.facts as facts
         import stack.installer as installer
@@ -340,6 +386,110 @@ class TheInstallStep(unittest.TestCase):
                          "the restart repeats the recorded images (no upgrade)")
         self.assertEqual(len(provision_calls), 0,
                          "a stopped stack must NOT re-provision (re-pull, re-proof)")
+
+    def test_a_healthy_running_stack_prints_status_and_offers_nothing(self):
+        """The guard for the reboot test above: a `running` stack whose endpoints
+        DO answer is healthy, so the step prints the status and goes on -- it must
+        NOT offer a restart (that would re-`up` a stack that is already up). The
+        pins hint still appears when the catalogue moved."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+        import stack.lifecycle as lifecycle
+
+        up_calls = []
+        provision_calls = []
+
+        def fake_up(deps, *, upgrade=False, images=None):
+            up_calls.append((upgrade, images))
+            return None
+
+        def fake_provision(request, deps):
+            provision_calls.append(request)
+            return None
+
+        stack_dir = make_stack_dir(self.root, phase="running")
+        healthy = {"managed": True, "phase": "running", "runtime": "docker",
+                   "profile": "cpu", "ports": {"qdrant": 6333, "embed": 8003,
+                                               "rerank": 8004},
+                   "services": {"qdrant": {"url": "http://127.0.0.1:6333", "status": 200},
+                                "embed": {"url": "http://127.0.0.1:8003/v1", "status": 200},
+                                "rerank": {"url": "http://127.0.0.1:8004/v1/rerank",
+                                           "status": 200}},
+                   "healthy": True, "outdated_pins": []}
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(stack_cli, "_discover",
+                                  return_value=[SimpleNamespace(name="docker")]), \
+                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(lifecycle, "up", fake_up), \
+                mock.patch.object(lifecycle, "status", return_value=(healthy, 0)), \
+                mock.patch.object(installer, "provision", fake_provision):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                stack_cli.install_step(
+                    self.args(stack=None, yes=True),
+                    {"blockers": [], "ready": True, "checks": []},
+                    budgets=[], ask=lambda prompt: "y", interactive=True)
+        said = buf.getvalue()
+        self.assertEqual(len(up_calls), 0,
+                         "a healthy stack must NOT be restarted")
+        self.assertEqual(len(provision_calls), 0)
+        self.assertNotIn("restart the stack now", said)
+        self.assertIn("managed stack: running", said, "the status is printed")
+
+    def test_a_rebooted_stack_running_with_dead_endpoints_offers_to_restart(self):
+        """The common post-reboot case: `down` is the only verb that writes
+        `stopped`, so a reboot leaves the phase `running` while every endpoint
+        answers nothing. The step must treat that as a stopped stack -- offer
+        the cheap `lifecycle.up` (with `--yes`, take it) -- and not just print
+        the status and go on (spec: a stopped stack offers to be restarted).
+        A healthy running stack does NOT get the offer (the next branch
+        proves it keeps printing status only)."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+        import stack.lifecycle as lifecycle
+
+        up_calls = []
+        provision_calls = []
+
+        def fake_up(deps, *, upgrade=False, images=None):
+            up_calls.append((upgrade, images))
+            return None
+
+        def fake_provision(request, deps):
+            provision_calls.append(request)
+            return None
+
+        stack_dir = make_stack_dir(self.root, phase="running")
+        # The section `_step_managed` dispatches on: the phase says running
+        # (a reboot never rewrites it to stopped) but every endpoint answers
+        # nothing, so `healthy` is False. This is the reboot case.
+        unhealthy = {"managed": True, "phase": "running", "runtime": "docker",
+                     "profile": "cpu", "ports": {"qdrant": 6333, "embed": 8003,
+                                                 "rerank": 8004},
+                     "services": {"qdrant": None, "embed": None, "rerank": None},
+                     "healthy": False, "outdated_pins": []}
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(stack_cli, "_discover",
+                                  return_value=[SimpleNamespace(name="docker")]), \
+                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(lifecycle, "up", fake_up), \
+                mock.patch.object(lifecycle, "status",
+                                  return_value=(unhealthy, 1)), \
+                mock.patch.object(installer, "provision", fake_provision):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                stack_cli.install_step(
+                    self.args(stack=None, yes=True),
+                    {"blockers": [], "ready": True, "checks": []},
+                    budgets=[], ask=lambda prompt: "y", interactive=True)
+        said = buf.getvalue()
+        self.assertEqual(len(up_calls), 1,
+                         "a rebooted stack must be restarted via lifecycle.up")
+        self.assertEqual(up_calls[0], (False, None))
+        self.assertEqual(len(provision_calls), 0)
+        self.assertIn("qctx stack up", said, "the offer names the fix")
 
     def test_windows_is_not_offered_it_says_the_line_and_returns(self):
         """The plan's first `install_step` branch: on Windows (WSL included) the step is
