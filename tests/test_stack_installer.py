@@ -223,6 +223,17 @@ class TestChoosePorts(ProvisionTestCase):
         self.assertEqual(got["embed"], 8003)
         self.assertEqual(got["rerank"], 8004)
 
+    def test_no_service_gets_a_port_another_service_was_given(self):
+        # The embed range (18003..) and the rerank range (18004..) overlap: a
+        # host that holds 8003, 8004 and 18003 must not let both land on
+        # 18004, because `compose up -d` would fail binding the second one.
+        wanted = dict(catalog.PORTS)
+        got = installer.choose_ports(wanted, lambda p: p not in (8003, 8004, 18003))
+        self.assertEqual(len(set(got.values())), 3,
+                         f"two services share a port: {got}")
+        self.assertEqual(got["embed"], 18004)
+        self.assertEqual(got["rerank"], 18005)
+
 
 class TestRuntimeAndPlatform(ProvisionTestCase):
     def test_two_runtimes_question_says_what_each_serves(self):

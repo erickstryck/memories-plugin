@@ -162,13 +162,19 @@ def provision(request: Request, deps: Deps) -> "state.StackState | None":
 def choose_ports(wanted: dict[str, int],
                  port_free: Callable[[int], bool]) -> dict[str, int]:
     """The ports to bind: the wanted one when free, else the FIRST free port
-    in `range(p + 10000, p + 10100)`. No free port in the range is an error
-    that names its step: a stack that cannot bind is not a stack."""
+    in `range(p + 10000, p + 10100)`. A port already given to another service
+    does not count as free: the fallback ranges of two services overlap (embed
+    18003..18102 and rerank 18004..18103), so on a host that holds both wanted
+    ports the two would otherwise land on the SAME candidate, and `compose up
+    -d` would fail binding the second one. No free port in the range is an
+    error that names its step: a stack that cannot bind is not a stack."""
     got: dict[str, int] = {}
+    taken: set[int] = set()
     for service, port in wanted.items():
         for candidate in [port, *(port + 10000 + i for i in range(100))]:
-            if port_free(candidate):
+            if candidate not in taken and port_free(candidate):
                 got[service] = candidate
+                taken.add(candidate)
                 break
         else:
             raise StackError(
