@@ -736,6 +736,21 @@ class TestProvision(ProvisionTestCase):
         self.assertNotIn("4.6", warns[0], "the opening-check figure is stale")
         self.assertIn("7.3", warns[0], "the measured stack figure")
 
+    def test_no_runtime_at_all_names_a_fix(self):
+        # spec: every refusal carries the correction. When NO runtime binary
+        # answers (the common "nothing installed" case), the fallback fix is
+        # empty, so the error said `step: runtime: no container runtime with a
+        # compose provider answers` with no way forward. The empty-runtime case
+        # must name the install, the way a present-but-providerless runtime does.
+        facts = facts_for()
+        err = run_case(self.tmp, request=installer.Request(profile="cpu"),
+                       runtimes=[], facts=facts, prompter=ScriptedPrompter([]),
+                       reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertIsInstance(err, StackError)
+        self.assertEqual(err.step, "runtime")
+        self.assertTrue(err.fix, "no runtime must still name the install")
+        self.assertIn("install", err.fix.lower())
+
     def test_replacing_a_non_empty_value_asks_first(self):
         # The file already points elsewhere (a non-empty qdrant_url): the diff
         # is shown, and the replacement ASKS before it saves.

@@ -275,8 +275,11 @@ def _choose_runtime(request: Request, deps: Deps) -> tuple[ContainerRuntime, obj
     that asked for it is refused here, not discovered at the menu."""
     candidates = [r for r in deps.runtimes if r.compose_provider().provider is not None]
     if not candidates:
+        # The per-runtime fixes, when any runtime answers without a provider;
+        # the general install otherwise (no binary at all): a refusal must
+        # never end with an empty correction.
         fixes = sorted({(r.compose_provider().fix or "install Docker or Podman")
-                        for r in deps.runtimes})
+                        for r in deps.runtimes}) or ["install Docker or Podman"]
         raise StackError("no container runtime with a compose provider answers",
                          step="runtime", fix="; ".join(fixes))
     if request.runtime:
