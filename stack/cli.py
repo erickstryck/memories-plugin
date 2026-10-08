@@ -140,7 +140,7 @@ def register(sub, *, ask: Callable[[str], str]) -> None:
     up.add_argument("--upgrade", action="store_true",
                     help="pull the catalogue's images (and the --image overrides)")
     up.add_argument("--image", action="append", default=[],
-                    help="ROLE=REF, to override one image (llama or qdrant)")
+                    help="ROLE=REF, with --upgrade: override one image (llama or qdrant)")
     up.set_defaults(fn=lambda args, cfg: _cmd_up(args))
 
     verb.add_parser("down", help="stop the stack, keeping its volume and models"
@@ -255,9 +255,11 @@ def install_step(args, report: dict, *, budgets: list,
     small dispatcher over the use cases, not a reimplementation: when it provisions, the
     whole twelve-step flow runs through `installer.provision`.
 
-    - a managed stack: `running` prints the status summary and goes on; `stopped` offers to
-      restart it (yes with `--yes`); an other phase (interrupted) resumes by provisioning
-      again. A catalogue pin that moved past the recorded one points at `stack up --upgrade`.
+    - a managed stack: `stopped` offers to restart it (yes with `--yes`); `running` is
+      probed: healthy prints the status summary and goes on, not answering (a reboot
+      leaves the phase running) offers the same restart; `compose` (an install that did
+      not finish) resumes by provisioning again. A catalogue pin that moved past the
+      recorded one points at `stack up --upgrade`.
     - no stack: `--stack` provisions; `--yes` alone prints the line that would provision and
       returns (downloading gigabytes is not an implied yes); a blocker the stack fixes
       explains what it would do and asks `y/N`; nothing to do is one line.
@@ -370,11 +372,13 @@ def _status_of(st, stack_dir):
 
 
 def _restart(args, stack_dir, ask) -> None:
-    """Restart a STOPPED stack the cheap way: `lifecycle.up` re-renders the compose from
-    the recorded state and does `compose up -d`, repeating exactly the images `stack.json`
-    holds. It is not `_provision`, which would re-detect the runtimes, re-prove the GPUs,
-    re-pull the images and re-verify for what a reboot left merely stopped. The deps are
-    the same a `qctx stack up` builds (review round R7, item 1)."""
+    """Restart a stack that was installed and verified but is not running -- the
+    `stopped` phase, or a `running` phase whose endpoints answer nothing (a reboot) --
+    the cheap way: `lifecycle.up` re-renders the compose from the recorded state and
+    does `compose up -d`, repeating exactly the images `stack.json` holds. It is not
+    `_provision`, which would re-detect the runtimes, re-prove the GPUs, re-pull the
+    images and re-verify a stack that only stopped. The deps are the same a
+    `qctx stack up` builds (review round R7, item 1)."""
     import stack.lifecycle as lifecycle
     lifecycle.up(_life_deps(args, ask), upgrade=False, images=None)
 

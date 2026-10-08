@@ -49,8 +49,10 @@ class Docker:
             return None
         rootless = any("rootless" in opt for opt in (info.get("SecurityOptions") or []))
         # `OSType` is the engine's OS (`OperatingSystem` is a label such as "Docker
-        # Desktop"); the kernel is what tells WSL apart (`platform_of`). `MemTotal` is what
-        # the containers get (R2 item I6).
+        # Desktop"). The kernel is kept for `platform_of(..., engine_kernel=...)`, which
+        # can tell a WSL engine apart; phase 1 does not pass it (Windows is refused from
+        # the host's own facts before any engine is asked). `MemTotal` is what the
+        # containers get (R2 item I6).
         return EngineInfo("docker", info.get("ServerVersion", ""), info.get("OSType", ""),
                           normalize_arch(info.get("Architecture", "")), rootless,
                           kernel=info.get("KernelVersion", ""),

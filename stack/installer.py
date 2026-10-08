@@ -43,8 +43,7 @@ DISK_HEADROOM = 400 * 2 ** 20
 #: Below this the RAM warning fires: the two servers measured ~7.3 GiB of RAM
 #: together in the stack's own configuration (cpu embed ~2.3 GiB, cpu rerank
 #: ~5.0 GiB, cgroup, 2026-10-08), so less than 8 GiB may not hold them plus
-#: Qdrant. (The ~4.6 GiB the warning used to carry was the opening-check
-#: figure, not the stack's: 1b35a87 fixed the doc, this fixes the code.)
+#: Qdrant.
 RAM_WARN_BYTES = 8 * 2 ** 30
 #: The manual path a host phase 1 cannot serve is pointed at.
 README_PATH = "README.md, section 'Local models'"

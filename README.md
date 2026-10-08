@@ -46,9 +46,11 @@ The wizard is the same on every OS: it is `bash` plus `python3`, nothing OS-spec
 On Windows you run it under WSL or git-bash.
 
 With Docker or Podman already installed, the wizard stands the infrastructure up
-itself: `qctx install --stack auto` pulls the images, downloads the two models and
-brings the three containers up, then points the configuration at them. [The manual
-path](#local-models) below is the same setup done by hand.
+itself on Linux and macOS (Windows, WSL included, gets the local stack in a later
+phase; there you follow the manual path below): `qctx install --stack auto` pulls the
+images, downloads the two models and brings the three containers up, then points the
+configuration at them. [The manual path](#local-models) below is the same setup done
+by hand.
 
 **Linux**
 

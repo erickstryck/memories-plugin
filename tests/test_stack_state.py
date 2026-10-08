@@ -117,6 +117,22 @@ class TestTheWrite(unittest.TestCase):
         self.assertEqual(0o700, fresh.stat().st_mode & 0o777)
         self.assertEqual(0o600, (fresh / state.STATE_FILE).stat().st_mode & 0o777)
 
+    def test_a_write_that_did_not_land_raises(self):
+        # `core.statefile.write_json` reports a failed write as False instead of
+        # raising; a state that did not land must not be reported as saved,
+        # because `up` without --upgrade repeats what stack.json holds. A
+        # read-only directory makes the real write fail (no patching).
+        ro = self.dir / "ro"
+        ro.mkdir()
+        os.chmod(ro, 0o500)
+        self.addCleanup(os.chmod, ro, 0o700)
+        if os.access(ro, os.W_OK):  # running as root: the chmod does not bind
+            self.skipTest("a read-only directory is writable for this user")
+        with self.assertRaises(StackError) as ctx:
+            state.save(ro, make_state())
+        self.assertEqual(ctx.exception.step, "state")
+        self.assertFalse((ro / state.STATE_FILE).exists())
+
 
 class TestTheStackDirectory(unittest.TestCase):
     def test_stack_dir_precedence(self):

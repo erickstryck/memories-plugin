@@ -281,8 +281,10 @@ The "still needs" column is the hardware prerequisite in plain words: the
 driver and node the container has to reach, or nothing for the cpu profile,
 which runs everywhere. The rows marked "not available here" are where the
 phase-1 matrix is the spec: the Apple profile is experimental and macOS-only,
-and the DRI and NVIDIA profiles are Linux-only, so a profile that does not run
-on a platform is simply not offered there, not offered and then refused.
+and the DRI and NVIDIA profiles are Linux-only. The menu still lists a profile
+the platform cannot run, marked unavailable with its reason (on Linux the Apple
+line says it runs on macOS only), so you can see why it is not offered; picking
+it repeats the reason and the menu comes back.
 
 **Windows.** The local stack is not offered on Windows (WSL included) in phase
 1; it arrives in phase 3. Until then the step says so in one line and points at

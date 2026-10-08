@@ -119,7 +119,8 @@ def up(deps: LifeDeps, *, upgrade: bool = False,
     catalogue's pins (or the `--image` overrides passed in), passes them through the minor
     guard, re-renders, pulls and starts. Either way it re-renders the compose, brings it up
     and waits on readiness before it marks the state running: a stack that is not ready is
-    not reported as running.
+    not reported as running. A stack whose install did not finish (the `compose` phase) is
+    refused: `up` neither verifies it nor writes the config, so the install resumes it.
     """
     st = _require_state(deps)
     if st.phase == state.PHASE_COMPOSE:

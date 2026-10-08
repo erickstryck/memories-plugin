@@ -112,9 +112,11 @@ The endpoints running in containers on this machine are a group of their own, st
 | `qctx stack down` | stop it, keeping its volume and its models |
 | `qctx stack remove` | delete it; with `--purge-models` also the downloaded models, with `--purge-data` the Qdrant volume (the archive), and `--yes` to skip the confirmation |
 
-`qctx stack up` takes `--upgrade` to pull the catalogue's images (and the `--image` overrides)
-and `--image ROLE=REF` to override one image for that run; without `--upgrade` it repeats
-exactly what `stack.json` holds. `qctx stack remove` never touches the configuration: it names
+`qctx stack up` takes `--upgrade` to pull the catalogue's images, with `--image ROLE=REF`
+to override one of them (the override is recorded in `stack.json` and repeated from then
+on); without `--upgrade` it repeats exactly what `stack.json` holds, and refuses an
+`--image`. A stack whose install did not finish (`stack status` says so) is resumed with
+`qctx install`, not with `stack up`. `qctx stack remove` never touches the configuration: it names
 the fields that still point at the stack it just deleted, and with no readable state it tries
 a `down` on every runtime that answers so a corrupt install still cleans up.
 
