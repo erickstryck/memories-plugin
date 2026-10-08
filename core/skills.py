@@ -18,7 +18,7 @@ comparison against this catalogue, and routing them through it would make them a
 it by construction and pin nothing.
 
 WHY IT KNOWS NOTHING ABOUT A HOST. No namespacing, no registration, no `skill_view`. A skill
-here is a name and a path; `memories:memory` is hermes' spelling of it and lives in hermes'
+here is a name and a path; `mnemosine:memory` is hermes' spelling of it and lives in hermes'
 adapter. A core that learned one host's naming would have to learn the other's next.
 """
 import os
@@ -30,8 +30,8 @@ SKILL_FILE = "SKILL.md"
 
 #: `<repo>/skills`, resolved from this file rather than assumed from the working directory.
 #: `realpath` AND NOT `abspath`, for a narrower reason than it looks: the hermes development
-#: install symlinks the REPO ROOT into `$HERMES_HOME/plugins/memories`, and that case works
-#: under either -- the path through the link (`.../plugins/memories/skills`) reaches the same
+#: install symlinks the REPO ROOT into `$HERMES_HOME/plugins/mnemosine`, and that case works
+#: under either -- the path through the link (`.../plugins/mnemosine/skills`) reaches the same
 #: directory. MEASURED, rather than assumed: swapping in `abspath` left the whole suite green.
 #: What `realpath` actually buys is the case where THIS FILE is reached through a link while
 #: its parent tree is not (a packaging step that links individual modules into a staging dir):

@@ -61,13 +61,13 @@ The same core serves two hosts, with the same operations and the same configurat
 | | claude-code | hermes-agent |
 |---|---|---|
 | adapter | `hooks/` | `hosts/hermes/` |
-| install | `claude plugin marketplace add .` | a clone or a symlink at `$HERMES_HOME/plugins/memories` |
+| install | `claude plugin marketplace add .` | a clone or a symlink at `$HERMES_HOME/plugins/mnemosine` |
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
 | big-file guard | `PreToolUse` hook on `Read` | `pre_tool_call` shell hook, matcher `read_file` |
 | operations | `qctx` CLI + 3 skills | 22 model-invokable tools, the same CLI, and the same 3 skills |
-| what the model is told | the 3 skills | `system_prompt_block()`, from the same `core/prompts.py`, pointing at `memories:memory` |
-| configuration | `~/.config/memories-plugin/config.json` | the same file |
+| what the model is told | the 3 skills | `system_prompt_block()`, from the same `core/prompts.py`, pointing at `mnemosine:memory` |
+| configuration | `~/.config/mnemosine/config.json` | the same file |
 | credentials | the environment | the environment, or `$HERMES_HOME/.env` |
 
 Equivalence is not a claim in this table: `tests/test_host_equivalence.py` renders every
@@ -79,11 +79,11 @@ context and registers only what `register()` explicitly asks for, so the adapter
 `core/skills.py` and hands over each one. hermes also keeps plugin skills out of the
 available-skills list it injects (explicit loads only), so registering a skill
 makes it loadable but not findable. That is why `system_prompt_block()` names
-`memories:memory` outright: without the pointer the model is never told the name it would
+`mnemosine:memory` outright: without the pointer the model is never told the name it would
 have to ask for. The skills were reachable on claude-code and unreachable on hermes for
 exactly as long as the adapter registered the provider and nothing else.
 
-The hermes install is a **symlink** into `$HERMES_HOME/plugins/memories`, one level deep and no
+The hermes install is a **symlink** into `$HERMES_HOME/plugins/mnemosine`, one level deep and no
 deeper: hermes' loader (`plugins/memory/__init__.py`) scans `$HERMES_HOME/plugins/<name>/`,
 and a provider one directory further down is not discovered at all. That is measured
 against the installed loader, not read off the documentation: `tests/test_hermes_provider.py`
@@ -129,11 +129,11 @@ the only remedy on offer fixes the keys and leaves a gateway hermes memory-less 
 It also reports where the provider being replaced actually lives, whether the plugins
 directory it is about to write to is the one the loader reads, and it **refuses** to
 `--apply` from a git worktree (`--i-know-its-a-worktree` overrides): the symlink dies with the
-worktree, and a dangling `plugins/memories` is skipped in silence: `load_memory_provider`
+worktree, and a dangling `plugins/mnemosine` is skipped in silence: `load_memory_provider`
 returns `None`, and hermes warns only when the provider is not `None`.
 
 Every write it makes to `config.yaml` is verified by re-reading the key afterwards. The
-rewriter exiting 0 says the file was replaced, not that `memory.provider` is now `memories`.
+rewriter exiting 0 says the file was replaced, not that `memory.provider` is now `mnemosine`.
 
 ## The big-file read guard
 

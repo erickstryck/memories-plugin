@@ -89,7 +89,7 @@ class TestTheContract(unittest.TestCase):
                          f"hermes calls these and the provider has no answer: {unanswered}")
 
     def test_the_name_is_the_install_directory_name(self):
-        self.assertEqual(MemoriesProvider().name, "memories")
+        self.assertEqual(MemoriesProvider().name, "mnemosine")
 
     def test_identity_signature_is_empty_and_costs_no_round_trip(self):
         """Two contracts in one, and both are about WHERE hermes calls this.
@@ -172,12 +172,12 @@ class TestSymlinkInstall(unittest.TestCase):
         uses would fail here; only realpath finds core/."""
         home = Path(tempfile.mkdtemp()) / "plugins"
         home.mkdir(parents=True)
-        link = home / "memories"
+        link = home / "mnemosine"
         link.symlink_to(REPO / "hosts" / "hermes")
 
         script = (
             "import importlib.util\n"
-            "spec = importlib.util.spec_from_file_location('u.memories', %r,\n"
+            "spec = importlib.util.spec_from_file_location('u.mnemosine', %r,\n"
             "    submodule_search_locations=[%r])\n"
             "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
             "print(m.REPO_ROOT)\n"
@@ -187,13 +187,13 @@ class TestSymlinkInstall(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         root, name = out.stdout.strip().splitlines()[:2]
         self.assertEqual(Path(root).resolve(), REPO.resolve())
-        self.assertEqual(name, "memories")
+        self.assertEqual(name, "mnemosine")
 
 
 class TestTheInstallPathTheLoaderActuallyReads(unittest.TestCase):
     """Where the symlink has to go, asked of the INSTALLED loader rather than assumed.
 
-    `scripts/hermes_cutover.sh` installs into `$HERMES_HOME/plugins/memories`, and the
+    `scripts/hermes_cutover.sh` installs into `$HERMES_HOME/plugins/mnemosine`, and the
     claude-code cutover's own comments record what it costs to guess a path: it checked
     `~/.mcp.json` while the live configuration was in `~/.claude.json` and printed "ok" for
     a state it had never verified. So this drives `plugins/memory/__init__.py` itself,
@@ -225,7 +225,7 @@ class TestTheInstallPathTheLoaderActuallyReads(unittest.TestCase):
         home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, home, True)
         (home / "plugins" / "memory").mkdir(parents=True)
-        (home / "plugins" / "memories").symlink_to(REPO / "hosts" / "hermes")
+        (home / "plugins" / "mnemosine").symlink_to(REPO / "hosts" / "hermes")
         # The same adapter, one level deeper — the layout `$HERMES_HOME/plugins/memory/
         # <name>/` that the qdrant provider uses on this machine.
         (home / "plugins" / "memory" / "deeper").symlink_to(REPO / "hosts" / "hermes")
@@ -234,9 +234,9 @@ class TestTheInstallPathTheLoaderActuallyReads(unittest.TestCase):
             "import json, sys\n"
             "sys.path.insert(0, %r)\n"
             "from plugins.memory import find_provider_dir, load_memory_provider\n"
-            "flat = find_provider_dir('memories')\n"
+            "flat = find_provider_dir('mnemosine')\n"
             "deep = find_provider_dir('deeper')\n"
-            "p = load_memory_provider('memories')\n"
+            "p = load_memory_provider('mnemosine')\n"
             "print(json.dumps([str(flat), str(deep), getattr(p, 'name', None)]))\n"
         ) % str(HERMES_INSTALL)
         env = dict(os.environ, HERMES_HOME=str(home))
@@ -244,15 +244,15 @@ class TestTheInstallPathTheLoaderActuallyReads(unittest.TestCase):
                              text=True, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         flat, deep, name = json.loads(out.stdout.strip().splitlines()[-1])
-        self.assertEqual(Path(flat), home / "plugins" / "memories")
+        self.assertEqual(Path(flat), home / "plugins" / "mnemosine")
         self.assertEqual(deep, "None", "the one-level-deeper layout is discovered after all")
-        self.assertEqual(name, "memories", "the loader did not instantiate the provider")
+        self.assertEqual(name, "mnemosine", "the loader did not instantiate the provider")
 
 
 class TestManifest(unittest.TestCase):
     def test_the_yaml_declares_what_the_loader_reads(self):
         text = (REPO / "hosts" / "hermes" / "plugin.yaml").read_text()
-        for key in ("name: memories", "category: memory", "kind: exclusive"):
+        for key in ("name: mnemosine", "category: memory", "kind: exclusive"):
             self.assertIn(key, text)
 
     def test_the_init_contains_the_string_discovery_greps_for(self):
@@ -911,7 +911,7 @@ class TestTheCheckpointIntervalComesFromTheConfig(unittest.TestCase):
     def test_a_malformed_interval_is_reported_on_this_hosts_channel(self):
         fired, stderr = self._run("5x")
         self.assertEqual(fired, [[5]])
-        self.assertIn("memories: checkpoint_interval='5x'", stderr)
+        self.assertIn("mnemosine: checkpoint_interval='5x'", stderr)
 
 
 class TestASessionSwitchRereadsOnlyTheInterval(unittest.TestCase):
@@ -1434,7 +1434,7 @@ class TestConfigSchema(unittest.TestCase):
     ZERO effect on it (measured). `save_config` calls `core.save(patch)` with no explicit
     path, so it falls back to that already-frozen `DEFAULT_CONFIG_PATH` — which, absent an
     ambient `QCTX_CONFIG` for the whole test run, IS the operator's real
-    `~/.config/memories-plugin/config.json`. Every other QCTX_CONFIG-dependent test in
+    `~/.config/mnemosine/config.json`. Every other QCTX_CONFIG-dependent test in
     this suite (TestAvailability above, TestCheckpointIntervalIsRobust, and the two other
     test modules) already sets the variable in a subprocess's `env=` for exactly this
     reason; these two follow the same idiom instead of introducing a second, unsafe one.

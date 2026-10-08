@@ -8,7 +8,7 @@ so it is SKIPPED unless QCTX_STACK_IT=1 is set. It is meant to be run BY the
 controller on this machine, in the order the plan's Task 14 fixes, and to leave
 the machine as it was found (T15 asserts that).
 
-Isolation: it provisions under a THROWAWAY project (memories-plugin-it) on
+Isolation: it provisions under a THROWAWAY project (mnemosine-it) on
 ports that collide with nothing (46333/48003/48004; this box's production is on
 8003/8004), its stack directory and its config are temp files, and the two
 models are SEEDED by hardlink/copy from QCTX_STACK_IT_MODELS (verified against
@@ -46,7 +46,7 @@ sys.path.insert(0, str(REPO))
 
 IT = os.environ.get("QCTX_STACK_IT", "") == "1"
 
-PROJECT = "memories-plugin-it"
+PROJECT = "mnemosine-it"
 #: The default it ports; QCTX_STACK_IT_PORTS (comma list) overrides them. They
 #: must collide with nothing the machine runs (this box's production is on
 #: 8003/8004, so these are clear).
@@ -294,7 +294,7 @@ class TheRealRuntime(unittest.TestCase):
             self.assertEqual([n for n in _engine_containers()
                               if n.startswith(PROJECT)], [],
                              "remove must leave no container of the it project")
-            self.assertNotIn(f"{PROJECT}_memories-plugin-qdrant", _engine_volumes(),
+            self.assertNotIn(f"{PROJECT}_mnemosine-qdrant", _engine_volumes(),
                              "remove --purge-data must delete the it volume")
 
     def test_gpu_profile_end_to_end(self):

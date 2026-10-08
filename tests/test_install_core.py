@@ -186,7 +186,7 @@ class TestTheLauncherAnswersAboutItself(unittest.TestCase):
         `--check` from a clone found a mismatch and reported a blocker whose fix hint named
         `QCTX_HOME` — a variable that was not set. `--check` is documented as answering in its
         exit code, and returning 1 for an ordinary install made that answer useless."""
-        installed = self.home / ".hermes" / "plugins" / "memories"
+        installed = self.home / ".hermes" / "plugins" / "mnemosine"
         (installed / "bin").mkdir(parents=True)
         (installed / "cli").mkdir()
         (installed / "cli" / "qctx.py").write_text("")
@@ -329,7 +329,7 @@ class Credentials(unittest.TestCase):
         """`config_path` is passed, and that is not a detail.
 
         Without it `no_shell_check(None)` falls back to `DEFAULT_CONFIG_PATH` and reads
-        the developer's real `~/.config/memories-plugin/config.json` — an unnoticed
+        the developer's real `~/.config/mnemosine/config.json` — an unnoticed
         real-machine read, in the very module whose reason for existing is to state the
         opposite rule. The verdict below is asserted too, so the argument cannot be
         dropped again without something going red: over a temporary directory with no

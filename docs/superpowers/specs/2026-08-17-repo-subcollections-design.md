@@ -166,7 +166,7 @@ acidente de nomenclatura, que é justamente o que a decisão de identidade decla
 O id é a chave de filtro e nunca muda; o rótulo é texto de listagem e pode ser reescrito.
 
 O vínculo *caminho absoluto → repo* fica no estado local compartilhado entre os dois hosts
-(`~/.memories-plugin/state/`, com `QCTX_STATE_DIR` sobrescrevendo), para a pergunta não se
+(`~/.mnemosine/state/`, com `QCTX_STATE_DIR` sobrescrevendo), para a pergunta não se
 repetir.
 
 Duas consequências, e são onde isto normalmente apodrece:

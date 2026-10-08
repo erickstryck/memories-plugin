@@ -1106,16 +1106,16 @@ que o usuário exige: observação mensurável, não impressão de melhora.
 - [ ] **Step 1: Suíte inteira verde**
 
 ```bash
-cd /home/me/memories-plugin && python3 -m unittest discover -s tests
+cd /home/me/mnemosine && python3 -m unittest discover -s tests
 ```
 
 - [ ] **Step 2: Sincronizar o plugin instalado e reiniciar o daemon**
 
 ```bash
-cp -r core cli hooks hosts $HERMES_HOME/plugins/memories/
-find $HERMES_HOME/plugins/memories -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+cp -r core cli hooks hosts $HERMES_HOME/plugins/mnemosine/
+find $HERMES_HOME/plugins/mnemosine -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 python3 -c "
-import sys; sys.path.insert(0,'$HERMES_HOME/plugins/memories')
+import sys; sys.path.insert(0,'$HERMES_HOME/plugins/mnemosine')
 from core import daemon
 print('stopped:', daemon.stop())
 "
@@ -1124,7 +1124,7 @@ print('stopped:', daemon.stop())
 - [ ] **Step 3: Confirmar que os jobs param de rotacionar**
 
 ```bash
-cd ~/.memories-plugin/state/jobs && for i in 1 2 3 4 5 6; do
+cd ~/.mnemosine/state/jobs && for i in 1 2 3 4 5 6; do
   date +%H:%M:%S
   python3 -c "
 import json,glob
@@ -1162,7 +1162,7 @@ Esperado: pior caso bem abaixo de 0,5 s. Antes: picos de 1,0-1,3 s a cada ~40 s.
 - [ ] **Step 5: Confirmar que a quarentena reteve os 22 arquivos, com motivo**
 
 ```bash
-cd /home/me/memories-plugin && python3 cli/qctx.py repos status
+cd /home/me/mnemosine && python3 cli/qctx.py repos status
 ```
 
 Esperado: os arquivos vazios listados com `nothing indexable`. Os dois `api.json` **não** devem

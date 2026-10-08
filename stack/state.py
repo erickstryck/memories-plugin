@@ -24,7 +24,7 @@ not land cannot be reported as saved, because `up` without `--upgrade` repeats
 exactly what `stack.json` holds.
 
 THE DIRECTORY PRECEDENCE is `$QCTX_STACK_DIR`, then
-`${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack` (spec, "Portas, caminhos
+`${XDG_DATA_HOME:-~/.local/share}/mnemosine/stack` (spec, "Portas, caminhos
 e nomes"). A blank value counts as absent, the way `core.config` reads every
 environment knob, so `QCTX_STACK_DIR="  "` does not silently become an empty
 path. The result is `~`-expanded and made absolute: `compose.render` refuses a
@@ -107,7 +107,7 @@ def stack_dir(env: Mapping[str, str] = os.environ) -> Path:
     """The directory that holds `stack.json`, `compose.yaml` and `models/`.
 
     Precedence: `$QCTX_STACK_DIR`, then
-    `${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`. A blank value counts
+    `${XDG_DATA_HOME:-~/.local/share}/mnemosine/stack`. A blank value counts
     as absent, so it falls through to the next source rather than becoming an empty
     path. The result is `~`-expanded and made absolute: `compose.render` refuses a
     non-absolute source path, so the directory is settled here, before anything

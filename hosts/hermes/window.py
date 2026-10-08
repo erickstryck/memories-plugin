@@ -110,7 +110,7 @@ def _sibling(name: str):
         return importlib.import_module(f".{name}", __package__ or None)
     except (ImportError, TypeError):
         pass
-    key = f"memories_plugin_hermes_{name}"
+    key = f"mnemosine_hermes_{name}"
     module = sys.modules.get(key)
     if module is None:
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), f"{name}.py")

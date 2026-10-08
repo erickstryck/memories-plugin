@@ -357,12 +357,12 @@ CUTOVER_APPLY_TIMEOUT = 3600
 #: activates exactly one.
 HOST_INSTALL_COMMANDS = {
     "claude-code": (
-        "claude plugin marketplace add erickstryck/memories-plugin",
-        "claude plugin install memories-plugin@memories-plugin",
+        "claude plugin marketplace add erickstryck/mnemosine",
+        "claude plugin install mnemosine@mnemosine",
     ),
     "hermes": (
-        "hermes plugins install erickstryck/memories-plugin --enable --force",
-        "hermes config set memory.provider memories",
+        "hermes plugins install erickstryck/mnemosine --enable --force",
+        "hermes config set memory.provider mnemosine",
     ),
 }
 
@@ -406,7 +406,7 @@ def _explain_host_install(host: str) -> None:
         print(f"      why: {reason}")
     if host == "hermes":
         current = hermes_memory_provider()
-        if current and current != "memories":
+        if current and current != "mnemosine":
             print(f"      memory.provider is {current!r} today, and will be replaced")
 
 
@@ -469,7 +469,7 @@ def claude_install_path(home: Path) -> str | None:
     # was already broader — it wraps its whole reader in one `except Exception`.
     try:
         data = json.loads(registry.read_text())
-        for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+        for entry in data.get("plugins", {}).get("mnemosine@mnemosine", []):
             if entry.get("installPath"):
                 return entry["installPath"]
     except (OSError, json.JSONDecodeError, AttributeError, TypeError):
@@ -484,7 +484,7 @@ def hermes_install_path(env: dict) -> Path | None:
 
     THE DIRECTORY IS THE WHOLE PROBE, and the design's second half — `hermes config get
     memory.provider` — is deliberately not run here. The cutover that runs next writes
-    `memory.provider: memories` and re-reads it to confirm (the apply block of
+    `memory.provider: mnemosine` and re-reads it to confirm (the apply block of
     `scripts/hermes_cutover.sh`), so the half-installed case this would detect is
     repaired by the very step that follows the detection. Asking would cost a subprocess
     with a 30-second timeout to duplicate state the cutover already owns and already
@@ -495,7 +495,7 @@ def hermes_install_path(env: dict) -> Path | None:
     # case `no_shell_check` diagnoses, so resolving it must not raise before the diagnosis.
     default_home = Path(env.get("HOME") or os.path.expanduser("~")) / ".hermes"
     home = Path(env.get("HERMES_HOME") or default_home)
-    candidate = home / "plugins" / "memories"
+    candidate = home / "plugins" / "mnemosine"
 
     return candidate if candidate.exists() else None
 

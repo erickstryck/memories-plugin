@@ -21,10 +21,27 @@ from .errors import CoreError
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 
-DEFAULT_CONFIG_PATH = Path(
-    os.environ.get("QCTX_CONFIG")
-    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memories-plugin" / "config.json"
-)
+#: The default config path. A fresh install writes `.../mnemosine/config.json`. A
+#: pre-rename install has its config at `.../memories-plugin/config.json`, and that
+#: file is the one holding the Qdrant pointer and the memory-collection name, so it
+#: must keep being found after the rename: when the new path does not exist and the
+#: old one does, the old one wins. `save` writes to the same path it read from
+#: (`read_file`/`save` both resolve through this), so the file is honoured in place,
+#: never silently forked into an empty new path. `QCTX_CONFIG` and `XDG_CONFIG_HOME`
+#: still override, as before.
+def _default_config_path() -> Path:
+    env = os.environ
+    if env.get("QCTX_CONFIG"):
+        return Path(env["QCTX_CONFIG"])
+    xdg = Path(env.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    fresh = xdg / "mnemosine" / "config.json"
+    legacy = xdg / "memories-plugin" / "config.json"
+    if not fresh.exists() and legacy.exists():
+        return legacy
+    return fresh
+
+
+DEFAULT_CONFIG_PATH = _default_config_path()
 
 # Each field lists the environment names that feed it, in order of precedence.
 # The first is the canonical one; the rest are legacy, accepted for compatibility.

@@ -1,8 +1,8 @@
-# memories-plugin no hermes-agent — plano de implementação
+# mnemosine no hermes-agent — plano de implementação
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Tornar o `memories-plugin` instalável no hermes-agent com as mesmas funções e a mesma configuração que ele tem no claude-code.
+**Goal:** Tornar o `mnemosine` instalável no hermes-agent com as mesmas funções e a mesma configuração que ele tem no claude-code.
 
 **Architecture:** O que é DECISÃO move de `hooks/` (adaptador do claude-code) para `core/`; os adaptadores ficam só com protocolo de host. `hosts/hermes/` implementa o contrato `MemoryProvider` do hermes chamando o mesmo `core/`. A equivalência entre os dois hosts é provada por teste, não afirmada.
 
@@ -21,7 +21,7 @@
 - **hermes-agent v0.20.0 instalado em `~/.hermes/hermes-agent`** NÃO tem `RecallStatus`, `recall_status()` nem `unavailable_reason()`. Abstratos: `name`, `is_available`, `initialize`, `get_tool_schemas`.
 - **Orçamento do `prefetch` externo: 8.0s** (`_EXTERNAL_PREFETCH_TIMEOUT_S`). O recall mede 0,5–1,7s, então bloqueante cabe.
 - **`realpath`, nunca `abspath`**, para achar a raiz do repo em `hosts/hermes/` — o plugin é instalado por symlink.
-- Comandos assumem `cd ~/dev/memories-plugin`. Integração exige `set -a; . ~/.bashrc; . ~/.secrets; set +a` e `QCTX_INTEGRATION=1`.
+- Comandos assumem `cd ~/dev/mnemosine`. Integração exige `set -a; . ~/.bashrc; . ~/.secrets; set +a` e `QCTX_INTEGRATION=1`.
 
 ## Estrutura de arquivos
 
@@ -890,7 +890,7 @@ class TestTheContract(unittest.TestCase):
                          f"hermes calls these and the provider has no answer: {unanswered}")
 
     def test_the_name_is_the_install_directory_name(self):
-        self.assertEqual(MemoriesProvider().name, "memories")
+        self.assertEqual(MemoriesProvider().name, "mnemosine")
 
     def test_register_hands_the_provider_to_the_collector(self):
         class Collector:
@@ -952,12 +952,12 @@ class TestSymlinkInstall(unittest.TestCase):
         uses would fail here; only realpath finds core/."""
         home = Path(tempfile.mkdtemp()) / "plugins"
         home.mkdir(parents=True)
-        link = home / "memories"
+        link = home / "mnemosine"
         link.symlink_to(REPO / "hosts" / "hermes")
 
         script = (
             "import importlib.util\n"
-            "spec = importlib.util.spec_from_file_location('u.memories', %r,\n"
+            "spec = importlib.util.spec_from_file_location('u.mnemosine', %r,\n"
             "    submodule_search_locations=[%r])\n"
             "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
             "print(m.REPO_ROOT)\n"
@@ -967,13 +967,13 @@ class TestSymlinkInstall(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         root, name = out.stdout.strip().splitlines()[:2]
         self.assertEqual(Path(root).resolve(), REPO.resolve())
-        self.assertEqual(name, "memories")
+        self.assertEqual(name, "mnemosine")
 
 
 class TestManifest(unittest.TestCase):
     def test_the_yaml_declares_what_the_loader_reads(self):
         text = (REPO / "hosts" / "hermes" / "plugin.yaml").read_text()
-        for key in ("name: memories", "category: memory", "kind: exclusive"):
+        for key in ("name: mnemosine", "category: memory", "kind: exclusive"):
             self.assertIn(key, text)
 
     def test_the_init_contains_the_string_discovery_greps_for(self):
@@ -992,13 +992,13 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'hosts'`
 - [ ] **Step 3: Crie `hosts/hermes/plugin.yaml`**
 
 ```yaml
-name: memories
+name: mnemosine
 version: 0.3.0
 description: "Long-term semantic memory with automatic recall, plus an index for long documents (permanent library and a temporary archive with TTL), on top of Qdrant. Shares its archives with the claude-code plugin."
 category: memory
 kind: exclusive
 license: MIT
-homepage: https://github.com/erickstryck/memories-plugin
+homepage: https://github.com/erickstryck/mnemosine
 ```
 
 Sem `dependencies:` — o núcleo é stdlib puro, e é isso que faz o plugin não poder falhar
@@ -1022,8 +1022,8 @@ MemoryProvider` at module level would make the adapter untestable here. The ABC 
 imported when available, purely to inherit its defaults, and `object` otherwise.
 
 WHY realpath AND NOT abspath. The plugin is installed as a symlink into
-`$HERMES_HOME/plugins/memories`. Measured: through that symlink `abspath(__file__)` is
-`$HERMES_HOME/plugins/memories/__init__.py`, so walking up gives `$HERMES_HOME/plugins`
+`$HERMES_HOME/plugins/mnemosine`. Measured: through that symlink `abspath(__file__)` is
+`$HERMES_HOME/plugins/mnemosine/__init__.py`, so walking up gives `$HERMES_HOME/plugins`
 and `core` is never found. Only `realpath` resolves to the repo.
 
 VERSION REALITY. Written against hermes v0.20.0 as INSTALLED, not as published: the
@@ -1049,10 +1049,10 @@ except ImportError:
 
 
 class MemoriesProvider(_Base):
-    """memories-plugin as a hermes memory provider."""
+    """mnemosine as a hermes memory provider."""
 
     #: Must equal the install directory name — that is what `memory.provider` selects.
-    name = "memories"
+    name = "mnemosine"
 
     def __init__(self):
         self._cfg = None
@@ -1166,7 +1166,7 @@ Expected: `FAILED` com abspath, `OK` com realpath
 ```bash
 H=~/.hermes/hermes-agent
 LINK=$(mktemp -d)/plugins; mkdir -p "$LINK"
-ln -s ~/dev/memories-plugin/hosts/hermes "$LINK/memories"
+ln -s ~/dev/mnemosine/hosts/hermes "$LINK/memories"
 HERMES_HOME=$(dirname "$LINK") python3 -c "
 import sys; sys.path.insert(0,'$H')
 from plugins.memory import discover_memory_providers
@@ -1405,7 +1405,7 @@ e os métodos:
         except ImportError:
             return None
 
-        return RecallStatus(provider_label="memories", count=self._last_count)
+        return RecallStatus(provider_label="mnemosine", count=self._last_count)
 
     def system_prompt_block(self) -> str:
         """STATIC provider info. Recall goes through prefetch, never here."""
@@ -2296,7 +2296,7 @@ adapter drops them rather than routing around that refusal."
 
 ```bash
 #!/usr/bin/env bash
-# Install memories-plugin as the hermes-agent memory provider, in ONE atomic pass.
+# Install mnemosine as the hermes-agent memory provider, in ONE atomic pass.
 #
 # hermes allows exactly ONE external memory provider, so this REPLACES whatever is active
 # — here, a third-party `qdrant` provider holding 1423 points in its own collection. That
@@ -2314,7 +2314,7 @@ set -euo pipefail
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 CONFIG="$HERMES_HOME/config.yaml"
-LINK="$HERMES_HOME/plugins/memories"
+LINK="$HERMES_HOME/plugins/mnemosine"
 APPLY="${1:-}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -2352,7 +2352,7 @@ fi
 say ""
 say "=== what changes ==="
 say "  $LINK -> $ROOT/hosts/hermes   (symlink; one source of truth)"
-say "  $CONFIG: memory.provider: ${current:-<none>} -> memories"
+say "  $CONFIG: memory.provider: ${current:-<none>} -> mnemosine"
 say ""
 say "  UNCHANGED: every Qdrant collection, the 1423 points in hermes_memory, the qdrant"
 say "  provider directory (disabled by config, not deleted), ~/.secrets, the .bashrc URLs."
@@ -2385,14 +2385,14 @@ for line in src.splitlines(keepends=True):
         in_memory = False
     if in_memory and re.match(r'^(\s+)provider:\s*\S+', line):
         indent = re.match(r'^(\s+)', line).group(1)
-        out.append(f"{indent}provider: memories\n"); done = True; continue
+        out.append(f"{indent}provider: mnemosine\n"); done = True; continue
     out.append(line)
 if not done:
     sys.exit("no memory.provider line found — set it by hand")
 sys.stdout.write("".join(out))
 PY
 then
-  mv "$tmp" "$CONFIG"; ok "memory.provider = memories"
+  mv "$tmp" "$CONFIG"; ok "memory.provider = mnemosine"
 else
   rm -f "$tmp"; fail "could not rewrite config.yaml — set memory.provider by hand"
 fi
@@ -2432,7 +2432,7 @@ Expected: relatório de checks, `DRY RUN`, e o `diff` silencioso
 ```bash
 FAKE=$(mktemp -d); mkdir -p "$FAKE/plugins"
 printf 'memory:\n  provider: qdrant\n' > "$FAKE/config.yaml"
-mkdir -p "$FAKE/plugins/memories"          # não-symlink no lugar: força o FAIL
+mkdir -p "$FAKE/plugins/mnemosine"          # não-symlink no lugar: força o FAIL
 HERMES_HOME="$FAKE" ./scripts/hermes_cutover.sh --apply >/tmp/co.out 2>&1
 echo "  exit: $?"
 grep -E "FAIL|one or more steps" /tmp/co.out | head -2
@@ -2449,7 +2449,7 @@ for i in 1 2; do HERMES_HOME="$FAKE" ./scripts/hermes_cutover.sh --apply >/dev/n
 grep -E "provider|keep|nudge" "$FAKE/config.yaml"
 rm -rf "$FAKE"
 ```
-Expected: os dois com `exit: 0`, `provider: memories`, e `nudge_interval`/`keep` preservados
+Expected: os dois com `exit: 0`, `provider: mnemosine`, e `nudge_interval`/`keep` preservados
 
 - [ ] **Step 5: Atualize README e as duas skills**
 
@@ -2463,11 +2463,11 @@ The same core serves two hosts, with the same operations and the same configurat
 | | claude-code | hermes-agent |
 |---|---|---|
 | adapter | `hooks/` | `hosts/hermes/` |
-| install | `claude plugin marketplace add .` | symlink into `$HERMES_HOME/plugins/memories` |
+| install | `claude plugin marketplace add .` | symlink into `$HERMES_HOME/plugins/mnemosine` |
 | recall | `UserPromptSubmit` hook | `prefetch()` |
 | checkpoint | second `UserPromptSubmit` hook | rides along in `prefetch()` on the Nth turn |
 | operations | `qctx` CLI + skills | 15 tools + the same CLI |
-| configuration | `~/.config/memories-plugin/config.json` | the same file |
+| configuration | `~/.config/mnemosine/config.json` | the same file |
 
 Equivalence is not a claim in this table — `tests/test_host_equivalence.py` renders every
 block state through both adapters and requires byte-identical output.

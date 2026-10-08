@@ -37,7 +37,7 @@ try:
     data = json.load(open(sys.argv[1]))
 except Exception:
     raise SystemExit(0)
-for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+for entry in data.get("plugins", {}).get("mnemosine@mnemosine", []):
     if entry.get("installPath"):
         print(entry["installPath"])
         break
@@ -71,7 +71,7 @@ resolve_root() {
   fi
 
   # Try hermes install — only if own tree didn't work
-  candidate="${HERMES_HOME:-$HOME/.hermes}/plugins/memories"
+  candidate="${HERMES_HOME:-$HOME/.hermes}/plugins/mnemosine"
   if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
     printf '%s\n' "$candidate"
     return 0

@@ -112,18 +112,18 @@ class TestTheRepositoryRootIsAWorkingHermesPlugin(unittest.TestCase):
     @unittest.skipUnless(HERMES_PY.exists(), f"hermes is not installed at {HERMES_SRC}")
     def test_the_REAL_loader_returns_a_provider_from_a_clone(self):
         """The half a fake cannot prove. Builds the exact layout an install produces — the
-        tracked tree at `$HERMES_HOME/plugins/memories/` — and asks hermes' own loader for a
+        tracked tree at `$HERMES_HOME/plugins/mnemosine/` — and asks hermes' own loader for a
         provider. Everything is temporary: `HERMES_HOME` points at the box, so the real
         `~/.hermes` is neither read nor written."""
         box = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, box, True)
-        tracked_tree_into(box / "plugins" / "memories")
+        tracked_tree_into(box / "plugins" / "mnemosine")
         probe = (
             "import os, sys, pathlib\n"
             f"os.environ['HERMES_HOME'] = {str(box)!r}\n"
             f"sys.path.insert(0, {str(HERMES_SRC)!r})\n"
             "from plugins.memory import _load_provider_from_dir\n"
-            f"p = _load_provider_from_dir(pathlib.Path({str(box / 'plugins' / 'memories')!r}))\n"
+            f"p = _load_provider_from_dir(pathlib.Path({str(box / 'plugins' / 'mnemosine')!r}))\n"
             "print(type(p).__name__ if p else 'NONE')\n"
             "print(len(p.get_tool_schemas()) if p else 0)\n"
         )
@@ -340,7 +340,7 @@ class TestTheREADMEStatesWhatFAILSSILENTLY(unittest.TestCase):
     def test_it_names_the_marketplace_form_of_the_update_command(self):
         """`claude plugin update <bare name>` answers "not found", which reads like a broken
         install. The form that works carries the marketplace."""
-        self.assertIn("memories-plugin@memories-plugin", self.docs())
+        self.assertIn("mnemosine@mnemosine", self.docs())
 
 
 class TestTheTreeDoesNotBLOCKItsOwnInstall(unittest.TestCase):

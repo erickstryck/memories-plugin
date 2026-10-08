@@ -169,7 +169,7 @@ def hook_env(**overrides) -> dict:
 
     Nothing here may reach the operator's world: `QCTX_CONFIG` points at a file that will
     never exist (so the environment is the whole config), `QCTX_STATE_DIR` is a fresh temp
-    directory (so the breaker never touches ~/.memories-plugin), and Qdrant points at a
+    directory (so the breaker never touches ~/.mnemosine), and Qdrant points at a
     port nobody listens on — refused instantly, which is the degraded path these tests
     WANT unless one of them stands a server up itself.
     """

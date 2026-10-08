@@ -25,7 +25,7 @@ import tempfile
 #: Prompts chosen to hit the three block states on this archive: two that find memories, one
 #: that should find nothing, one the query builder skips as too short.
 PROMPTS = [
-    "como funciona o claim do daemon e a escrita atomica de estado no memories-plugin",
+    "como funciona o claim do daemon e a escrita atomica de estado no mnemosine",
     "qual a sequencia de update do plugin no claude code a partir do github",
     "receita de bolo de cenoura com cobertura de chocolate",
     "ok",

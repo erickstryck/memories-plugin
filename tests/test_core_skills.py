@@ -48,7 +48,7 @@ class TestItDescribesTheREALDirectory(unittest.TestCase):
         directory. The case that distinguishes them is the next test.
         """
         box = Path(tempfile.mkdtemp())
-        link = box / "memories"
+        link = box / "mnemosine"
         try:
             os.symlink(REPO, link)
         except OSError:

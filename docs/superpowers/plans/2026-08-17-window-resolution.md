@@ -883,7 +883,7 @@ model:
   base_url: https://server.example/api/v1
   key_env: MY_KEY_VAR
 memory:
-  provider: memories
+  provider: mnemosine
 """
 
 

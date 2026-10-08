@@ -94,7 +94,7 @@ class LauncherResolution(unittest.TestCase):
 
     def test_qctx_home_wins_over_everything(self):
         chosen = fake_tree(Path(self.tmp.name) / "chosen")
-        fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        fake_tree(self.home / ".hermes" / "plugins" / "mnemosine")
         self.env["QCTX_HOME"] = str(chosen)
         self.assertEqual(run_root(LAUNCHER, self.env), str(chosen))
 
@@ -103,7 +103,7 @@ class LauncherResolution(unittest.TestCase):
         self.assertEqual(run_root(LAUNCHER, self.env), str(REPO))
 
     def test_copy_outside_a_tree_finds_the_hermes_install(self):
-        tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        tree = fake_tree(self.home / ".hermes" / "plugins" / "mnemosine")
         copy = launcher_copy(self.home)
         self.assertEqual(run_root(copy, self.env), str(tree))
 
@@ -112,7 +112,7 @@ class LauncherResolution(unittest.TestCase):
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
         registry.write_text(json.dumps({"version": 2, "plugins": {
-            "memories-plugin@memories-plugin": [{"installPath": str(tree)}]}}))
+            "mnemosine@mnemosine": [{"installPath": str(tree)}]}}))
         copy = launcher_copy(self.home)
         self.assertEqual(run_root(copy, self.env), str(tree))
 
@@ -129,7 +129,7 @@ class LauncherResolution(unittest.TestCase):
         # unusable candidate is skipped and the hermes install answers — and not the
         # `|| candidate=""` guard, which this cannot reach; the helper's docstring says
         # why.
-        tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        tree = fake_tree(self.home / ".hermes" / "plugins" / "mnemosine")
         done = run_with_own_tree_deleted(Path(self.tmp.name), self.env)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.strip(), str(tree))
@@ -156,9 +156,9 @@ class LauncherResolution(unittest.TestCase):
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
         copy = launcher_copy(self.home)
-        for malformed in ("[]", '["memories-plugin@memories-plugin"]', '"a string"',
+        for malformed in ("[]", '["mnemosine@mnemosine"]', '"a string"',
                           '{"plugins": []}',
-                          '{"plugins": {"memories-plugin@memories-plugin": ["x"]}}',
+                          '{"plugins": {"mnemosine@mnemosine": ["x"]}}',
                           "not json at all", ""):
             with self.subTest(registry=malformed):
                 registry.write_text(malformed)
@@ -171,7 +171,7 @@ class LauncherResolution(unittest.TestCase):
     def test_a_malformed_registry_still_lets_the_hermes_install_answer(self):
         """A broken registry must not swallow the candidate AFTER it — the fall-through
         is the whole design, and a reader that aborted would take it down."""
-        tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        tree = fake_tree(self.home / ".hermes" / "plugins" / "mnemosine")
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
         registry.write_text("[]")
@@ -204,7 +204,7 @@ class LauncherResolution(unittest.TestCase):
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
         registry.write_text(json.dumps({"version": 2, "plugins": {
-            "memories-plugin@memories-plugin": [
+            "mnemosine@mnemosine": [
                 {"installPath": str(Path(self.tmp.name) / "unused_registry_tree")}]}}))
         self.env["QCTX_HOME"] = str(chosen)
 

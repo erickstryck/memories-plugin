@@ -11,8 +11,8 @@
 # 0.2.0, measured), and drift is now red instead of silent. Bump `core/version.py`, run the
 # suite, tag the commit `v<version>` — `--ref` pins the tag.
 manifest_version: 1
-name: memories
-version: 1.3.0
+name: mnemosine
+version: 2.0.0
 kind: standalone
 description: >-
   Long-term memory, document indexing and repository search in Qdrant, shared with the

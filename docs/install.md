@@ -32,18 +32,18 @@ a `claude` binary and no plugin yet.
 For **development**, add it from a path instead, and edits take effect with no reinstall:
 
 ```bash
-claude plugin marketplace add ~/dev/memories-plugin
-claude plugin install memories-plugin@memories-plugin
+claude plugin marketplace add ~/dev/mnemosine
+claude plugin install mnemosine@mnemosine
 ```
 
 Then **open a new terminal**; the harness reads `settings.json` at start-up.
 
 To pick up a newer commit later, the plugin must be named **with its marketplace**; the bare name
-answers `Plugin "memories-plugin" not found`, which reads like a broken install and is not one:
+answers `Plugin "mnemosine" not found`, which reads like a broken install and is not one:
 
 ```bash
-claude plugin marketplace update memories-plugin
-claude plugin update memories-plugin@memories-plugin      # name@marketplace, not just the name
+claude plugin marketplace update mnemosine
+claude plugin update mnemosine@mnemosine      # name@marketplace, not just the name
 ```
 
 The version it reports is the one in the manifests, and `core/version.py` is where that number
@@ -51,7 +51,7 @@ is decided. Three manifests cannot read Python, so the string is written out fou
 `tests/test_installable_from_git.py::TestTheVersionIsONENumber` fails on the first disagreement:
 the number went stale here once (0.3.0 declared, 0.2.0 installed, measured), and that drift is
 now a red test instead of a silent lie. To pin an exact build, `--ref v1.0.0` (or a commit SHA)
-still does it. `claude plugin details memories-plugin` lists what it found: 3 skills, 4 hooks.
+still does it. `claude plugin details mnemosine` lists what it found: 3 skills, 4 hooks.
 
 That registers, with no path for you to maintain (the hooks resolve
 `${CLAUDE_PLUGIN_ROOT}` themselves):
@@ -65,7 +65,7 @@ That registers, with no path for you to maintain (the hooks resolve
 | skills `memory` and `doc-index` | loaded on demand, when the model needs them |
 
 To check it took: `claude plugin list` shows it enabled, and the recall log at
-`~/.memories-plugin/state/recall.log` gets one round per prompt, **one, not two**.
+`~/.mnemosine/state/recall.log` gets one round per prompt, **one, not two**.
 
 **If you already had equivalent hooks registered by hand in `settings.json`, remove them
 in the SAME pass; `./scripts/cutover.sh --apply` does both at once. Two sets fire
@@ -75,7 +75,7 @@ the context cost and adds no information.
 ## Install on hermes-agent
 
 The three-line fresh hermes sequence is in the [README](../README.md#install-by-os): install
-with `--enable --force`, set `memory.provider memories`, run the wizard. What each of
+with `--enable --force`, set `memory.provider mnemosine`, run the wizard. What each of
 the three costs:
 
 **Why `--force` is required, and what you are agreeing to.** hermes scans a cloned plugin before
@@ -91,8 +91,8 @@ for every plugin from anywhere, which is a policy change rather than a decision 
 **Two things will stop the install before it starts.** Both were measured, and neither message
 mentions the real cause:
 
-- *"Invalid plugin name 'memories': resolves outside the plugins directory."* You already have a
-  **development symlink** at `$HERMES_HOME/plugins/memories`. The installer resolves the target
+- *"Invalid plugin name 'mnemosine': resolves outside the plugins directory."* You already have a
+  **development symlink** at `$HERMES_HOME/plugins/mnemosine`. The installer resolves the target
   path, follows the link out of the plugins directory, and refuses. `--force` does not help: the
   name is validated first. Remove the link, or keep it and skip the install (see below).
 - A `dangerous` verdict, where `--force` does **not** override. One `critical` finding is enough,
@@ -101,7 +101,7 @@ mentions the real cause:
   appears; see `tests/test_installable_from_git.py`.
 
 **On your development machine, prefer the symlink and skip the install entirely.** A clone is
-a copy: edits to your checkout change nothing until `hermes plugins update memories`. The symlink is
+a copy: edits to your checkout change nothing until `hermes plugins update mnemosine`. The symlink is
 always at HEAD, with no update step, which is what you want where you are editing the code.
 
 `--ref <40-char-sha>` pins an exact commit. The installer names any key missing from
@@ -109,7 +109,7 @@ always at HEAD, with no update step, which is what you want where you are editin
 that lives only in an interactive environment is one it will not have. **The keys never go in a
 config file.**
 
-Installing the SUBDIRECTORY (`erickstryck/memories-plugin/hosts/hermes`) is accepted syntax and
+Installing the SUBDIRECTORY (`erickstryck/mnemosine/hosts/hermes`) is accepted syntax and
 does not work: the adapter imports `core/` from the repository root, which a subdirectory install
 does not bring. It fails silently (hermes' loader swallows a broken provider at debug level), so
 install the whole repository, which is what the root `__init__.py` is for.
@@ -117,7 +117,7 @@ install the whole repository, which is what the root `__init__.py` is for.
 For **development**, keep the symlink install instead, so edits take effect immediately:
 
 ```bash
-ln -s ~/dev/memories-plugin/hosts/hermes ~/.hermes/plugins/memories
+ln -s ~/dev/mnemosine/hosts/hermes ~/.hermes/plugins/mnemosine
 ```
 
 **Installing is not the whole job on this host, and the missing half is silent.** A hermes plugin
@@ -133,7 +133,7 @@ big-file read guard is **not** registered. That is what the script below is for:
 It reports the credentials, the URLs a shell-less hermes would find, the symlink, the provider
 selection and the guard, and `--apply` writes only what is missing. It accepts all three install
 shapes and leaves whichever you have alone: the CLONE that `hermes plugins install` puts at
-`$HERMES_HOME/plugins/memories` (it copies the repository there, it does not link), a symlink to
+`$HERMES_HOME/plugins/mnemosine` (it copies the repository there, it does not link), a symlink to
 the repository root, and a symlink to `hosts/hermes`. All three load, because the root
 `__init__.py` re-exports the same provider the adapter directory does. The test is the inode,
 not the text of the link, so a relative symlink counts as the same install as an absolute one.
@@ -198,8 +198,8 @@ nothing here is optional except where it says so, and the two steps people skip 
 | 6 | `qctx setup`, then the no-shell check | the only way to know steps 2 and 3 actually took |
 
 ```bash
-git clone git@github.com:erickstryck/memories-plugin.git
-cd memories-plugin
+git clone git@github.com:erickstryck/mnemosine.git
+cd mnemosine
 python3 -m unittest discover -s tests    # offline; no network, no deps
 ln -s "$PWD/bin/qctx" ~/.local/bin/qctx  # so `qctx` works from anywhere
 ```
@@ -245,10 +245,10 @@ the move is reported.
 
 **Where the data lives.** One directory holds the state, the compose file and
 the models: `$QCTX_STACK_DIR` when set, otherwise
-`${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`, and inside it
+`${XDG_DATA_HOME:-~/.local/share}/mnemosine/stack`, and inside it
 `stack.json`, `compose.yaml` and `models/`. Qdrant's own data lives in a named
 volume the engine prefixes with the project:
-`memories-plugin_memories-plugin-qdrant` by default. `qctx stack down` stops
+`mnemosine_mnemosine-qdrant` by default. `qctx stack down` stops
 the containers and keeps both; `qctx stack remove` deletes the files, and only
 deletes the models (`--purge-models`) and the volume (`--purge-data`) when
 asked.

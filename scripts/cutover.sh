@@ -117,7 +117,7 @@ say "=== what changes ==="
 say "  settings.json:"
 say "    - removes the manual UserPromptSubmit hooks (recall and checkpoint)"
 say "    + registers the local marketplace $ROOT"
-say "    + enables the memories-plugin plugin (which brings the same two hooks)"
+say "    + enables the mnemosine plugin (which brings the same two hooks)"
 say "    + adds the statusLine that reports the context window to the big-file guard,"
 say "      unless a status line is already configured"
 say "  MCP server (memory becomes the CLI):"
@@ -159,8 +159,8 @@ jq --arg root "$ROOT" '
   # do not leave an empty `hooks` key behind: an empty stanza confuses whoever reads
   # the file later looking for what is registered
   | (if ((.hooks // {}) | length) == 0 then del(.hooks) else . end)
-  | .extraKnownMarketplaces["memories-plugin"] = {source: {source: "directory", path: $root}}
-  | .enabledPlugins["memories-plugin@memories-plugin"] = true
+  | .extraKnownMarketplaces["mnemosine"] = {source: {source: "directory", path: $root}}
+  | .enabledPlugins["mnemosine@mnemosine"] = true
 ' "$SETTINGS" > "$tmp"
 if jq -e . "$tmp" >/dev/null 2>&1; then
   mv "$tmp" "$SETTINGS"; ok "settings.json updated"
@@ -229,7 +229,7 @@ say "  2. Confirm the old MCP server does NOT come back — it is read at sessio
 say "     so a running session keeps its process either way:"
 say "       ps -eo args | grep qdrant_memory | grep -v grep"
 say "  3. Check in the log that there is ONE round per prompt, not two:"
-say "       tail -f \"\${QCTX_STATE_DIR:-\$HOME/.memories-plugin/state}/recall.log\""
+say "       tail -f \"\${QCTX_STATE_DIR:-\$HOME/.mnemosine/state}/recall.log\""
 say "  4. If anything goes wrong, the .bak-$STAMP backups restore the previous state."
 
 exit "$failed"

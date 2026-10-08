@@ -674,7 +674,7 @@ class HostDetection(unittest.TestCase):
     def test_claude_present_returns_the_live_path(self):
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
-        registry.write_text(json.dumps({"plugins": {"memories-plugin@memories-plugin": [
+        registry.write_text(json.dumps({"plugins": {"mnemosine@mnemosine": [
             {"installPath": "/somewhere/b8008f7dac88"}]}}))
         self.assertEqual(self.qctx.claude_install_path(self.home),
                          "/somewhere/b8008f7dac88")
@@ -691,9 +691,9 @@ class HostDetection(unittest.TestCase):
         """
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
-        for malformed in ("[]", '["memories-plugin@memories-plugin"]', '"a string"',
+        for malformed in ("[]", '["mnemosine@mnemosine"]', '"a string"',
                           '{"plugins": []}',
-                          '{"plugins": {"memories-plugin@memories-plugin": ["x"]}}',
+                          '{"plugins": {"mnemosine@mnemosine": ["x"]}}',
                           "not json at all", ""):
             with self.subTest(registry=malformed):
                 registry.write_text(malformed)
@@ -702,7 +702,7 @@ class HostDetection(unittest.TestCase):
     def test_the_hermes_command_carries_force_and_the_provider_switch(self):
         joined = " ".join(self.qctx.HOST_INSTALL_COMMANDS["hermes"])
         self.assertIn("--force", joined)
-        self.assertIn("memory.provider memories", joined)
+        self.assertIn("memory.provider mnemosine", joined)
 
 
 class LauncherInstall(unittest.TestCase):
@@ -1038,7 +1038,7 @@ class HostGroups(unittest.TestCase):
 
     def test_an_installed_plugin_is_recognised_and_not_reinstalled(self):
         self.stub_host("hermes")
-        (self.home / ".hermes" / "plugins" / "memories").mkdir(parents=True)
+        (self.home / ".hermes" / "plugins" / "mnemosine").mkdir(parents=True)
         with mock.patch.dict(os.environ, self.env(), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             present = self.qctx._host_install_group(Args(), self.root)
@@ -1047,7 +1047,7 @@ class HostGroups(unittest.TestCase):
         self.assertEqual(self.calls(), "", "it reinstalled a plugin that was there")
 
     def test_a_missing_plugin_is_installed_with_the_commands_it_showed(self):
-        self.stub_host("hermes", installs=self.home / ".hermes" / "plugins" / "memories")
+        self.stub_host("hermes", installs=self.home / ".hermes" / "plugins" / "mnemosine")
         with mock.patch.dict(os.environ, self.env(), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             present = self.qctx._host_install_group(Args(), self.root)
@@ -1055,7 +1055,7 @@ class HostGroups(unittest.TestCase):
         for command in self.qctx.HOST_INSTALL_COMMANDS["hermes"]:
             self.assertIn(command, shown)
         self.assertIn("plugins install", self.calls())
-        self.assertIn("config set memory.provider memories", self.calls())
+        self.assertIn("config set memory.provider mnemosine", self.calls())
         self.assertTrue(present["hermes"])
 
     def test_the_install_commands_go_through_no_shell_and_carry_a_timeout(self):
@@ -1116,7 +1116,7 @@ class HostGroups(unittest.TestCase):
         `memory.provider` here throws away whatever provider was set. They lived only
         as a code comment, and the wizard printed the bare commands."""
         self.stub_host("hermes", provider="some-other-provider",
-                       installs=self.home / ".hermes" / "plugins" / "memories")
+                       installs=self.home / ".hermes" / "plugins" / "mnemosine")
         with mock.patch.dict(os.environ, self.env(), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.qctx._host_install_group(Args(), self.root)

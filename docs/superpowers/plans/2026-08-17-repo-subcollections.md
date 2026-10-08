@@ -1132,7 +1132,7 @@ def state_dir() -> Path:
     and is imported LAZILY so the common path does not pay for it. A pure helper inside a
     network module forces every caller to choose between an unwanted import and a copy.
     """
-    return Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
+    return Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".mnemosine" / "state"))
 ```
 
 Em `core/inventory.py`, troque a definição por `from .knobs import state_dir` (mantendo o uso

@@ -80,9 +80,9 @@ PORTS = {"qdrant": 6333, "embed": 8003, "rerank": 8004}
 CONTAINER_PORTS = {"qdrant": 6333, "embed": 8080, "rerank": 8080}
 PORT_FALLBACK_OFFSET = 10000
 
-PROJECT = "memories-plugin"
+PROJECT = "mnemosine"
 SERVICES = ("qdrant", "embed", "rerank")
-VOLUME = "memories-plugin-qdrant"
+VOLUME = "mnemosine-qdrant"
 
 _QDRANT_VERSION = re.compile(r"^v(\d+\.\d+\.\d+)")
 

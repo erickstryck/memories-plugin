@@ -149,8 +149,8 @@ DOCKER_COMPOSE_BINARY_VERSION = Completed(0, "Docker Compose version v5.2.0\n")
 
 #: The real `podman stats --no-stream --format json`: a JSON LIST of objects.
 PODMAN_STATS = json.dumps([
-    {"name": "memories-plugin-qdrant", "mem_usage": "190.7MB / 132.5GB"},
-    {"name": "memories-plugin-embed", "mem_usage": "2.0GiB / 132.5GB"},
+    {"name": "mnemosine-qdrant", "mem_usage": "190.7MB / 132.5GB"},
+    {"name": "mnemosine-embed", "mem_usage": "2.0GiB / 132.5GB"},
 ])
 
 #: `podman stats` of a container that does not exist, measured 2026-10-07 (podman 5.7.0):
@@ -163,8 +163,8 @@ PODMAN_STATS_NO_SUCH_CONTAINER = Completed(
 
 #: The Docker shape, an example (there is no Docker engine here): one JSON object per line.
 DOCKER_STATS = (
-    '{"Name": "memories-plugin-qdrant", "MemUsage": "1.8GiB / 125GiB"}\n'
-    '{"Name": "memories-plugin-embed", "MemUsage": "2.0GiB / 125GiB"}\n')
+    '{"Name": "mnemosine-qdrant", "MemUsage": "1.8GiB / 125GiB"}\n'
+    '{"Name": "mnemosine-embed", "MemUsage": "2.0GiB / 125GiB"}\n')
 
 PROBE_FILE = Path("/x/probe/intel.yaml")
 
@@ -531,15 +531,15 @@ class TestTheSizeAndStats(unittest.TestCase):
                                     Completed(0, PODMAN_STATS)}),
                         which={"podman": "/usr/bin/podman"})
         self.assertEqual(podman.stats(["a", "b"]),
-                         {"memories-plugin-qdrant": 190700000,
-                          "memories-plugin-embed": 2147483648})
+                         {"mnemosine-qdrant": 190700000,
+                          "mnemosine-embed": 2147483648})
 
         docker = Docker(FakeRunner({("docker", "stats", "--no-stream", "--format", DOCKER_JSON):
                                     Completed(0, DOCKER_STATS)}),
                         which={"docker": "/usr/bin/docker"})
         self.assertEqual(docker.stats(["a", "b"]),
-                         {"memories-plugin-qdrant": 1932735283,
-                          "memories-plugin-embed": 2147483648})
+                         {"mnemosine-qdrant": 1932735283,
+                          "mnemosine-embed": 2147483648})
 
         self.assertEqual(podman.stats([]), {})
         self.assertEqual(Docker(FakeRunner({}), which={}).stats([]), {})
@@ -937,7 +937,7 @@ class TestReviewRoundR2(unittest.TestCase):
     def test_a_failed_docker_stats_is_a_stack_error_not_a_traceback(self):
         # measured 2026-10-07 with the Docker CLI 27.5.1 against a missing socket:
         #   DOCKER_HOST=unix:///nonexistent.sock docker stats --no-stream \
-        #     --format '{{json .}}' memories-plugin-qdrant
+        #     --format '{{json .}}' mnemosine-qdrant
         # exits 1 with this one stderr line
         dead = Completed(1, "", "Cannot connect to the Docker daemon at "
                                 "unix:///nonexistent.sock. Is the docker daemon running?\n")
@@ -945,7 +945,7 @@ class TestReviewRoundR2(unittest.TestCase):
                                      DOCKER_JSON): dead}),
                         which={"docker": "/usr/bin/docker"})
         with self.assertRaises(StackError) as ctx:
-            docker.stats(["memories-plugin-qdrant"])
+            docker.stats(["mnemosine-qdrant"])
         self.assertEqual(ctx.exception.step, "runtime")
         self.assertEqual(str(ctx.exception),
                          "runtime: docker stats failed: " + dead.stderr.strip())

@@ -183,10 +183,10 @@ class TestTheSkillsNeverTakeTheProviderDown(unittest.TestCase):
 
 
 class TestTheNamespaceIsSpelledOnce(unittest.TestCase):
-    """`memories:memory` is hermes' spelling, and it is built in one place."""
+    """`mnemosine:memory` is hermes' spelling, and it is built in one place."""
 
     def test_it_qualifies_a_bare_name_the_way_hermes_does(self):
-        self.assertEqual(qualified_skill("memory"), "memories:memory")
+        self.assertEqual(qualified_skill("memory"), "mnemosine:memory")
 
     def test_the_namespace_matches_the_manifest_the_loader_reads(self):
         """hermes derives the namespace from the plugin's declared name; a rename there
@@ -199,7 +199,7 @@ class TestTheNamespaceIsSpelledOnce(unittest.TestCase):
 
         Found by review, as a mutation the suite did not kill: `PRIMARY_SKILL = "doc-index"`
         left all 1644 tests green while every session, on every turn, was told
-        `skill_view("memories:doc-index")` -- sent to the document-indexing skill instead of
+        `skill_view("mnemosine:doc-index")` -- sent to the document-indexing skill instead of
         the memory one. The two tests that touched this were both blind to it: one asserted
         only that the name is among the three shipped (true for any of them), the other that
         the block contains `qualified_skill(PRIMARY_SKILL)` (tautological -- both sides

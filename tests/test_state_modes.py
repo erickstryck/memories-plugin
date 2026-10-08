@@ -8,7 +8,7 @@ five writers never went through it, each hand-rolling `write_text` and taking wh
 umask gave them.
 
 MEASURED on the real machine before this existed: 105 of 107 files in
-`~/.memories-plugin/state` were published 0o664 under the common umask 0o002, and only the
+`~/.mnemosine/state` were published 0o664 under the common umask 0o002, and only the
 two that go through `statefile.write_json` were 0o600. Among the 0o664 files are
 `recall-<session>.json`, which hold the round number and THE IDS OF THE MEMORIES INJECTED
 INTO EACH SESSION -- not the memory text, but a per-session map of what was recalled and

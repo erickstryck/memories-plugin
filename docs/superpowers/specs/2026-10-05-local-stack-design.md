@@ -1,6 +1,6 @@
 # Stack de memória provisionada pelo `qctx` (local, servidor e GPU no Windows): desenho
 
-Data: 2026-10-05, revista em 2026-10-06. Repo: `memories-plugin` @ `05ff84b` (v1.3.0).
+Data: 2026-10-05, revista em 2026-10-06. Repo: `mnemosine` @ `05ff84b` (v1.3.0).
 
 Estado: as decisões da tabela "O que se decidiu" foram tomadas pelo usuário no brainstorming de
 2026-10-05 e 2026-10-06. O que está marcado **[a validar]** é proposta minha, escrita a pedido do
@@ -329,7 +329,7 @@ exposição é a publicação só em `127.0.0.1`.
 - Portas: `127.0.0.1:6333` (Qdrant HTTP), `:8003` (embed), `:8004` (rerank), as mesmas do README.
   Se uma estiver ocupada, a etapa propõe a primeira livre a partir de `porta + 10000` e mostra a
   escolha antes de seguir.
-- Diretório: `$QCTX_STACK_DIR`, ou `${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`, com
+- Diretório: `$QCTX_STACK_DIR`, ou `${XDG_DATA_HOME:-~/.local/share}/mnemosine/stack`, com
   `models/`, `compose.yaml` e `stack.json`. Fica sob `$HOME`, que o Docker Desktop e a VM do
   Podman compartilham por padrão. A etapa recusa, com um `StackError` que aponta para
   `QCTX_STACK_DIR`, qualquer diretório que não seja absoluto ou que leve `:` (quebra a
@@ -340,9 +340,9 @@ exposição é a publicação só em `127.0.0.1`.
   é portável: medido em 2026-10-07, `a$$b` ficou `a$$b` no docker-compose e virou `a$b` no
   podman-compose. Acento dentro do BMP funciona nos dois e é aceito (medido em 2026-10-06 nos
   dois providers com arquivos descartáveis).
-- Projeto compose `memories-plugin`, serviços `qdrant`, `embed` e `rerank`, volume nomeado
-  `memories-plugin-qdrant`. Os dois providers prefixam o volume com o projeto, então o nome real
-  no engine é `memories-plugin_memories-plugin-qdrant` (medido no docker-compose e no
+- Projeto compose `mnemosine`, serviços `qdrant`, `embed` e `rerank`, volume nomeado
+  `mnemosine-qdrant`. Os dois providers prefixam o volume com o projeto, então o nome real
+  no engine é `mnemosine_mnemosine-qdrant` (medido no docker-compose e no
   podman-compose). É o prefixo que impede a integração opt-in, que usa outro projeto, de tocar no
   acervo da stack de verdade.
 - Cada serviço leva `container_name: <projeto>-<serviço>`. Sem isso, o docker-compose nomeia
@@ -454,13 +454,13 @@ Exemplo renderizado, Linux + Podman + `amd` (digests encurtados aqui; o arquivo 
 ```yaml
 services:
   qdrant:
-    container_name: "memories-plugin-qdrant"
+    container_name: "mnemosine-qdrant"
     image: "docker.io/qdrant/qdrant:v1.19.2-unprivileged@sha256:efb96a94…"
     restart: "always"
     ports:
       - "127.0.0.1:6333:6333"
     volumes:
-      - "memories-plugin-qdrant:/qdrant/storage"
+      - "mnemosine-qdrant:/qdrant/storage"
     environment:
       QDRANT__TELEMETRY_DISABLED: "true"
     cap_drop:
@@ -468,7 +468,7 @@ services:
     security_opt:
       - "no-new-privileges:true"
   embed:
-    container_name: "memories-plugin-embed"
+    container_name: "mnemosine-embed"
     image: "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee…"
     restart: "always"
     command:
@@ -503,7 +503,7 @@ services:
   rerank:
     # igual ao embed, com --reranking, o outro GGUF e 127.0.0.1:8004:8080
 volumes:
-  "memories-plugin-qdrant": {}
+  "mnemosine-qdrant": {}
 ```
 
 Fixtures golden, uma por renderização distinta. Na fase 1, nove: `linux-docker-{cpu,dri,nvidia}`,
@@ -780,8 +780,8 @@ Em todos os casos, `qctx stack status` acusa a stack parada e aponta `qctx stack
 Para servir a stack a outras máquinas, sem o plugin nem host nenhum nesta:
 
 ```
-git clone https://github.com/erickstryck/memories-plugin
-memories-plugin/bin/qctx stack install --listen <ip>
+git clone https://github.com/erickstryck/mnemosine
+mnemosine/bin/qctx stack install --listen <ip>
 ```
 
 É o mesmo caso de uso da etapa local, com outro papel: escuta no endereço escolhido, exige chaves

@@ -8,7 +8,7 @@
 manter o índice em dia sozinho enquanto o host estiver vivo.
 
 **Architecture:** um daemon por usuário, iniciado sob demanda. Todo o estado é JSON em
-`~/.memories-plugin/state/`, então `status` lê arquivo em vez de falar com o processo. O daemon
+`~/.mnemosine/state/`, então `status` lê arquivo em vez de falar com o processo. O daemon
 encerra quando nenhum lease de host continua vivo, e o teste de vida é `(pid, starttime)` — cobre
 saída limpa e `kill -9` igualmente.
 
@@ -39,7 +39,7 @@ máquina. Limpe com `rm -rf $TMPDIR/tmp*` ao terminar, e `find . -name __pycache
 - **A suíte nunca fica vermelha em nenhum commit.**
 - **Nenhum teste sobe daemon de verdade nem escreve em coleção real do Qdrant.** O executor de
   trabalho é injetável, como `probe` em `refresh_window`.
-- **Nada escreve em `~/.claude/`, `~/.hermes/` ou `~/.config/memories-plugin/` durante testes.**
+- **Nada escreve em `~/.claude/`, `~/.hermes/` ou `~/.config/mnemosine/` durante testes.**
 - **Nenhuma falha abre para "não há nada".** Busca que falha e devolve vazio é indistinguível de
   ausência real.
 - **Toda guarda precisa de sonda de mutação que MORDA**, com contagem verificada e escopo

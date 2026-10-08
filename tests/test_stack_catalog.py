@@ -85,9 +85,9 @@ class TestThePinnedValues(unittest.TestCase):
         self.assertEqual(catalog.CONTAINER_PORTS,
                          {"qdrant": 6333, "embed": 8080, "rerank": 8080})
         self.assertEqual(catalog.PORT_FALLBACK_OFFSET, 10000)
-        self.assertEqual(catalog.PROJECT, "memories-plugin")
+        self.assertEqual(catalog.PROJECT, "mnemosine")
         self.assertEqual(catalog.SERVICES, ("qdrant", "embed", "rerank"))
-        self.assertEqual(catalog.VOLUME, "memories-plugin-qdrant")
+        self.assertEqual(catalog.VOLUME, "mnemosine-qdrant")
         self.assertEqual(catalog.EMBED_DIM, 1024)
         self.assertEqual(catalog.CONTEXT, 8192)
 

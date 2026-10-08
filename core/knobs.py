@@ -32,7 +32,23 @@ def state_dir() -> Path:
     Read at CALL time, not at import: a constant frozen at import would be frozen at a moment
     that varies between hosts.
     """
-    return Path(os.environ.get("QCTX_STATE_DIR") or (Path.home() / ".memories-plugin" / "state"))
+    return Path(os.environ.get("QCTX_STATE_DIR") or _state_dir_default())
+
+
+def _state_dir_default() -> Path:
+    """The state dir, with the pre-rename dir still honoured.
+
+    A fresh install uses `~/.mnemosine/state`. A pre-rename install has its
+    recall/dedup state at `~/.memories-plugin/state`, and forking it into an
+    empty new dir on the 2.0.0 update would reset the recall window and the
+    rerank breaker mid-history. When the new dir does not exist and the old one
+    does, the old one wins (read and written in place). `QCTX_STATE_DIR` still
+    overrides both, as before."""
+    fresh = Path.home() / ".mnemosine" / "state"
+    legacy = Path.home() / ".memories-plugin" / "state"
+    if not fresh.exists() and legacy.exists():
+        return legacy
+    return fresh
 
 
 def env(name: str, legacy: str, default: str) -> str:

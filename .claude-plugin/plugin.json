@@ -1,11 +1,11 @@
 {
-  "name": "memories-plugin",
-  "version": "1.3.0",
+  "name": "mnemosine",
+  "version": "2.0.0",
   "description": "Long-term semantic memory with automatic recall on every prompt, plus indexes for long documents and for git repositories, on top of Qdrant",
   "author": {
     "name": "Erick Batista"
   },
-  "repository": "https://github.com/erickstryck/memories-plugin",
+  "repository": "https://github.com/erickstryck/mnemosine",
   "license": "MIT",
   "keywords": [
     "memory",

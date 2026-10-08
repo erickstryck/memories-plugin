@@ -73,7 +73,7 @@ rodando a suíte inteira só para exibir uma lista. Nenhuma outra linha dos cuto
 - Consumes: nada.
 - Produces: `qctx --root` imprime o diretório raiz resolvido e sai 0. Ordem de resolução:
   `$QCTX_HOME` > a árvore do próprio script (symlinks resolvidos) >
-  `${HERMES_HOME:-$HOME/.hermes}/plugins/memories` > `installPath` de
+  `${HERMES_HOME:-$HOME/.hermes}/plugins/mnemosine` > `installPath` de
   `$HOME/.claude/plugins/installed_plugins.json`. Uma árvore só conta se tiver
   `cli/qctx.py`.
 
@@ -124,7 +124,7 @@ class LauncherResolution(unittest.TestCase):
 
     def test_qctx_home_wins_over_everything(self):
         chosen = fake_tree(Path(self.tmp.name) / "chosen")
-        fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        fake_tree(self.home / ".hermes" / "plugins" / "mnemosine")
         self.env["QCTX_HOME"] = str(chosen)
         self.assertEqual(run_root(LAUNCHER, self.env), str(chosen))
 
@@ -133,7 +133,7 @@ class LauncherResolution(unittest.TestCase):
         self.assertEqual(run_root(LAUNCHER, self.env), str(REPO))
 
     def test_copy_outside_a_tree_finds_the_hermes_install(self):
-        tree = fake_tree(self.home / ".hermes" / "plugins" / "memories")
+        tree = fake_tree(self.home / ".hermes" / "plugins" / "mnemosine")
         copy = self.home / ".local" / "bin" / "qctx"
         copy.parent.mkdir(parents=True)
         copy.write_bytes(LAUNCHER.read_bytes())
@@ -145,7 +145,7 @@ class LauncherResolution(unittest.TestCase):
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
         registry.write_text(json.dumps({"version": 2, "plugins": {
-            "memories-plugin@memories-plugin": [{"installPath": str(tree)}]}}))
+            "mnemosine@mnemosine": [{"installPath": str(tree)}]}}))
         copy = self.home / ".local" / "bin" / "qctx"
         copy.parent.mkdir(parents=True)
         copy.write_bytes(LAUNCHER.read_bytes())
@@ -217,7 +217,7 @@ try:
     data = json.load(open(sys.argv[1]))
 except Exception:
     raise SystemExit(0)
-for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+for entry in data.get("plugins", {}).get("mnemosine@mnemosine", []):
     if entry.get("installPath"):
         print(entry["installPath"])
         break
@@ -229,7 +229,7 @@ resolve_root() {
   for candidate in \
       "${QCTX_HOME:-}" \
       "$(own_tree)" \
-      "${HERMES_HOME:-$HOME/.hermes}/plugins/memories" \
+      "${HERMES_HOME:-$HOME/.hermes}/plugins/mnemosine" \
       "$(claude_tree)"; do
     if [ -n "$candidate" ] && [ -f "$candidate/cli/qctx.py" ]; then
       printf '%s\n' "$candidate"
@@ -1106,7 +1106,7 @@ git commit -m "feat: two configuration passes, with a test that pins them to Con
 - Consumes: `core.install.target_dir`, `core.install.LAUNCHER_NAME`.
 - Produces:
   - `claude_install_path(home: Path) -> str | None` — lê `installed_plugins.json`
-  - `hermes_install_path(env: dict) -> Path | None` — `$HERMES_HOME/plugins/memories`
+  - `hermes_install_path(env: dict) -> Path | None` — `$HERMES_HOME/plugins/mnemosine`
   - `HOST_INSTALL_COMMANDS: dict[str, tuple[str, ...]]`
   - `install_launcher(root: Path, env: dict) -> Path` — copia `bin/qctx` e dá `0o755`
   - `should_stop_before_hosts(report: dict) -> bool` — `True` quando `diagnose` ainda tem
@@ -1148,7 +1148,7 @@ class HostDetection(unittest.TestCase):
     def test_claude_present_returns_the_live_path(self):
         registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
         registry.parent.mkdir(parents=True)
-        registry.write_text(json.dumps({"plugins": {"memories-plugin@memories-plugin": [
+        registry.write_text(json.dumps({"plugins": {"mnemosine@mnemosine": [
             {"installPath": "/somewhere/b8008f7dac88"}]}}))
         self.assertEqual(self.qctx.claude_install_path(self.home),
                          "/somewhere/b8008f7dac88")
@@ -1156,7 +1156,7 @@ class HostDetection(unittest.TestCase):
     def test_the_hermes_command_carries_force_and_the_provider_switch(self):
         joined = " ".join(self.qctx.HOST_INSTALL_COMMANDS["hermes"])
         self.assertIn("--force", joined)
-        self.assertIn("memory.provider memories", joined)
+        self.assertIn("memory.provider mnemosine", joined)
 
 
 class LauncherInstall(unittest.TestCase):
@@ -1215,12 +1215,12 @@ Em `cli/qctx.py`:
 #: activates exactly one.
 HOST_INSTALL_COMMANDS = {
     "claude-code": (
-        "claude plugin marketplace add erickstryck/memories-plugin",
-        "claude plugin install memories-plugin@memories-plugin",
+        "claude plugin marketplace add erickstryck/mnemosine",
+        "claude plugin install mnemosine@mnemosine",
     ),
     "hermes": (
-        "hermes plugins install erickstryck/memories-plugin --enable --force",
-        "hermes config set memory.provider memories",
+        "hermes plugins install erickstryck/mnemosine --enable --force",
+        "hermes config set memory.provider mnemosine",
     ),
 }
 
@@ -1236,7 +1236,7 @@ def claude_install_path(home: Path) -> str | None:
         data = json.loads(registry.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    for entry in data.get("plugins", {}).get("memories-plugin@memories-plugin", []):
+    for entry in data.get("plugins", {}).get("mnemosine@mnemosine", []):
         if entry.get("installPath"):
             return entry["installPath"]
 
@@ -1247,7 +1247,7 @@ def hermes_install_path(env: dict) -> Path | None:
     """One level deep and no deeper: hermes' loader scans `$HERMES_HOME/plugins/<name>/`
     and never looks further down."""
     home = Path(env.get("HERMES_HOME") or Path(env["HOME"]) / ".hermes")
-    candidate = home / "plugins" / "memories"
+    candidate = home / "plugins" / "mnemosine"
 
     return candidate if candidate.exists() else None
 
@@ -1407,7 +1407,7 @@ Expected: FAIL — o arquivo não existe.
 #!/usr/bin/env bash
 # The wizard's front door, and the only piece that can run before `qctx` is on PATH.
 #
-#     bash ~/.hermes/plugins/memories/scripts/install.sh        # installed by hermes
+#     bash ~/.hermes/plugins/mnemosine/scripts/install.sh        # installed by hermes
 #     bash ~/.claude/plugins/cache/…/<SHA>/scripts/install.sh   # installed by claude
 #     ./scripts/install.sh                                      # cloned
 #
@@ -1581,8 +1581,8 @@ Três edições no README, e duas linhas de comentário fora dele:
 On a machine where the plugin is already installed by its host, or on a fresh clone:
 
 ```bash
-bash ~/.hermes/plugins/memories/scripts/install.sh          # installed by hermes
-bash ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh
+bash ~/.hermes/plugins/mnemosine/scripts/install.sh          # installed by hermes
+bash ~/.claude/plugins/cache/mnemosine/mnemosine/*/scripts/install.sh
 ./scripts/install.sh                                        # cloned
 ```
 

@@ -19,7 +19,7 @@
 - **A guarda decide, não age.** Não indexa nada.
 - Suíte atual: **565 testes, `OK (skipped=17)`** via `python3 -m unittest discover -s tests`. A contagem nunca cai.
 - `claude_memory`, `memories_docs_library`, `memories_docs_tmp` são PRODUÇÃO: somente leitura em teste. Escrita só em coleção descartável que o próprio teste apaga.
-- Nunca escrever em `~/.claude/`, `~/.claude.json`, `~/.hermes/`, `~/.config/memories-plugin/config.json` ou `~/.memories-plugin/state/`.
+- Nunca escrever em `~/.claude/`, `~/.claude.json`, `~/.hermes/`, `~/.config/mnemosine/config.json` ou `~/.mnemosine/state/`.
 - Limpar bytecode antes de medir depois de qualquer edição: `find . -name __pycache__ -type d -prune -exec rm -rf {} +`.
 - Ao provar que um teste morde, **verificar que a mutação PEGOU** (contar ocorrências antes de substituir). Este repo já embarcou seis testes que passavam pelo motivo errado.
 

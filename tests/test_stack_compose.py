@@ -45,8 +45,8 @@ PHASE1_FIXTURES = {
     "macos-docker-cpu", "macos-podman-cpu", "macos-podman-apple",
 }
 
-STACK_DIRS = {"linux": Path("/home/me/.local/share/memories-plugin/stack"),
-              "macos": Path("/Users/me/.local/share/memories-plugin/stack")}
+STACK_DIRS = {"linux": Path("/home/me/.local/share/mnemosine/stack"),
+              "macos": Path("/Users/me/.local/share/mnemosine/stack")}
 
 #: The service keys in the spec's order, pinned here rather than read from the module.
 SERVICE_KEYS = ("container_name", "image", "restart", "command", "ports", "volumes",
@@ -163,7 +163,7 @@ class TheEmitterTest(unittest.TestCase):
     def test_reserved_and_dotted_keys_are_quoted(self):
         self.assertEqual('"yes": 1\n"run.oci.keep_original_groups": "1"\na_b: 2\n',
                          emit({"yes": 1, "run.oci.keep_original_groups": "1", "a_b": 2}))
-        for key in YAML11_BOOL_AND_NULL + ["memories-plugin-qdrant", "8080", "", "a b", "x:y"]:
+        for key in YAML11_BOOL_AND_NULL + ["mnemosine-qdrant", "8080", "", "a b", "x:y"]:
             with self.subTest(key=key):
                 self.assertEqual(f"{json.dumps(key)}: 1\n", emit({key: 1}))
         for key in ("a_b", "_x", "QDRANT__TELEMETRY_DISABLED", "yes_no", "onion", "nulls"):
@@ -230,7 +230,7 @@ class TheRenderTest(unittest.TestCase):
     def test_selinux_adds_the_z_label(self):
         plain = render(fixture_plan("linux", "podman", "amd"))["services"]
         labelled = render(fixture_plan("linux", "podman", "amd", selinux=True))["services"]
-        models = "/home/me/.local/share/memories-plugin/stack/models:/models"
+        models = "/home/me/.local/share/mnemosine/stack/models:/models"
         for role in ("embed", "rerank"):
             with self.subTest(role=role):
                 self.assertEqual([f"{models}:ro"], plain[role]["volumes"])
@@ -240,21 +240,21 @@ class TheRenderTest(unittest.TestCase):
     def test_container_and_volume_names_carry_the_project(self):
         # M6: each provider names containers its own way unless `container_name` is set, and
         # both prefix the volume with the project.
-        self.assertEqual("memories-plugin-embed", container_name("memories-plugin", "embed"))
-        self.assertEqual("memories-plugin_memories-plugin-qdrant",
-                         volume_name("memories-plugin"))
-        self.assertEqual("qctx-it_memories-plugin-qdrant", volume_name("qctx-it"))
+        self.assertEqual("mnemosine-embed", container_name("mnemosine", "embed"))
+        self.assertEqual("mnemosine_mnemosine-qdrant",
+                         volume_name("mnemosine"))
+        self.assertEqual("qctx-it_mnemosine-qdrant", volume_name("qctx-it"))
         doc = render(fixture_plan("linux", "docker", "cpu", project="qctx-it"))
         self.assertEqual({"qdrant": "qctx-it-qdrant", "embed": "qctx-it-embed",
                           "rerank": "qctx-it-rerank"},
                          {service: fields["container_name"]
                           for service, fields in doc["services"].items()})
         # the file declares the bare volume; the provider adds the project
-        self.assertEqual({"memories-plugin-qdrant": {}}, doc["volumes"])
-        self.assertEqual(["memories-plugin-qdrant:/qdrant/storage"],
+        self.assertEqual({"mnemosine-qdrant": {}}, doc["volumes"])
+        self.assertEqual(["mnemosine-qdrant:/qdrant/storage"],
                          doc["services"]["qdrant"]["volumes"])
         default = render(fixture_plan("linux", "docker", "cpu"))
-        self.assertEqual("memories-plugin-qdrant",
+        self.assertEqual("mnemosine-qdrant",
                          default["services"]["qdrant"]["container_name"])
 
     def test_a_patch_the_service_has_no_place_for_is_refused(self):

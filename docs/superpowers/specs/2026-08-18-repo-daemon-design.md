@@ -57,7 +57,7 @@ Um processo, `qctx repos daemon`, que faz duas coisas e nada mais:
    que mudaram.
 2. **Vigia** os repos indexados e enfileira trabalho quando algo muda.
 
-Todo o estado vive em `~/.memories-plugin/state/`, em JSON, e é isso que torna o `status`
+Todo o estado vive em `~/.mnemosine/state/`, em JSON, e é isso que torna o `status`
 trivial: ele lê arquivo, não conversa com o daemon.
 
 ```

@@ -241,7 +241,7 @@ class TestTheClaimWorksWithoutHardLinks(unittest.TestCase):
         """The mode has to survive the first `record()`, and it did not.
 
         MEASURED ON THE RUNNING DAEMON, which is how this was found and not by reading code:
-        `~/.memories-plugin/state/daemon.json` was mode 0o664 on a machine whose umask is
+        `~/.mnemosine/state/daemon.json` was mode 0o664 on a machine whose umask is
         0o002, while the test above passed. `_claim` opens the file 0o600, then the daemon
         publishes through `statefile.write_json`, whose temporary was created by
         `Path.write_text` -- umask, so 0o664 -- and `os.replace` carries the TEMPORARY's mode

@@ -22,7 +22,7 @@
 - **Commit style:** lowercase, imperative, descriptive, one commit per task. `feat:` for new behaviour, `test:` for test-only, `docs:` for prose.
 - **Suite command:** `python3 -m unittest discover -s tests -t . -q` from the repo root. It must stay offline, and no task may add a failure.
 - **Baseline, MEASURED and not assumed:** at `190e682` the suite runs **1297 tests, 19 skipped, with ONE failure** in 47s: `tests.test_hermes_provider.TestTheContract.test_it_answers_every_method_the_REAL_installed_abc_declares`. The installed hermes declares `pre_compress_checkpoint_api_version` (`~/.hermes/hermes-agent/agent/memory_manager.py:1103`) and `MemoriesProvider` does not answer it. That failure is **preexisting, unrelated to this work, and STRICTLY OUT OF SCOPE**: do not fix it, do not touch `hosts/hermes/__init__.py` for it, do not silence the test. The success criterion for every task is therefore **"no failure other than that one"**, not "OK". If a second failure appears, it is yours.
-- **Do not run the suite from a `git archive` export.** Measured: the same commit exported to `/tmp` fails 9 tests instead of 1, because this working copy is the tree that `~/.hermes/plugins/memories` symlinks to and several tests read the real install. Run it in the repo.
+- **Do not run the suite from a `git archive` export.** Measured: the same commit exported to `/tmp` fails 9 tests instead of 1, because this working copy is the tree that `~/.hermes/plugins/mnemosine` symlinks to and several tests read the real install. Run it in the repo.
 
 ---
 

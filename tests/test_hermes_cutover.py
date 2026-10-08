@@ -7,7 +7,7 @@ the script exits 0 reports success it did not establish. Both happened in the cl
 cutover (`scripts/cutover.sh`), and its comments name them.
 
 Everything here runs against a FAKE `HERMES_HOME` in a temp directory, with `HOME` pointed
-there too, so no test can reach the real `~/.hermes`, `~/.config/memories-plugin` or the
+there too, so no test can reach the real `~/.hermes`, `~/.config/mnemosine` or the
 user's running sessions. The apply path is exercised ONLY against those fakes.
 """
 import json
@@ -215,7 +215,7 @@ class TestDryRunReportsAndChangesNothing(CutoverCase):
         self.assertLine(out, "DRY RUN")
         self.assertLine(out, "=== what changes ===")
         self.assertEqual(self.config_yaml.read_bytes(), before, "the dry run wrote config.yaml")
-        self.assertFalse((self.hermes / "plugins" / "memories").exists(),
+        self.assertFalse((self.hermes / "plugins" / "mnemosine").exists(),
                          "the dry run created the symlink")
 
     def test_the_banner_does_not_promise_a_symlink_it_will_not_create(self):
@@ -225,7 +225,7 @@ class TestDryRunReportsAndChangesNothing(CutoverCase):
         is already one of the three working shapes was told, two screens after being told the
         install was fine, that the script would replace it with a symlink into itself — the
         destruction this script does not do, promised in writing."""
-        link = self.hermes / "plugins" / "memories"
+        link = self.hermes / "plugins" / "mnemosine"
         link.symlink_to(REPO)
 
         out = self.run_script()
@@ -239,7 +239,7 @@ class TestDryRunReportsAndChangesNothing(CutoverCase):
         `search-collections` string — which is printed whatever provider is being replaced,
         and so would keep this green with the name gone."""
         out = self.run_script()
-        self.assertLine(out, "memory.provider: qdrant -> memories")
+        self.assertLine(out, "memory.provider: qdrant -> mnemosine")
         self.assertLine(out, "qdrant provider's own directory (disabled by configuration")
         self.assertLine(out, "1423 points in hermes_memory")
         self.assertLine(out, "--collections hermes_memory")
@@ -267,7 +267,7 @@ class TestDryRunReportsAndChangesNothing(CutoverCase):
         self.assertLine(out, "config.yaml")
 
     def test_it_reports_when_the_provider_is_already_selected(self):
-        self.config_yaml.write_text(CONFIG_YAML.replace("provider: qdrant", "provider: memories"))
+        self.config_yaml.write_text(CONFIG_YAML.replace("provider: qdrant", "provider: mnemosine"))
         out = self.run_script()
         self.assertEqual(out.returncode, 0, out.stdout)
         self.assertLine(out, "already selected")
@@ -420,7 +420,7 @@ class TestWhereTheProviderHasToLive(CutoverCase):
     hypothetical: it is the layout already on disk."""
 
     def test_the_wrong_but_plausible_location_is_reported_rather_than_ignored(self):
-        wrong = self.hermes / "plugins" / "memory" / "memories"
+        wrong = self.hermes / "plugins" / "memory" / "mnemosine"
         wrong.mkdir(parents=True)
         (wrong / "__init__.py").write_text("class X(MemoryProvider): pass\n")
         out = self.run_script()
@@ -428,14 +428,14 @@ class TestWhereTheProviderHasToLive(CutoverCase):
         self.assertLine(out, str(wrong))
 
     def test_an_existing_correct_symlink_is_reported_as_installed(self):
-        link = self.hermes / "plugins" / "memories"
+        link = self.hermes / "plugins" / "mnemosine"
         link.symlink_to(REPO / "hosts" / "hermes")
         out = self.run_script()
         self.assertEqual(out.returncode, 0, out.stdout)
         self.assertLine(out, "already installed")
 
     def test_a_symlink_pointing_somewhere_else_is_reported_as_repointed(self):
-        link = self.hermes / "plugins" / "memories"
+        link = self.hermes / "plugins" / "mnemosine"
         link.symlink_to(self.tmp / "some-other-checkout")
         out = self.run_script()
         self.assertLine(out, "repoint")
@@ -470,7 +470,7 @@ class TestWhereTheProviderHasToLive(CutoverCase):
         self.assertLine(out, "DRY RUN")
 
     def test_apply_from_a_git_worktree_is_REFUSED(self):
-        """Not a warning: removing the worktree leaves a dangling `plugins/memories`, which
+        """Not a warning: removing the worktree leaves a dangling `plugins/mnemosine`, which
         discovery skips while `load_memory_provider` returns None — and hermes 0.20.1 warns
         only when the provider is not None (`agent/agent_init.py:1784-1798`). So the operator
         would get a hermes with no memory and no message anywhere. A WARN inside a long
@@ -482,7 +482,7 @@ class TestWhereTheProviderHasToLive(CutoverCase):
         self.assertLine(out, "refusing to --apply")
         self.assertLine(out, "nothing was changed")
         self.assertEqual(self.config_yaml.read_text(), CONFIG_YAML)
-        self.assertFalse((self.hermes / "plugins" / "memories").exists())
+        self.assertFalse((self.hermes / "plugins" / "mnemosine").exists())
 
     def test_the_worktree_refusal_can_be_overridden_deliberately(self):
         script = self.fake_root(None, ".claude", "worktrees", "some-branch")
@@ -490,10 +490,10 @@ class TestWhereTheProviderHasToLive(CutoverCase):
                               env=self.env(HERMES_CUTOVER_SKIP_SUITE=None))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertLine(out, "WORKTREE")
-        self.assertIn("provider: memories", self.config_yaml.read_text())
+        self.assertIn("provider: mnemosine", self.config_yaml.read_text())
 
     def test_the_worktree_warning_is_not_printed_for_a_normal_checkout(self):
-        out = self.run_script(script=self.fake_root(None, "dev", "memories-plugin"))
+        out = self.run_script(script=self.fake_root(None, "dev", "mnemosine"))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertNoLine(out, "WORKTREE")
 
@@ -543,7 +543,7 @@ class TestWhereTheProviderHasToLive(CutoverCase):
         # still import: the checks are independent and this one must fail on its own.
         (root / "hosts" / "hermes" / "__init__.py").write_text(
             "class MemoriesProvider:\n"
-            "    name = 'memories'\n"
+            "    name = 'mnemosine'\n"
             "    def is_available(self): return True\n"
             "    def unavailable_reason(self): return ''\n"
         )
@@ -621,7 +621,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         return super().run_script(*args, script=script or self.script, env=env)
 
     def link(self):
-        return self.hermes / "plugins" / "memories"
+        return self.hermes / "plugins" / "mnemosine"
 
     def test_it_installs_the_symlink_and_selects_the_provider(self):
         out = self.run_script("--apply")
@@ -631,7 +631,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertEqual((self.root / "hosts" / "hermes").resolve(),
                          (REPO / "hosts" / "hermes").resolve())
         text = self.config_yaml.read_text()
-        self.assertIn("provider: memories", text)
+        self.assertIn("provider: mnemosine", text)
         self.assertNotIn("provider: qdrant", text)
 
     def test_it_preserves_every_other_key_and_backs_the_file_up(self):
@@ -649,14 +649,14 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertEqual(first.returncode, 0, first.stdout)
         second = self.run_script("--apply")
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
-        self.assertEqual(self.config_yaml.read_text().count("provider: memories"), 1)
+        self.assertEqual(self.config_yaml.read_text().count("provider: mnemosine"), 1)
 
     def test_it_inserts_the_key_when_the_memory_block_has_no_provider(self):
         self.config_yaml.write_text("memory:\n  memory_enabled: true\nother:\n  keep: yes\n")
         out = self.run_script("--apply")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         text = self.config_yaml.read_text()
-        self.assertIn("  provider: memories", text)
+        self.assertIn("  provider: mnemosine", text)
         self.assertIn("keep: yes", text)
 
     def test_it_creates_the_block_when_there_is_no_memory_section(self):
@@ -665,7 +665,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         text = self.config_yaml.read_text()
         self.assertIn("memory:", text)
-        self.assertIn("provider: memories", text)
+        self.assertIn("provider: mnemosine", text)
         self.assertIn("keep: yes", text)
 
     def test_it_does_not_touch_a_provider_under_a_key_that_is_not_memory(self):
@@ -686,7 +686,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         text = self.config_yaml.read_text()
         self.assertIn("provider: auto", text)
-        self.assertIn("provider: memories", text)
+        self.assertIn("provider: mnemosine", text)
 
     def test_it_does_not_touch_a_provider_nested_DEEPER_INSIDE_the_memory_block(self):
         """The case the indent guard exists for, which nothing exercised: a `provider:` under a
@@ -705,9 +705,9 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         text = self.config_yaml.read_text()
         self.assertIn("    provider: some-backend", text, "the nested key was edited")
-        self.assertIn("  provider: memories", text)
+        self.assertIn("  provider: mnemosine", text)
         self.assertNotIn("provider: qdrant", text)
-        self.assertEqual(text.count("provider: memories"), 1)
+        self.assertEqual(text.count("provider: mnemosine"), 1)
         self.assertIn("max_iterations: 80", text)
 
     def test_it_refuses_to_claim_a_success_it_has_not_verified(self):
@@ -733,7 +733,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         # An apply that actually ran, then the absence check — otherwise this passes
         # against a script that did nothing at all.
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("provider: memories", self.config_yaml.read_text())
+        self.assertIn("provider: mnemosine", self.config_yaml.read_text())
         self.assertTrue((old / "__init__.py").exists(), "the old provider was removed")
 
     def unwritable_plugins(self):
@@ -762,11 +762,11 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         reported. Aborting here is what leaves a cutover half done and unexplained."""
         self.unwritable_plugins()
         out = self.run_script("--apply")
-        self.assertLine(out, "memory.provider = memories")
-        self.assertIn("provider: memories", self.config_yaml.read_text())
+        self.assertLine(out, "memory.provider = mnemosine")
+        self.assertIn("provider: mnemosine", self.config_yaml.read_text())
 
     def test_a_real_directory_where_the_symlink_goes_is_refused_before_anything_changes(self):
-        (self.hermes / "plugins" / "memories").mkdir()
+        (self.hermes / "plugins" / "mnemosine").mkdir()
         out = self.run_script("--apply")
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
         self.assertLine(out, "is NOT a symlink")
@@ -790,27 +790,27 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         So this asserts the whole cutover completed, not merely that the script printed
         something friendly, and that the clone is untouched on the way out.
         """
-        script = self.fake_root(None, "fake-home", ".hermes", "plugins", "memories")
+        script = self.fake_root(None, "fake-home", ".hermes", "plugins", "mnemosine")
         out = self.run_script("--apply", script=script)
 
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertLine(out, "the git-installed clone itself")
         self.assertNoLine(out, "is NOT a symlink")
 
-        link = self.hermes / "plugins" / "memories"
+        link = self.hermes / "plugins" / "mnemosine"
         self.assertTrue(link.is_dir(), "the clone stopped being a directory")
         self.assertFalse(link.is_symlink(), "apply replaced the clone with a symlink to itself")
         self.assertTrue((link / "scripts" / SCRIPT.name).exists(),
                         "apply clobbered the clone's own contents")
         # The rest of the cutover still has to happen: accepting the shape is not the same
         # as skipping the work, and an early `exit` would pass every assertion above.
-        self.assertIn("provider: memories", self.config_yaml.read_text())
+        self.assertIn("provider: mnemosine", self.config_yaml.read_text())
 
     def test_a_directory_that_is_NOT_this_checkout_is_still_refused(self):
         """The other half of the same condition. Accepting the clone must not turn the check
-        into "any directory will do": a stray `plugins/memories` from some other source is
+        into "any directory will do": a stray `plugins/mnemosine` from some other source is
         still something the operator has to look at, and `-ef` is what tells them apart."""
-        stray = self.hermes / "plugins" / "memories"
+        stray = self.hermes / "plugins" / "mnemosine"
         stray.mkdir()
         (stray / "__init__.py").write_text("# some other provider\n")
         out = self.run_script("--apply")
@@ -821,7 +821,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
     def test_a_RELATIVE_link_to_the_root_is_left_alone_like_an_absolute_one(self):
         """A link is a link however it is spelled, and this decision used to disagree.
 
-        `readlink` returns the link's TEXT, so `ln -s ../../repo memories` — pointing exactly
+        `readlink` returns the link's TEXT, so `ln -s ../../repo mnemosine` — pointing exactly
         where an accepted absolute link points — failed the `= "$ROOT"` compare, missed the
         clone branch too, and reached `ln -sfn`, which silently repointed an install somebody
         made on purpose. That is the third spelling of the one bug this block keeps having.
@@ -829,7 +829,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         `-ef` compares inodes, so this passes for free; it is here because nothing else in the
         suite creates a relative link, and a future edit back to a string compare would look
         harmless against every other test."""
-        link = self.hermes / "plugins" / "memories"
+        link = self.hermes / "plugins" / "mnemosine"
         relative = os.path.relpath(self.root, link.parent)
         link.symlink_to(relative)
         self.assertNotEqual(os.readlink(link), str(self.root), "the link was not relative")
@@ -838,21 +838,21 @@ class TestApplyAgainstAFakeHome(CutoverCase):
 
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(os.readlink(link), relative, "apply repointed a working link")
-        self.assertIn("provider: memories", self.config_yaml.read_text())
+        self.assertIn("provider: mnemosine", self.config_yaml.read_text())
 
     def test_an_absolute_link_to_the_root_is_left_alone(self):
         """The shape that was only ever pinned by reading the script's source. It is
         reachable behaviourally with the same fixtures as its neighbours, so it is asserted
         the same way: the link still points where the operator put it, and the rest of the
         cutover still ran."""
-        link = self.hermes / "plugins" / "memories"
+        link = self.hermes / "plugins" / "mnemosine"
         link.symlink_to(self.root)
 
         out = self.run_script("--apply")
 
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(os.readlink(link), str(self.root), "apply repointed a working link")
-        self.assertIn("provider: memories", self.config_yaml.read_text())
+        self.assertIn("provider: mnemosine", self.config_yaml.read_text())
 
     def test_a_plugins_path_that_cannot_be_created_is_reported_like_every_other_step(self):
         """`mkdir -p` failing used to exit through `set -e` with no message, unlike every
@@ -979,7 +979,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         self.assertNotIn("bigfile.py", text)
         self.assertIn("  - event: pre_tool_call\n", text)
         # The independent step still ran: a refusal here is not an abort.
-        self.assertIn("provider: memories", text)
+        self.assertIn("provider: mnemosine", text)
 
     def test_apply_refuses_a_pre_tool_call_it_cannot_append_to(self):
         """`pre_tool_call:` mapped to a scalar is a legal file that hermes parses to zero
@@ -1031,7 +1031,7 @@ class TestApplyAgainstAFakeHome(CutoverCase):
         # The independent step still ran, and the user's entry was not rewritten behind
         # their back: the refusal is a report, not an edit.
         text = self.config_yaml.read_text()
-        self.assertIn("provider: memories", text)
+        self.assertIn("provider: mnemosine", text)
         self.assertIn("- matcher: write_file\n", text)
         self.assertEqual(text.count("bigfile.py"), 1, text)
 
@@ -1367,7 +1367,7 @@ class TestTheExecuteCodeSandboxIsREPORTEDAndNeverWritten(CutoverCase):
         nothing about what an apply writes.
         """
         script = self.fake_root()
-        target = self.hermes / "plugins" / "memories"
+        target = self.hermes / "plugins" / "mnemosine"
         target.symlink_to(REPO)
 
         out = self.run_script("--apply", script=script,
@@ -1377,7 +1377,7 @@ class TestTheExecuteCodeSandboxIsREPORTEDAndNeverWritten(CutoverCase):
         written = self.config_yaml.read_text()
         self.assertNotIn("env_passthrough", written,
                          "--apply wrote the sandbox allowlist:\n" + written)
-        self.assertIn("provider: memories", written, "the apply did not run at all")
+        self.assertIn("provider: mnemosine", written, "the apply did not run at all")
 
     def test_it_never_prints_a_key_VALUE(self):
         """The section names variables; this output gets pasted into issues."""

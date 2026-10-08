@@ -1,6 +1,6 @@
 # Wizard de instalação e verificação — design
 
-**Data:** 2026-08-19 · **Repo:** `memories-plugin` @ `b8008f7` · **Estado:** aprovado em
+**Data:** 2026-08-19 · **Repo:** `mnemosine` @ `b8008f7` · **Estado:** aprovado em
 brainstorming, pronto para plano de implementação
 
 ## O problema, medido
@@ -13,10 +13,10 @@ A causa é uma só, medida em 2026-08-19 nesta máquina:
 
 - `bin/qctx` só chega ao PATH por um `ln -s` **manual**, documentado apenas no fluxo de
   `git clone`. Nenhum dos dois caminhos oficiais o executa.
-- `hermes plugins install …` clona para `~/.hermes/plugins/memories/`. `bin/qctx` está lá,
+- `hermes plugins install …` clona para `~/.hermes/plugins/mnemosine/`. `bin/qctx` está lá,
   sem link nenhum.
 - `claude plugin install …` **copia por SHA** para
-  `~/.claude/plugins/cache/memories-plugin/memories-plugin/<SHA>/`. Nesta máquina há
+  `~/.claude/plugins/cache/mnemosine/mnemosine/<SHA>/`. Nesta máquina há
   **cinco** pastas de SHA, e `installed_plugins.json` aponta para uma. O caminho muda a cada
   `plugin update` — um symlink apontando para ele morre no update seguinte, em silêncio.
 
@@ -79,7 +79,7 @@ Um arquivo só, servindo os dois papéis. Ordem, a primeira que existir vence:
 ```
 $QCTX_HOME                          override explícito (e o que os testes usam)
 a árvore do próprio script          resolvendo symlinks, como já faz hoje
-~/.hermes/plugins/memories          caminho estável, quando há hermes
+~/.hermes/plugins/mnemosine          caminho estável, quando há hermes
 installPath de installed_plugins.json    o SHA vivo do claude, lido na hora
 ```
 
@@ -87,7 +87,7 @@ Quem instalou por symlink — o caso de desenvolvimento — cai no segundo e nad
 em `~/.local/bin` cai no terceiro ou no quarto. `plugin update` troca o SHA e o quarto caso
 resolve sozinho na chamada seguinte: nada para relinkar, nada que envelheça calado.
 
-**Sem caminho de desenvolvimento embutido.** Uma entrada `~/dev/memories-plugin` na ordem
+**Sem caminho de desenvolvimento embutido.** Uma entrada `~/dev/mnemosine` na ordem
 resolveria o caso do autor e seria lixo no repositório público de todo mundo. `QCTX_HOME`
 cobre o mesmo caso, explicitamente.
 
@@ -101,7 +101,7 @@ razão pela qual `plugin.yaml` não declara `version`.
 A única coisa que pode rodar antes de `qctx` existir, e por isso a única em bash:
 
 ```bash
-bash ~/.hermes/plugins/memories/scripts/install.sh          # instalado pelo hermes
+bash ~/.hermes/plugins/mnemosine/scripts/install.sh          # instalado pelo hermes
 bash ~/.claude/plugins/cache/…/<SHA>/scripts/install.sh     # instalado pelo claude
 ./scripts/install.sh                                        # clonado
 ```
@@ -213,8 +213,8 @@ faltar, oferecer o comando exato para rodar:
 
 | host | como se sabe que está instalado | o que o wizard oferece rodar |
 |---|---|---|
-| claude-code | `memories-plugin@memories-plugin` em `installed_plugins.json` | `claude plugin marketplace add …` + `claude plugin install …@…` |
-| hermes | `$HERMES_HOME/plugins/memories` existe (dir ou symlink) e `hermes config get memory.provider` responde `memories` | `hermes plugins install … --enable --force` + `hermes config set memory.provider memories` |
+| claude-code | `mnemosine@mnemosine` em `installed_plugins.json` | `claude plugin marketplace add …` + `claude plugin install …@…` |
+| hermes | `$HERMES_HOME/plugins/mnemosine` existe (dir ou symlink) e `hermes config get memory.provider` responde `memories` | `hermes plugins install … --enable --force` + `hermes config set memory.provider mnemosine` |
 
 Duas coisas que o wizard **explica antes de perguntar**, porque as duas são decisão do
 usuário e não detalhe:
@@ -280,7 +280,7 @@ afirma o número de testes é um teste que quebra a cada teste novo, e o remédi
 | cortado | por quê |
 |---|---|
 | Marcador `# launcher-version: N` | `filecmp` responde a mesma pergunta sem número para manter |
-| `~/dev/memories-plugin` no resolvedor | caminho pessoal em repo público; `QCTX_HOME` cobre |
+| `~/dev/mnemosine` no resolvedor | caminho pessoal em repo público; `QCTX_HOME` cobre |
 | Reimplementar os checks de host em Python | duplicaria 975 linhas já testadas em campo |
 | Contador de testes no teste de fidelidade | quebraria a cada teste novo |
 

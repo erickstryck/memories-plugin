@@ -57,8 +57,8 @@ def ensure_dir(path) -> bool:
     Correcting it on the way past is what makes an upgrade fix itself.
 
     THE PARENTS ARE MODED TOO, and they are the half `mode=` silently skips: `mkdir` applies
-    its `mode` to the FINAL component only, so `~/.memories-plugin` was created 0o775 while
-    `~/.memories-plugin/state` under it was 0o700 -- and listing the parent is enough to see
+    its `mode` to the FINAL component only, so `~/.mnemosine` was created 0o775 while
+    `~/.mnemosine/state` under it was 0o700 -- and listing the parent is enough to see
     that a state directory exists. Only the components this call actually creates are
     corrected: walking further up would re-mode `$HOME`.
 

@@ -1,6 +1,6 @@
 # Listagem de memória ordenada por recência: design
 
-**Data:** 2026-09-03 · **Repo:** `memories-plugin` @ `190e682` · **Estado:** aprovado em
+**Data:** 2026-09-03 · **Repo:** `mnemosine` @ `190e682` · **Estado:** aprovado em
 brainstorming, pronto para plano de implementação
 
 ## O problema, medido

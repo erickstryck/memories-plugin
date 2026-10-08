@@ -189,8 +189,8 @@ enqueued, watcher_errors, last_start, version}`.
 
 - [ ] `core/version.py` e os três manifestos para `1.1.0`; suíte de versão verde.
 - [ ] Commit `bump: 1.1.0`, tag `v1.1.0`, push `main` + tag; conferir `origin/main` pelo efeito.
-- [ ] Claude: `claude plugin marketplace update memories-plugin`,
-  `claude plugin update memories-plugin@memories-plugin`; conferir o SHA e `diff -rq` do cache.
+- [ ] Claude: `claude plugin marketplace update mnemosine`,
+  `claude plugin update mnemosine@mnemosine`; conferir o SHA e `diff -rq` do cache.
 - [ ] Hermes: `hermes plugins update memories`; conferir a revisão.
 - [ ] Daemon: `qctx repos daemon stop && qctx repos daemon start`; `qctx repos status` mostra
   `version 1.1.0`.

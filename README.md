@@ -1,4 +1,4 @@
-# memories-plugin
+# mnemosine
 
 Long-term semantic memory and a document index on top of [Qdrant](https://qdrant.tech),
 for agents. A pure-Python core (stdlib only), with thin adapters for the two hosts it
@@ -64,13 +64,13 @@ docker run -d --name embed -v ~/llama-models:/models -p 8003:8080 ghcr.io/ggml-o
 docker run -d --name rerank -v ~/llama-models:/models -p 8004:8080 ghcr.io/ggml-org/llama.cpp:server -m /models/bge-reranker-v2-m3-Q4_K_M.gguf --port 8080 --host 0.0.0.0 --reranking -c 8192 -b 8192 -ub 8192
 
 # 2. the host: pick the agent you use
-hermes plugins install erickstryck/memories-plugin --enable --force && hermes config set memory.provider memories
-# or: claude plugin marketplace add erickstryck/memories-plugin && claude plugin install memories-plugin@memories-plugin
+hermes plugins install erickstryck/mnemosine --enable --force && hermes config set memory.provider mnemosine
+# or: claude plugin marketplace add erickstryck/mnemosine && claude plugin install mnemosine@mnemosine
 
 # 3. the wizard: configuration, credentials, cutover, re-check
-bash ~/.hermes/plugins/memories/scripts/install.sh
+bash ~/.hermes/plugins/mnemosine/scripts/install.sh
 # or, if the host is claude-code:
-bash "$(ls -dt ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh | head -1)"
+bash "$(ls -dt ~/.claude/plugins/cache/mnemosine/mnemosine/*/scripts/install.sh | head -1)"
 ```
 
 **macOS**
@@ -104,9 +104,9 @@ Then the host lines, and the wizard in a terminal with `bash` (WSL or git-bash).
 The three ways to reach it, depending on how the plugin got onto the machine:
 
 ```bash
-bash ~/.hermes/plugins/memories/scripts/install.sh          # installed by hermes
+bash ~/.hermes/plugins/mnemosine/scripts/install.sh          # installed by hermes
 ./scripts/install.sh                                        # cloned
-bash "$(ls -dt ~/.claude/plugins/cache/memories-plugin/memories-plugin/*/scripts/install.sh | head -1)"
+bash "$(ls -dt ~/.claude/plugins/cache/mnemosine/mnemosine/*/scripts/install.sh | head -1)"
 ```
 
 The last line is the claude-code case, and it is the awkward one: claude copies the
@@ -137,7 +137,7 @@ qctx install --config-only  # the configuration pass only; touches no host
 `qctx install --check || echo "not ready"`. `qctx setup --check` behaves the same way.
 Without `--check`, both commands are diagnostics you read, and they exit `0`.
 
-State lives under `~/.memories-plugin/state` by default, and `QCTX_STATE_DIR` moves ALL of
+State lives under `~/.mnemosine/state` by default, and `QCTX_STATE_DIR` moves ALL of
 it: the job queue, the leases, the quarantine, the window cache and the recall state of both
 hosts. It is one directory on purpose. The circuit breaker that backs off from a saturated
 re-ranker is a file, so what one session learns the other does not have to rediscover.
@@ -304,8 +304,8 @@ qctx setup
 ```
 
 Precedence is **environment variable > file > default**; the file lives at
-`$XDG_CONFIG_HOME/memories-plugin/config.json`, which is
-`~/.config/memories-plugin/config.json` unless `XDG_CONFIG_HOME` is set. `QCTX_CONFIG`
+`$XDG_CONFIG_HOME/mnemosine/config.json`, which is
+`~/.config/mnemosine/config.json` unless `XDG_CONFIG_HOME` is set. `QCTX_CONFIG`
 overrides both. `qctx setup` is the one command to run when
 something is wrong: it probes the three endpoints and the collections, and prints the
 exact command that fixes each gap.

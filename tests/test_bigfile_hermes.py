@@ -191,7 +191,7 @@ def guard_env(db_path: str, **overrides) -> dict:
 
     Nothing here may reach the operator's world: `QCTX_CONFIG` points at a file that will
     never exist (so the environment is the whole config), `QCTX_STATE_DIR` is a fresh temp
-    directory (so the breaker never touches ~/.memories-plugin), `QCTX_HERMES_STATE_DB`
+    directory (so the breaker never touches ~/.mnemosine), `QCTX_HERMES_STATE_DB`
     points at the fixture (so ~/.hermes/state.db is never opened), and Qdrant points at a
     port nobody listens on — refused instantly, which is the degraded path these tests want.
     """
@@ -669,7 +669,7 @@ import importlib.util, json, sys
 # UNREACHABLE first, and let the run report it.
 visible_before = importlib.util.find_spec("core") is not None
 
-name = "hermes_user_plugins.memories.bigfile"
+name = "hermes_user_plugins.mnemosine.bigfile"
 spec = importlib.util.spec_from_file_location(name, sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[name] = module          # the loader registers FIRST, then execs

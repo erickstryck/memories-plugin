@@ -148,7 +148,7 @@ class TestTheInjectedTextNamesNoSingleHostSurface(unittest.TestCase):
 
     The concrete case: the checkpoint procedure ended "the commands are in the memory skill",
     naming a bare `memory` — the spelling that resolves on claude-code and NOT on hermes,
-    where the same skill is `memories:memory` (hermes namespaces a plugin's skills by the
+    where the same skill is `mnemosine:memory` (hermes namespaces a plugin's skills by the
     plugin name). Both hosts can load the skill now; neither can load it under the other's
     name, so the shared text still must not send the model to one of them.
 
@@ -2486,8 +2486,8 @@ class TestTheBREAKERIsSharedEvenWithoutTheKnob(unittest.TestCase):
     re-ranker holds for the other. That is not a claim about `QCTX_STATE_DIR` being set.
 
     With the variable unset — the DEFAULT, and what README:133-136 describes — hermes keeps
-    its state under `$HERMES_HOME/memories-state` while the claude-code hook reads
-    `~/.memories-plugin/state`. Measured: two different `rerank-breaker` paths, so a saturation
+    its state under `$HERMES_HOME/mnemosine-state` while the claude-code hook reads
+    `~/.mnemosine/state`. Measured: two different `rerank-breaker` paths, so a saturation
     claude-code already backed off from costs hermes the full rerank timeout on every prompt
     for the rest of the outage.
 
@@ -2501,7 +2501,7 @@ class TestTheBREAKERIsSharedEvenWithoutTheKnob(unittest.TestCase):
         from hosts.hermes import MemoriesProvider
 
         p = MemoriesProvider()
-        p._state_dir = Path(hermes_home) / "memories-state"
+        p._state_dir = Path(hermes_home) / "mnemosine-state"
 
         return p
 

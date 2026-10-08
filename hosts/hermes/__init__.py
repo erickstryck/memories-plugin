@@ -13,8 +13,8 @@ MemoryProvider` at module level would make the adapter untestable here. The ABC 
 imported when available, purely to inherit its defaults, and `object` otherwise.
 
 WHY realpath AND NOT abspath. The plugin is installed as a symlink into
-`$HERMES_HOME/plugins/memories`. Measured: through that symlink `abspath(__file__)` is
-`$HERMES_HOME/plugins/memories/__init__.py`, so walking up gives `$HERMES_HOME/plugins`
+`$HERMES_HOME/plugins/mnemosine`. Measured: through that symlink `abspath(__file__)` is
+`$HERMES_HOME/plugins/mnemosine/__init__.py`, so walking up gives `$HERMES_HOME/plugins`
 and `core` is never found. Only `realpath` resolves to the repo.
 
 VERSION REALITY. Written against hermes as INSTALLED, not as published, because the two
@@ -81,7 +81,7 @@ def _note(line: str) -> None:
     dropped rather than raised.
     """
     try:
-        os.write(2, f"memories: {line}\n".encode())
+        os.write(2, f"mnemosine: {line}\n".encode())
     except OSError:            # noqa: BLE001 — see docstring
         pass
 
@@ -142,11 +142,21 @@ def _env_num(name: str, legacy: str, default: str, kind=float, minimum=None):
 SHARED_STATE = frozenset({"rerank-breaker", "index-breaker"})
 
 
+def provider_state_dir(hermes_home) -> Path:
+    """The per-profile state dir under `hermes_home`, with the pre-rename name
+    still honoured: a 2.0.0 update must keep the recall windows and the rerank
+    breaker, not fork them into an empty new dir (the same rule the config path
+    and the plugin state dir use). Fresh installs use `mnemosine-state`."""
+    fresh = Path(hermes_home) / "mnemosine-state"
+    legacy = Path(hermes_home) / "memories-state"
+    return legacy if (not fresh.exists() and legacy.exists()) else fresh
+
+
 class MemoriesProvider(_Base):
-    """memories-plugin as a hermes memory provider."""
+    """mnemosine as a hermes memory provider."""
 
     #: Must equal the install directory name — that is what `memory.provider` selects.
-    name = "memories"
+    name = "mnemosine"
 
     # -- tuning, read from the environment with the SAME names the claude-code hook uses --
     #
@@ -256,7 +266,7 @@ class MemoriesProvider(_Base):
         # falls back to the plugin's own directory below.
         hermes_home = kwargs.get("hermes_home")
         if hermes_home:
-            self._state_dir = Path(hermes_home) / "memories-state"
+            self._state_dir = provider_state_dir(hermes_home)
         # The provider runs INSIDE hermes, so this process IS the host: no tree to walk.
         try:
             from core import daemon, lease
@@ -315,7 +325,7 @@ class MemoriesProvider(_Base):
         `tests/test_hermes_skills.py` pins the block's size for that reason.
 
         The line is host-specific and stays out of `core/prompts.py`: that text is injected
-        VERBATIM into claude-code too, where `memories:memory` is not a name that resolves
+        VERBATIM into claude-code too, where `mnemosine:memory` is not a name that resolves
         (`tests/test_host_equivalence.py` fails a shared text that names one host's surface).
         """
         return (
@@ -607,7 +617,7 @@ class MemoriesProvider(_Base):
         except ImportError:
             return None
 
-        return RecallStatus(provider_label="memories", count=self._last_count)
+        return RecallStatus(provider_label="mnemosine", count=self._last_count)
 
     def _state_path(self, name: str):
         """Where this host keeps its per-session state and its breaker.
@@ -632,8 +642,8 @@ class MemoriesProvider(_Base):
         contract `initialize` documents. A breaker is neither per session nor per profile — it
         is a fact about one endpoint that every session on this machine shares, so scoping it
         to a profile reintroduces the exact outage this method's first paragraph describes.
-        Measured with the knob unset: `$HERMES_HOME/memories-state/rerank-breaker` against the
-        hook's `~/.memories-plugin/state/rerank-breaker` — two files, one GPU.
+        Measured with the knob unset: `$HERMES_HOME/mnemosine-state/rerank-breaker` against the
+        hook's `~/.mnemosine/state/rerank-breaker` — two files, one GPU.
         """
         explicit = os.environ.get("QCTX_STATE_DIR")
         if explicit:
@@ -643,7 +653,7 @@ class MemoriesProvider(_Base):
         else:
             base = getattr(self, "_state_dir", None)
         if base is None:
-            base = Path.home() / ".memories-plugin" / "state"
+            base = Path.home() / ".mnemosine" / "state"
             self._state_dir = base
         try:
             statefile.ensure_dir(base)
@@ -960,7 +970,7 @@ def _load_sibling(name: str):
     except (ImportError, TypeError):
         import importlib.util
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), f"{name}.py")
-        spec = importlib.util.spec_from_file_location(f"memories_plugin_hermes_{name}", path)
+        spec = importlib.util.spec_from_file_location(f"mnemosine_hermes_{name}", path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -985,7 +995,7 @@ tools.bind_tuning(MemoriesProvider)
 #: hermes' own (it derives it from the plugin name and refuses a ':' inside the bare name),
 #: so it is spelled HERE, in hermes' adapter, and never in `core/skills.py` -- a catalogue
 #: that learned one host's naming would have to learn the other's next.
-SKILL_NAMESPACE = "memories"
+SKILL_NAMESPACE = "mnemosine"
 
 #: The skill a session must load before writing to the archive. Named in the system prompt
 #: block because registration alone does not make a plugin skill FINDABLE (see there).
@@ -993,7 +1003,7 @@ PRIMARY_SKILL = "memory"
 
 
 def qualified_skill(name: str) -> str:
-    """`memory` -> `memories:memory`. One spelling of hermes' namespacing, not four."""
+    """`memory` -> `mnemosine:memory`. One spelling of hermes' namespacing, not four."""
     return f"{SKILL_NAMESPACE}:{name}"
 
 

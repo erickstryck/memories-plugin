@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The wizard's front door, and the only piece that can run before `qctx` is on PATH.
 #
-#     bash ~/.hermes/plugins/memories/scripts/install.sh        # installed by hermes
+#     bash ~/.hermes/plugins/mnemosine/scripts/install.sh        # installed by hermes
 #     bash ~/.claude/plugins/cache/…/<SHA>/scripts/install.sh   # installed by claude
 #     ./scripts/install.sh                                      # cloned
 #

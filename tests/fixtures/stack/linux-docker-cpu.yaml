@@ -1,12 +1,12 @@
 services:
   qdrant:
-    container_name: "memories-plugin-qdrant"
+    container_name: "mnemosine-qdrant"
     image: "docker.io/qdrant/qdrant:v1.19.2-unprivileged@sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b"
     restart: "always"
     ports:
       - "127.0.0.1:6333:6333"
     volumes:
-      - "memories-plugin-qdrant:/qdrant/storage"
+      - "mnemosine-qdrant:/qdrant/storage"
     environment:
       QDRANT__TELEMETRY_DISABLED: "true"
     cap_drop:
@@ -14,7 +14,7 @@ services:
     security_opt:
       - "no-new-privileges:true"
   embed:
-    container_name: "memories-plugin-embed"
+    container_name: "mnemosine-embed"
     image: "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9"
     restart: "always"
     command:
@@ -37,13 +37,13 @@ services:
     ports:
       - "127.0.0.1:8003:8080"
     volumes:
-      - "/home/me/.local/share/memories-plugin/stack/models:/models:ro"
+      - "/home/me/.local/share/mnemosine/stack/models:/models:ro"
     cap_drop:
       - "ALL"
     security_opt:
       - "no-new-privileges:true"
   rerank:
-    container_name: "memories-plugin-rerank"
+    container_name: "mnemosine-rerank"
     image: "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9"
     restart: "always"
     command:
@@ -66,10 +66,10 @@ services:
     ports:
       - "127.0.0.1:8004:8080"
     volumes:
-      - "/home/me/.local/share/memories-plugin/stack/models:/models:ro"
+      - "/home/me/.local/share/mnemosine/stack/models:/models:ro"
     cap_drop:
       - "ALL"
     security_opt:
       - "no-new-privileges:true"
 volumes:
-  "memories-plugin-qdrant": {}
+  "mnemosine-qdrant": {}

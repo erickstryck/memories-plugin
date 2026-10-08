@@ -145,8 +145,8 @@ class TheHeadlineInstallCommandRuns(unittest.TestCase):
         import subprocess
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as home:
-            cache = (Path(home) / ".claude" / "plugins" / "cache" / "memories-plugin"
-                     / "memories-plugin")
+            cache = (Path(home) / ".claude" / "plugins" / "cache" / "mnemosine"
+                     / "mnemosine")
             for sha in ("aaa1111", "bbb2222", "ccc3333", "ddd4444", "eee5555"):
                 script = cache / sha / "scripts" / "install.sh"
                 script.parent.mkdir(parents=True)

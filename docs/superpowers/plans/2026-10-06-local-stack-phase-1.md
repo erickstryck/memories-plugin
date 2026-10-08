@@ -32,7 +32,7 @@ na seção final da spec. Este plano já parte delas. As que mudaram o desenho:
 | M3 | o `podman info` disse `remoteSocket.exists: true` sem socket nenhum, e o `podman compose` (docker-compose) falhou | o socket é conferido por conexão; com ele parado e o `podman-compose` instalado, usa-se o `podman-compose` (Task 3) |
 | M4 | o `podman-compose run` aloca TTY e devolve `\r\n` | a prova roda `compose run -T`, e o parser tolera `\r` (Tasks 5 e 10) |
 | M5 | a linha `uma:` não sai com `--list-devices` | o padrão do menu é só a maior memória livre (Task 5) |
-| M6 | os providers prefixam volume e nome de container com o projeto, cada um do seu jeito | `container_name: <projeto>-<serviço>` em todo serviço; o volume real é `<projeto>_memories-plugin-qdrant` (Task 6) |
+| M6 | os providers prefixam volume e nome de container com o projeto, cada um do seu jeito | `container_name: <projeto>-<serviço>` em todo serviço; o volume real é `<projeto>_mnemosine-qdrant` (Task 6) |
 | M7 | a primeira chamada custa 3 a 7 vezes a seguinte | a calibração aquece antes de medir (Task 8) |
 | M8 | `--no-webui` é deprecado na `b11382` | `--no-ui` (Task 2) |
 
@@ -63,10 +63,10 @@ por Vulkan, 0,21 s e 1,07 s, com ~200 MB de RSS por container.
   -c 8192 -b 8192 -ub 8192 --no-ui -dev <Vulkan<n>|none>`.
 - Portas publicadas só em `127.0.0.1`: 6333 (Qdrant), 8003 (embed), 8004 (rerank); ocupada, a
   primeira livre a partir de `porta + 10000`.
-- Diretório: `$QCTX_STACK_DIR`, senão `${XDG_DATA_HOME:-~/.local/share}/memories-plugin/stack`, com
+- Diretório: `$QCTX_STACK_DIR`, senão `${XDG_DATA_HOME:-~/.local/share}/mnemosine/stack`, com
   `models/`, `compose.yaml` e `stack.json`.
-- Projeto compose `memories-plugin`; serviços `qdrant`, `embed`, `rerank`; volume
-  `memories-plugin-qdrant`; `container_name` `<projeto>-<serviço>`.
+- Projeto compose `mnemosine`; serviços `qdrant`, `embed`, `rerank`; volume
+  `mnemosine-qdrant`; `container_name` `<projeto>-<serviço>`.
 - Comum a todo serviço: `restart: always`, `cap_drop: [ALL]`,
   `security_opt: [no-new-privileges:true]`; modelos `:ro` (`:ro,z` com SELinux ativo); no Qdrant,
   `QDRANT__TELEMETRY_DISABLED=true`.
@@ -217,8 +217,8 @@ Em `tests/test_core_is_portable.py`: `FORBIDDEN = {"hooks", "hosts", "cli", "age
   - `PORTS = {"qdrant": 6333, "embed": 8003, "rerank": 8004}`,
     `CONTAINER_PORTS = {"qdrant": 6333, "embed": 8080, "rerank": 8080}`,
     `PORT_FALLBACK_OFFSET = 10000`;
-  - `PROJECT = "memories-plugin"`, `SERVICES = ("qdrant", "embed", "rerank")`,
-    `VOLUME = "memories-plugin-qdrant"`;
+  - `PROJECT = "mnemosine"`, `SERVICES = ("qdrant", "embed", "rerank")`,
+    `VOLUME = "mnemosine-qdrant"`;
   - `server_command(role: str, device: str | None) -> list[str]`;
   - `qdrant_version(ref: str) -> str`;
   - `parse_image_flags(values: list[str]) -> dict[str, str]`;
@@ -578,7 +578,7 @@ Antes dos fatos do host porque `facts.py` usa o `Runner` daqui.
 
 Regras do `render`: chaves de serviço na ordem `container_name, image, restart, command, ports,
 volumes, environment, devices, deploy, annotations, cap_drop, security_opt`; Qdrant com o
-volume `memories-plugin-qdrant:/qdrant/storage`; `embed` e `rerank` com
+volume `mnemosine-qdrant:/qdrant/storage`; `embed` e `rerank` com
 `server_command(role, plan.device)`, `127.0.0.1:<porta>:8080`,
 `<stack_dir>/models:/models:ro` (`:ro,z` com SELinux) e o `service_patch` do backend; volumes de
 topo `{VOLUME: {}}`. Regras do `emit`: bloco, indentação de 2; todo escalar por `json.dumps`; a
@@ -587,8 +587,8 @@ chave sai sem aspas quando casa `[A-Za-z_][A-Za-z0-9_]*` e não é palavra reser
 como `{}`.
 
 Fixtures: device `"Vulkan0"` em dri, nvidia e apple; `gpu_index=0` na nvidia; backend `amd` nas
-`dri`; portas padrão; imagens do catálogo; `stack_dir` `/home/me/.local/share/memories-plugin/stack`
-no Linux e `/Users/me/.local/share/memories-plugin/stack` no macOS; sem SELinux.
+`dri`; portas padrão; imagens do catálogo; `stack_dir` `/home/me/.local/share/mnemosine/stack`
+no Linux e `/Users/me/.local/share/mnemosine/stack` no macOS; sem SELinux.
 
 - [ ] **Step 1: testes que falham:**
   - `test_each_fixture_is_what_render_produces` (9 subTests, texto igual);
@@ -615,8 +615,8 @@ no Linux e `/Users/me/.local/share/memories-plugin/stack` no macOS; sem SELinux.
 - [ ] **Step 3:** implementar e gerar as fixtures com `--regen`; ler as 9 uma vez, à mão, contra o
   exemplo da spec.
 - [ ] **Step 4:** testes passam, e os providers aceitam as fixtures de verdade:
-  `for f in tests/fixtures/stack/*.yaml; do docker-compose -p memories-plugin -f "$f" config -q &&
-  podman-compose -p memories-plugin -f "$f" config >/dev/null || echo "FAIL $f"; done`. Esperado:
+  `for f in tests/fixtures/stack/*.yaml; do docker-compose -p mnemosine -f "$f" config -q &&
+  podman-compose -p mnemosine -f "$f" config >/dev/null || echo "FAIL $f"; done`. Esperado:
   nenhuma linha `FAIL`.
 - [ ] **Step 5:** commit `feat(stack): the compose file, rendered from the catalogue and a plan`.
 
@@ -1003,15 +1003,15 @@ linha dizendo que a stack local não é necessária. `StackError` sobe até o `m
 **Interfaces:**
 - Consumes: as implementações concretas de `stack/cli.py` e os casos de uso.
 
-Pulada sem `QCTX_STACK_IT=1`. Projeto `memories-plugin-it`; portas de `QCTX_STACK_IT_PORTS`
+Pulada sem `QCTX_STACK_IT=1`. Projeto `mnemosine-it`; portas de `QCTX_STACK_IT_PORTS`
 (padrão `46333,48003,48004`); diretório num tmp de `/tmp`; config num tmp (`ConfigSink` sobre um
 arquivo próprio); `QCTX_STACK_IT_MODELS=<dir>` semeia os GGUFs por hardlink ou cópia para não
 baixar de novo; `QCTX_STACK_IT_RUNTIME` escolhe o runtime.
 
 - [ ] **Step 1:** `test_cpu_profile_end_to_end`: `provision(profile="cpu", yes=True)` -> `running`;
   `status` saída 0; `down` -> `status` 1; `up` -> 0; `remove(purge_models=True,
-  purge_data=True, yes=True)` -> nenhum container `memories-plugin-it-*` e nenhum volume
-  `memories-plugin-it_memories-plugin-qdrant` no engine.
+  purge_data=True, yes=True)` -> nenhum container `mnemosine-it-*` e nenhum volume
+  `mnemosine-it_mnemosine-qdrant` no engine.
 - [ ] **Step 2:** `test_gpu_profile_end_to_end` com `QCTX_STACK_IT_GPU=amd|intel|nvidia`: o perfil
   gravado é o pedido, o device começa com `Vulkan` e o rerank medido na calibração fica abaixo
   do da CPU medido no passo anterior (quando os dois rodam na mesma execução).
@@ -1040,7 +1040,7 @@ baixar de novo; `QCTX_STACK_IT_RUNTIME` escolhe o runtime.
   parser não ficou mais lento.
 - [ ] **Step 4:** o scanner do hermes sobre um export limpo (`git archive HEAD | tar -x`), com
   `tools.plugin_guard.scan_plugin`: veredito `caution`, zero `critical`, e cada `high` novo lido.
-- [ ] **Step 5:** a máquina como foi encontrada: nenhum container, volume ou rede `memories-plugin*`
+- [ ] **Step 5:** a máquina como foi encontrada: nenhum container, volume ou rede `mnemosine*`
   de teste, o `podman.socket` no estado de antes.
 
 ## Self-review

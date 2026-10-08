@@ -476,9 +476,9 @@ class TestMemoryTools(unittest.TestCase):
     def test_store_assembles_metadata_from_the_object_and_the_shortcuts(self):
         res = self.call("memory_store", information="a fact",
                         metadata={"type": "old", "custom": 1}, type="reference",
-                        project="memories-plugin")
+                        project="mnemosine")
         self.assertEqual(self.q.get_point("mem", res["id"])["payload"]["metadata"],
-                         {"type": "reference", "custom": 1, "project": "memories-plugin"})
+                         {"type": "reference", "custom": 1, "project": "mnemosine"})
 
     def test_an_empty_fact_is_refused_by_the_core_and_reported_as_json(self):
         self.assertIn("error", self.call("memory_store", information="   "))
@@ -1025,7 +1025,7 @@ class TestTheWiringFromOutside(unittest.TestCase):
         "import importlib.machinery, importlib.util, json, pathlib, sys\n"
         "USER_NS = %(ns)r\n"
         "provider_dir = %(dir)r\n"
-        "module_name = USER_NS + '.memories'\n"
+        "module_name = USER_NS + '.mnemosine'\n"
         "ns_spec = importlib.machinery.ModuleSpec(USER_NS, None, is_package=True)\n"
         "ns_spec.submodule_search_locations = []\n"
         "sys.modules[USER_NS] = importlib.util.module_from_spec(ns_spec)\n"
@@ -1086,7 +1086,7 @@ class TestTheWiringFromOutside(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         home = root / "plugins" / "memory"
         home.mkdir(parents=True)
-        link = home / "memories"
+        link = home / "mnemosine"
         link.symlink_to(REPO / "hosts" / "hermes")
         elsewhere = Path(tempfile.mkdtemp())      # nothing importable in here
         self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
@@ -1114,7 +1114,7 @@ class TestTheWiringFromOutside(unittest.TestCase):
                         "print(provider.name)\n")
         kind, name = out.strip().splitlines()[:2]
         self.assertEqual(kind, "MemoriesProvider")
-        self.assertEqual(name, "memories")
+        self.assertEqual(name, "mnemosine")
 
     def test_no_sibling_module_fails_its_pre_exec(self):
         """Each sibling is exec'd on its own, BEFORE `__init__.py` has bootstrapped

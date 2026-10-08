@@ -14,7 +14,7 @@ only, and every scalar goes through `json.dumps`, so a value is a double-quoted 
 reads this file with PyYAML, a YAML 1.1 parser, where a plain `no` is False and a plain `22:22`
 is the integer 1342 (measured). A key is written bare only when it is an identifier and not one
 of YAML 1.1's bool or null words; every other key goes through `json.dumps` too, which is why
-`"run.oci.keep_original_groups"` and `"memories-plugin-qdrant"` come out quoted.
+`"run.oci.keep_original_groups"` and `"mnemosine-qdrant"` come out quoted.
 
 THE NAMES (M6): docker-compose names a container `<project>-<service>-1` and podman-compose
 `<project>_<service>_1`, so every service sets `container_name`, and whatever reads stats or

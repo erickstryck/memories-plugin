@@ -47,7 +47,7 @@ tabela de modelos sai.
 - [ ] Suíte nas duas árvores (`TMPDIR=/tmp python3 -m unittest discover -s tests`), salvar em
   `baseline-1.2.0.txt` e registrar contagem e nomes que falham (esperado: nenhum).
 - [ ] Mesma suíte no cenário hostil (`env -u QCTX_CONFIG XDG_CONFIG_HOME=$H`, com
-  `$H/memories-plugin/config.json` contendo `{not json`): esperado só
+  `$H/mnemosine/config.json` contendo `{not json`): esperado só
   `test_the_qdrant_budget_knob_has_the_same_semantics_in_both_hosts`.
 - [ ] Integração (`QCTX_INTEGRATION=1`) e `scripts/regression_probe.py --root /tmp/base-4f018fc`,
   salvar em `probe-1.2.0.json`.

@@ -14,7 +14,7 @@ model:
   base_url: https://server.example/api/v1
   key_env: MY_KEY_VAR
 memory:
-  provider: memories
+  provider: mnemosine
 """
 
 
@@ -110,7 +110,7 @@ model:
   base_url: https://server.example/api/v1
   api_key: ${MY_KEY_VAR}
 memory:
-  provider: memories
+  provider: mnemosine
 """
 
 CONFIG_CATALOGUE_FIRST = """\
@@ -124,7 +124,7 @@ model:
   base_url: https://server.example/api/v1
   key_env: MY_KEY_VAR
 memory:
-  provider: memories
+  provider: mnemosine
 """
 
 CONFIG_CATALOGUE_OWN_KEY = """\
@@ -151,7 +151,7 @@ class TestTheKeyIsReadTheWayHermesReadsIt(unittest.TestCase):
     def key_for(self, line: str) -> str:
         return endpoint.from_hermes_config(a_hermes_home(
             "model:\n  provider: custom\n  base_url: https://server.example/api/v1\n"
-            f"  {line}\nmemory:\n  provider: memories\n"))[1]
+            f"  {line}\nmemory:\n  provider: mnemosine\n"))[1]
 
     def test_an_env_prefixed_reference_resolves(self):
         self.assertEqual(self.key_for("api_key: ${env:MY_KEY_VAR}"), "secret-value")
@@ -233,7 +233,7 @@ model:
   base_url: https://server.example/api/v1
   key_env: MY_KEY_VAR
 memory:
-  provider: memories
+  provider: mnemosine
 """
 
 CONFIG_COMMENT_AFTER_BLOCK = """\
@@ -255,7 +255,7 @@ model:
   base_url: https://server.example/api/v1
   key_env: MY_KEY_VAR
 memory:
-  provider: memories
+  provider: mnemosine
 """
 
 

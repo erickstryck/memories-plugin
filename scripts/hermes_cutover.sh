@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install memories-plugin as the hermes-agent memory provider, in ONE atomic pass.
+# Install mnemosine as the hermes-agent memory provider, in ONE atomic pass.
 #
 # hermes activates exactly ONE external memory provider (`MemoryManager.add_provider`
 # rejects the second with a warning), so this REPLACES whatever `memory.provider` names —
@@ -39,7 +39,7 @@ DOTENV="$HERMES_HOME/.env"
 # discovered (probed against the installed loader: `find_provider_dir` returned None for it
 # and the path below for us). `tests/test_hermes_provider.py` holds that measurement.
 PLUGINS="$HERMES_HOME/plugins"
-LINK="$PLUGINS/memories"
+LINK="$PLUGINS/mnemosine"
 TARGET="$ROOT/hosts/hermes"
 ALLOWLIST="$HERMES_HOME/shell-hooks-allowlist.json"
 # The big-file read guard, which is NOT installed by the symlink: the memory provider is
@@ -270,7 +270,7 @@ block, want, inside, indent = sys.argv[2], sys.argv[3], False, None
 #: The LAST direct child wins, not the first. That is what a YAML parser resolves a duplicate
 #: key to (PyYAML keeps the last and does not complain), and hermes reads this file with
 #: yaml.safe_load. Reading the first would let a file holding BOTH
-#: `provider: memories` and `provider: qdrant` answer "memories" while hermes loads qdrant —
+#: `provider: mnemosine` and `provider: qdrant` answer "mnemosine" while hermes loads qdrant —
 #: which is exactly the corruption the post-write verification exists to catch.
 found = None
 for line in src.splitlines():
@@ -293,12 +293,12 @@ PY
 }
 
 current="$(read_memory_key provider)"
-if [ "$current" = "memories" ]; then
-  ok "memory.provider is already selected: memories"
+if [ "$current" = "mnemosine" ]; then
+  ok "memory.provider is already selected: mnemosine"
 elif [ -n "$current" ]; then
-  note "memory.provider: $current -> memories"
+  note "memory.provider: $current -> mnemosine"
 else
-  note "memory.provider is unset -> memories"
+  note "memory.provider is unset -> mnemosine"
 fi
 
 enabled="$(read_memory_key memory_enabled)"
@@ -416,7 +416,7 @@ say "=== install location ==="
 #
 # THE TEST IS `-ef`, NOT A STRING COMPARE, and that is the third fix to this same decision.
 # `readlink` returns the link's TEXT, so an equally valid relative link
-# (`ln -s ../../Documentos/memories-plugin memories`) failed a `= "$ROOT"` compare, fell past
+# (`ln -s ../../Documentos/mnemosine mnemosine`) failed a `= "$ROOT"` compare, fell past
 # every branch, and got silently repointed by the apply — the exact bug this file already
 # fixed twice for other spellings of the same shape. `-ef` compares inodes and `$ROOT` is
 # already physical (`cd -P`, above), so every spelling of "it already points here" collapses
@@ -440,11 +440,11 @@ else
 fi
 
 # The symlink is only as durable as what it points at, and a git worktree is a temporary
-# checkout: remove it and hermes is left with a dangling `plugins/memories`, which
+# checkout: remove it and hermes is left with a dangling `plugins/mnemosine`, which
 # discovery skips — no provider, no error, no memory. Install from the main checkout.
 #
 # `--apply` REFUSES rather than warning, because the failure it prevents is the silent one:
-# discovery skips a dangling `plugins/memories` and `load_memory_provider` returns None, and
+# discovery skips a dangling `plugins/mnemosine` and `load_memory_provider` returns None, and
 # hermes 0.20.1 does not warn on the None case at all — `agent/agent_init.py:1784-1798` only
 # warns when `_mp is not None`. So the operator gets a hermes with no memory and nothing
 # anywhere says why. A WARN in the middle of a forty-line report is easy to scroll past.
@@ -452,7 +452,7 @@ case "$ROOT" in
   */.claude/worktrees/*|*/.git/worktrees/*)
     if [ "$APPLY" = yes ] && [ "$WORKTREE_OK" != yes ]; then
       fail "$ROOT is a git WORKTREE — refusing to --apply from it: the symlink dies when the"
-      say  "        worktree is removed, and a dangling plugins/memories is skipped SILENTLY"
+      say  "        worktree is removed, and a dangling plugins/mnemosine is skipped SILENTLY"
       say  "        (load_memory_provider returns None, and hermes does not warn on None)."
       say  "        Install from the main checkout, or pass --i-know-its-a-worktree."
     else
@@ -463,8 +463,8 @@ esac
 
 # The two-plausible-locations lesson, and not a hypothetical one: the provider being
 # replaced lives at $PLUGINS/memory/qdrant, a layout the memory loader never scans.
-if [ -e "$PLUGINS/memory/memories" ]; then
-  warn "$PLUGINS/memory/memories exists and is NOT discovered — the loader scans"
+if [ -e "$PLUGINS/memory/mnemosine" ]; then
+  warn "$PLUGINS/memory/mnemosine exists and is NOT discovered — the loader scans"
   say "        $PLUGINS/<name>/ only (one level, not two). Nothing reads that copy."
 fi
 if [ -n "${HERMES_PLUGIN_DIR:-}" ] && [ "$HERMES_PLUGIN_DIR" != "$PLUGINS" ]; then
@@ -499,7 +499,7 @@ esac
 # hermes.memory_providers) lives in hermes' own venv, so absence is reported as a note and
 # never as a failure.
 BUNDLED="$HERMES_HOME/hermes-agent/plugins/memory"
-if [ -n "$current" ] && [ "$current" != memories ]; then
+if [ -n "$current" ] && [ "$current" != mnemosine ]; then
   if [ -d "$PLUGINS/$current" ] || [ -d "$BUNDLED/$current" ]; then
     note "the provider being replaced, $current, is where the loader looks"
   else
@@ -809,7 +809,7 @@ if [ "$LINK" -ef "$ROOT" ] || [ "$LINK" -ef "$TARGET" ]; then
 else
   say "  $LINK -> $TARGET   (symlink; one source of truth)"
 fi
-say "  $CONFIG: memory.provider: ${current:-<unset>} -> memories"
+say "  $CONFIG: memory.provider: ${current:-<unset>} -> mnemosine"
 if [ -z "$guard_entry" ] && [ "$hooks_shape" != seq ]; then
   say "  $CONFIG: hooks.pre_tool_call += matcher read_file -> $GUARD"
 fi
@@ -884,7 +884,7 @@ for line in lines:
             # End of the block with no provider key of its own: insert one, at the
             # indentation the block's other keys use.
             if not done:
-                out.append(f"{indent or '  '}provider: memories\n")
+                out.append(f"{indent or '  '}provider: mnemosine\n")
                 done = True
             inside = False
         else:
@@ -896,7 +896,7 @@ for line in lines:
                 # something else (the real config.yaml has one under
                 # auxiliary.memory_query_rewrite).
                 if m.group(1) == indent and m.group(2) == "provider" and not done:
-                    out.append(f"{indent}provider: memories\n")
+                    out.append(f"{indent}provider: mnemosine\n")
                     done = True
                     continue
     out.append(line)
@@ -904,13 +904,13 @@ for line in lines:
 if inside and not done:                       # the block ran to the end of the file
     if out and not out[-1].endswith("\n"):
         out.append("\n")
-    out.append(f"{indent or '  '}provider: memories\n")
+    out.append(f"{indent or '  '}provider: mnemosine\n")
     done = True
 
 if not done:                                  # no `memory:` block at all
     if out and not out[-1].endswith("\n"):
         out.append("\n")
-    out.append("memory:\n  provider: memories\n")
+    out.append("memory:\n  provider: mnemosine\n")
 
 sys.stdout.write("".join(out))
 PY
@@ -918,13 +918,13 @@ then
   if mv "$tmp" "$CONFIG"; then
     # RE-READ, with the same parser that reported the value before the change. The rewriter
     # exiting 0 and `mv` succeeding say the file was replaced, not that `memory.provider` is
-    # now `memories`: a rewriter bug can emit a file where the old key survives (two
+    # now `mnemosine`: a rewriter bug can emit a file where the old key survives (two
     # `provider:` lines in the block, the first one winning nothing) and every signal above
     # still looks like success. Printing ok for a state it had not verified is the defect
     # scripts/cutover.sh already paid for once.
     written="$(read_memory_key provider)"
-    if [ "$written" = memories ]; then
-      ok "memory.provider = memories"
+    if [ "$written" = mnemosine ]; then
+      ok "memory.provider = mnemosine"
     else
       fail "the rewrite did not take: memory.provider reads '${written:-<unset>}' in $CONFIG"
       say  "        Restore $CONFIG.bak-$STAMP and set the key by hand."
@@ -1090,7 +1090,7 @@ say "=== now ==="
 say "  1. Close every hermes session and start a NEW one from a fresh terminal, with the"
 say "     credentials exported (set -a; . ~/.secrets; set +a)."
 say "  2. Confirm the provider is the new one:"
-say "       hermes memory status      # 'memories', available"
+say "       hermes memory status      # 'mnemosine', available"
 say "  3. The first file read of that new session asks you to approve the big-file guard"
 say "     at the TTY. Approving records it in $ALLOWLIST;"
 say "     until then hermes skips the hook, and a hermes with no TTY skips it silently."

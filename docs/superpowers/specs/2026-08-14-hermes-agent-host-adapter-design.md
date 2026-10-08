@@ -1,6 +1,6 @@
-# memories-plugin no hermes-agent — design
+# mnemosine no hermes-agent — design
 
-**Data:** 2026-08-14 · **Repo:** `memories-plugin` @ `2ceb111` · **Alvo:** hermes-agent v0.20.0 (2026.8.3)
+**Data:** 2026-08-14 · **Repo:** `mnemosine` @ `2ceb111` · **Alvo:** hermes-agent v0.20.0 (2026.8.3)
 
 > **Correção de 2026-08-14, depois de ler o install real.** A primeira versão desta spec foi
 > escrita a partir do HEAD do GitHub, que está À FRENTE do que está instalado. Medido no
@@ -10,7 +10,7 @@
 
 ## 1. Objetivo
 
-Um plugin, dois hosts. O `memories-plugin` passa a ser importável pelo hermes-agent com as
+Um plugin, dois hosts. O `mnemosine` passa a ser importável pelo hermes-agent com as
 **mesmas funções e a mesma configuração** que tem no claude-code. Nesta máquina os dois
 agentes apontam para as mesmas coleções e contribuem um para o outro.
 
@@ -21,14 +21,14 @@ Não-objetivo: fork do hermes, repo separado, ou migrar dado existente.
 | # | decisão | motivo |
 |---|---|---|
 | D1 | Adaptador novo em `hosts/hermes/`, dentro deste repo | espelha `hooks/` (adaptador do claude-code); uma fonte de verdade |
-| D2 | Instalação por symlink em `$HERMES_HOME/plugins/memories/` | fonte de primeira classe na descoberta do hermes; sem fork |
+| D2 | Instalação por symlink em `$HERMES_HOME/plugins/mnemosine/` | fonte de primeira classe na descoberta do hermes; sem fork |
 | D3 | Nome do provedor: `memories` | o diretório dá o nome; não colide com os 8 embutidos nem com o `qdrant` atual |
 | D4 | Substitui o provedor `qdrant` atual | o hermes aceita **um** provedor externo por vez |
 | D5 | Aponta para `claude_memory` / `memories_docs_library` / `memories_docs_tmp` | decisão do usuário: os dois agentes contribuem entre si |
 | D6 | Os 1423 pontos de `hermes_memory` ficam onde estão | numa amostra de 200: 154 pedaços de doc e 46 turnos crus, não fatos curados; misturar é a poluição que a separação de acervos impede |
 | D7 | Prosa injetada e montagem de bloco **movem para `core/`** | sem isso, equivalência vira copy-paste — ver §4 |
 | D8 | `prefetch` bloqueante, sem thread de fundo | orçamento do hermes é 8s; o recall mede 0,5–1,7s em produção |
-| D9 | Uma só config: `~/.config/memories-plugin/config.json` | `qctx setup` e `hermes memory setup` escrevem no mesmo arquivo |
+| D9 | Uma só config: `~/.config/mnemosine/config.json` | `qctx setup` e `hermes memory setup` escrevem no mesmo arquivo |
 
 ## 3. O contrato do hermes, mapeado
 
@@ -181,7 +181,7 @@ contrato. Todo teste novo exige vermelho provado antes do verde.
 
 | passo | ação | reversível por |
 |---|---|---|
-| 1 | symlink `$HERMES_HOME/plugins/memories` → `hosts/hermes` | `rm` do symlink |
+| 1 | symlink `$HERMES_HOME/plugins/mnemosine` → `hosts/hermes` | `rm` do symlink |
 | 2 | `config.json`: já aponta para as 3 coleções | backup datado |
 | 3 | `config.yaml` do hermes: `memory.provider: qdrant` → `memories` | backup datado |
 | 4 | conferir: `hermes memory setup` lista `memories` como disponível | — |
