@@ -692,6 +692,30 @@ class TestProvision(ProvisionTestCase):
         self.assertTrue(any("calibration" in text for text in warns),
                         f"the failure must come out as a warning: {warns}")
 
+    def test_a_failed_functional_check_points_at_re_running_the_install(self):
+        # The functional check runs BEFORE the config is written. When it fails,
+        # the stack is up (readiness passed) but not functional, the config is
+        # untouched, and the state is still `compose`. The fix must point at the
+        # command that RE-VERIFIES and (only if it passes) writes the config --
+        # `qctx install`, which resumes. `qctx stack up` never re-verifies or
+        # writes the config, so "run qctx stack up again" was a fix the command
+        # could not carry out: it would start an already-running stack and the
+        # config would stay unwritten, forever.
+        facts = facts_for()
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+        config = FakeConfigSink()
+        err = run_case(self.tmp, request=installer.Request(yes=True),
+                       runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                       reporter=RecordingReporter(), config=config,
+                       diagnose=failing_diagnose)
+        self.assertIsInstance(err, StackError)
+        self.assertEqual(err.step, "verify")
+        self.assertEqual(config.saves, [])
+        self.assertIn("qctx install", err.fix,
+                      f"the fix must name the command that re-verifies: {err.fix!r}")
+        self.assertNotIn("stack up again", err.fix,
+                         f"`stack up` never re-verifies: {err.fix!r}")
+
     def test_replacing_a_non_empty_value_asks_first(self):
         # The file already points elsewhere (a non-empty qdrant_url): the diff
         # is shown, and the replacement ASKS before it saves.
@@ -743,6 +767,10 @@ class TestProvision(ProvisionTestCase):
                          [["logs", "--tail", "50", "qdrant"],
                           ["logs", "--tail", "50", "embed"],
                           ["logs", "--tail", "50", "rerank"]])
+        self.assertIn("qctx stack up", err.fix,
+                      "a failed start is retried with the lifecycle verb, not a "
+                      "re-install: the config is written only after the "
+                      "functional check passes")
         self.assertEqual(config.saves, [])
         self.assertEqual(state.load(self.stack).phase, "compose")
 

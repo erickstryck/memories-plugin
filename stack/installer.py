@@ -748,8 +748,9 @@ def _verify_functional(ctx: _Ctx) -> int | None:
                     ctx.deps.reporter.info(f"fix: {check.fix_hint}")
         raise StackError("the stack did not pass its functional check",
                          step="verify",
-                         fix="check what the failing lines name, then run "
-                             "qctx stack up again")
+                         fix="check what the failing lines name, then re-run the "
+                             "install: qctx install (it re-verifies, and only then "
+                             "writes the config)")
     for check in checks:
         ctx.deps.reporter.ok(f"{check.name}: {check.detail}")
     return dim
