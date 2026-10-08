@@ -729,14 +729,15 @@ usuário, como o wizard já faz com o PATH.
 3. **Calibração**, comparada com o orçamento de cada host, depois de uma chamada de aquecimento
    em cada servidor, com as mesmas entradas que depois são medidas. A primeira chamada custa bem
    mais que as seguintes (medido em 2026-10-06: 1,39 s contra 0,21 s no embed e 2,93 s contra
-   1,07 s no rerank, na mesma GPU), e é o regime quente que o recall de cada host vive. E o
+   1,07 s no rerank, na mesma GPU), e é o regime quente em que o recall de cada host vive. E o
    aquecimento tem de ter o formato medido: na GPU, a primeira chamada de um formato novo ainda
    paga a preparação do backend (medido em 2026-10-08, Intel Vulkan2, servidor recém-carregado:
-   aquecendo com 1 texto curto e 1 documento, o rerank de 20 pares mediu 5,3 s; aquecendo no
+   aquecendo com 1 texto curto e 1 documento, o rerank de 20 pares mediu 5,30 s; aquecendo no
    formato medido, 1,98 s). A medição:
    - embed de um texto de 6000 caracteres (o teto do chunk), que também prova o `-ub 8192`;
-   - rerank de 20 pares (o `TOP_K` do recall com rerank, `hooks/recall.py:135`) de 2400
-     caracteres;
+   - rerank de 20 pares (o `TOP_K` do recall com rerank, `hooks/recall.py:135`), de 2400
+     caracteres cada, enviados; o cliente do rerank julga os `max_docs` (12) deles
+     (`core/reranking.py`), que é o call que o recall faz;
    - memória dos containers, pelo `stats` do runtime.
 
    Os orçamentos chegam do `cli`:

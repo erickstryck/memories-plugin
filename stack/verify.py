@@ -53,9 +53,11 @@ EMBED_DIM = catalog.EMBED_DIM
 #: reports them.
 FUNCTIONAL_CHECKS = ("Qdrant", "Embedding", "Re-rank")
 
-#: The calibration reranks the same pool the recall hook does: its `TOP_K`.
-#: `tests/test_stack_verify.py` reads the default out of `hooks/recall.py` by
-#: AST so the two numbers cannot drift apart.
+#: The calibration sends the same pool the recall hook sends: its `TOP_K`
+#: documents. The reranker client then judges only its `max_docs` (12) of them
+#: (`core/reranking.py`), so the measurement is the 20-sent / 12-judged call
+#: recall actually makes. `tests/test_stack_verify.py` reads the sent count out
+#: of `hooks/recall.py` by AST so the two numbers cannot drift apart.
 CALIBRATION_RERANK_DOCS = 20
 
 
@@ -170,9 +172,11 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
     One measurement per kind, shared by every host (the servers are the same
     for all of them): a warm-up embed and a warm-up rerank first (M7), on the
     same inputs that are then timed: one `HARD_MAX_CHARS` text and a rerank of
-    `CALIBRATION_RERANK_DOCS` `TARGET_CHARS` documents. `memory`, when given,
-    is the runtime's `stats` for the stack's containers, read once per host so
-    the check carries the containers' footprint beside the timing.
+    `CALIBRATION_RERANK_DOCS` `TARGET_CHARS` documents — the same 20-sent /
+    12-judged call recall makes, because the client judges its `max_docs`.
+    `memory`, when given, is the runtime's `stats` for the stack's containers,
+    read once per host so the check carries the containers' footprint beside
+    the timing.
 
     The answer is one `Check` per host, named after it, plus an info dict the
     installer reports. An over-budget measurement sets `warning=True` and
@@ -196,7 +200,7 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
     # any clock starts -- with the SAME inputs that are then timed. On the GPU
     # the first call of a new shape pays the backend's setup again, so a small
     # warm-up left that cost inside the measurement (measured 2026-10-08, Intel
-    # Vulkan2, fresh server: rerank 5.3 s after a one-document warm-up, 1.98 s
+    # Vulkan2, fresh server: rerank 5.30 s after a one-document warm-up, 1.98 s
     # after a same-shape one), and every GPU install warned of a budget miss
     # that recall never sees.
     embedder.embed([embed_text])

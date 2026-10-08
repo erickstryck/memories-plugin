@@ -215,11 +215,15 @@ class TestCalibrate(unittest.TestCase):
         self.assertEqual(embedder.calls[1][0], "embed")
         self.assertEqual(len(embedder.calls[1][1][0]), core_chunk.HARD_MAX_CHARS)
         # The reranker warms up with the measured pool too: CALIBRATION_RERANK_DOCS
-        # documents of TARGET_CHARS, then the same pool is timed.
+        # documents of TARGET_CHARS, then the same pool is timed, document for
+        # document. (On the server the call judges 12 of the 20: the client's
+        # max_docs.)
         self.assertEqual(len(reranker.calls[0][1]), verify.CALIBRATION_RERANK_DOCS)
         self.assertEqual(len(reranker.calls[0][1][0]), core_chunk.TARGET_CHARS)
         self.assertEqual(len(reranker.calls[1][1]), verify.CALIBRATION_RERANK_DOCS)
         self.assertEqual(len(reranker.calls[1][1][0]), core_chunk.TARGET_CHARS)
+        # The WHOLE warm-up pool is the timed pool (not just its first document).
+        self.assertEqual(reranker.calls[0][1], reranker.calls[1][1])
         # One check per host, named after the host, never raised.
         self.assertEqual(len(checks), 1)
         self.assertEqual(checks[0].name, "hermes")
