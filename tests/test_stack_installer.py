@@ -146,11 +146,27 @@ def default_calibrate(cfg, budgets, *, clock=None, memory=None):
 
 
 def raising_calibrate(cfg, budgets, *, clock=None, memory=None):
-    """A `calibrate` that blows up the way the real one does when the
-    measurement fails: the runtime's `stats` raises (rootless without cgroups
-    v2) or the embedder refuses. The spec says calibration NEVER blocks, so
-    this must become a warning, not an aborted install."""
-    raise RuntimeError("the runtime's stats raised (rootless, no cgroups v2)")
+    """A `calibrate` that fails the way the real one does when the measurement
+    cannot be taken: the embedder cannot reach the server, and `core.embedding`
+    raises its `EmbeddingError` (a `CoreError`). The spec says calibration NEVER
+    blocks, so this must become a warning, not an aborted install."""
+    from core.embedding import EmbeddingError
+    raise EmbeddingError("could not reach http://127.0.0.1:8003/v1/embeddings")
+
+
+def timed_calibrate(embed_s: float, rerank_s: float):
+    """The REAL `verify.calibrate`, over the shared embedder/reranker fakes of
+    `tests/test_stack_verify.py` and a clock scripted to the given durations, with
+    the `memory` callable the installer builds passed straight through: so a test
+    sees what the installer does with a measured timing AND a failing `stats`."""
+    from tests.test_stack_verify import FakeClock, FakeEmbedder, FakeReranker
+
+    def calibrate(cfg, budgets, *, clock=None, memory=None):
+        return verify.calibrate(cfg, budgets, embedder=FakeEmbedder(),
+                                reranker=FakeReranker(docs=verify.CALIBRATION_RERANK_DOCS),
+                                clock=FakeClock([0.0, embed_s, 0.0, rerank_s]),
+                                memory=memory)
+    return calibrate
 
 
 def facts_for(system="linux", arch="amd64", gpus=(), nodes=(), ram: int | None = 16 * GIB,
@@ -724,6 +740,43 @@ class TestProvision(ProvisionTestCase):
         warns = [text for method, text in reporter.calls if method == "warn"]
         self.assertTrue(any("calibration" in text for text in warns),
                         f"the failure must come out as a warning: {warns}")
+
+    def test_a_failed_stats_keeps_the_measured_timing(self):
+        # Only the memory reading fails (the runtime's `stats`, e.g. rootless
+        # without cgroups v2): the timing was already measured and must still be
+        # reported -- here a 9 s embed against hermes' 2 s budget -- and the
+        # warning names only what was not read. A blanket "speed and memory were
+        # not checked" would be false and would hide the over-budget warning.
+        facts = facts_for()
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+        podman.stats_answer = StackError("podman stats failed: cgroups v1", step="runtime")
+        reporter = RecordingReporter()
+        config = FakeConfigSink()
+        result = run_case(self.tmp, request=installer.Request(yes=True),
+                          runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=reporter, config=config,
+                          calibrate=timed_calibrate(embed_s=9.0, rerank_s=0.5))
+        self.assertNotIsInstance(result, StackError)
+        said = [text for method, text in reporter.calls if method == "warn"]
+        self.assertTrue(any("embed 9.0 s over" in t for t in said),
+                        f"the measured timing must survive a failed stats: {said}")
+        self.assertTrue(any("memory" in t and "cgroups v1" in t for t in said),
+                        f"the warning names what was not read: {said}")
+        self.assertFalse(any("speed and memory were not checked" in t for t in said))
+        self.assertEqual(len(config.saves), 1)
+
+    def test_a_programming_error_in_calibration_is_not_swallowed(self):
+        # "Never blocks" is about a measurement that fails. A bug (here a
+        # TypeError) must surface, not be reported as a failed measurement.
+        def buggy(cfg, budgets, *, clock=None, memory=None):
+            raise TypeError("unsupported operand type(s)")
+        facts = facts_for()
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+        with self.assertRaises(TypeError):
+            run_case(self.tmp, request=installer.Request(yes=True), runtimes=[podman],
+                     facts=facts, prompter=ScriptedPrompter([]),
+                     reporter=RecordingReporter(), config=FakeConfigSink(),
+                     calibrate=buggy)
 
     def test_a_failed_functional_check_points_at_re_running_the_install(self):
         # The functional check runs BEFORE the config is written. When it fails,

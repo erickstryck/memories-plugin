@@ -78,19 +78,30 @@ class FakeRuntime:
     """
 
     def __init__(self, name: str, engine, provider_info,
-                 list_devices: dict, fail: dict | None = None):
+                 list_devices: dict, fail: dict | None = None, stats=None):
         self.name = name
         self._engine_info = engine
         self.provider_info = provider_info
         self.list_devices = list_devices
         self.fail = fail or {}
         self.calls: list = []
+        # `stats` answers the real contract (container name -> bytes) or, when it
+        # is an exception, raises it the way the real runtimes do when the tool
+        # fails (`stack.engine.stats_failed` builds a StackError(step="runtime")).
+        self.stats_answer = stats
+        self.stats_calls: list = []
 
     def engine(self):
         return self._engine_info
 
     def compose_provider(self):
         return self.provider_info
+
+    def stats(self, names: list) -> dict:
+        self.stats_calls.append(list(names))
+        if isinstance(self.stats_answer, BaseException):
+            raise self.stats_answer
+        return dict(self.stats_answer or {})
 
     def compose(self, provider, project: str, file: Path, *args: str,
                 timeout: float, stream: bool = False):

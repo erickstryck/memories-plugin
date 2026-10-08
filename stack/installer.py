@@ -27,6 +27,7 @@ from typing import Callable, Mapping, Protocol
 
 from core import setup as core_setup
 from core.config import Config
+from core.errors import CoreError
 
 from . import StackError, catalog, compose, fetch, facts, health, state, verify
 from .backends import (BACKENDS, MISSING, Availability, Option, READY,
@@ -779,21 +780,38 @@ def _verify_functional(ctx: _Ctx) -> int | None:
 def _calibrate(ctx: _Ctx, plan: compose.Plan) -> None:
     """Step 10, second half: the calibration, one check per host budget (a
     warning when it is over — an over-budget stack works, it just misses a
-    deadline), the memory through the runtime's `stats` (Ruling 4: the lambda
-    is built here, and `calibrate` reads it once per host). A measurement that
-    FAILS is a warning too, never an abort (spec: calibration never blocks):
-    the functional check already passed, so the stack works; what failed is
-    the reading of its speed and memory (the runtime's `stats` on a rootless
-    host without cgroups v2, the embedder refusing the probe), and an abort
-    here would leave the config unwritten and the state in `compose`, so
-    every re-run re-provisioned to the same point, forever."""
+    deadline), the memory through the runtime's `stats` (Ruling 4: the callable
+    is built here, and `calibrate` reads it once per host). Nothing here aborts
+    the install (spec: calibration never blocks; the functional check already
+    passed, so the stack works, and an abort would leave the config unwritten
+    and every re-run re-provisioning to the same point). Two failures, two
+    warnings that each say only what is true: the memory reading fails alone
+    (the runtime's `stats`, e.g. rootless podman without cgroups v2) and the
+    timing is still reported; the timing itself fails (the embedder or the
+    reranker raises its CoreError) and neither speed nor memory was checked. A
+    non-CoreError is a bug and is not caught."""
     names = [compose.container_name(plan.project, role) for role in ("embed", "rerank")]
-    memory = lambda: ctx.runtime.stats(names)  # noqa: E731
+    unread: list[str] = []
+
+    def memory() -> dict:
+        # The memory reading is the last part of the measurement and the most
+        # fragile (`stats` needs cgroups v2 on rootless podman): when it fails,
+        # the timing already measured must survive, so the failure is recorded
+        # and said once below, not raised through the calibration.
+        try:
+            return ctx.runtime.stats(names)
+        except StackError as exc:
+            if not unread:
+                unread.append(str(exc))
+            return {}
+
     cfg = verify.stack_config(ctx.ports)
     try:
         checks, info = ctx.deps.calibrate(cfg, ctx.deps.budgets, clock=ctx.deps.clock,
                                           memory=memory)
-    except Exception as exc:  # the measurement, not the stack, is what failed
+    except CoreError as exc:
+        # The measurement itself failed (the embedder or the reranker could not
+        # be timed). A CoreError only: a bug must surface, not pass for this.
         ctx.deps.reporter.warn(f"calibration: the measurement failed ({exc}); "
                                "the stack is up, but its speed and memory were not checked")
         return
@@ -803,6 +821,9 @@ def _calibrate(ctx: _Ctx, plan: compose.Plan) -> None:
     for host, row in info.items():
         for name, used in (row.get("memory") or {}).items():
             ctx.deps.reporter.info(f"{host}: {name} uses {used / 2 ** 20:.0f} MiB")
+    if unread:
+        ctx.deps.reporter.warn(f"calibration: the containers' memory was not read "
+                               f"({unread[0]}); the timing above was measured")
 
 
 def _save_config(ctx: _Ctx, plan: compose.Plan, dim: int | None) -> None:
