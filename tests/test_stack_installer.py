@@ -484,18 +484,19 @@ class TestMenu(ProvisionTestCase):
         self.assertEqual(result.profile, "intel")
         self.assertEqual(result.device, "Vulkan0")
 
-    def test_build_options_gives_one_option_per_proven_device(self):
-        # The public helper the plan names: a profile with two proven devices
-        # becomes two options, each with its device, in the order proven.
-        from stack.backends import Availability, READY, parse_devices
-        devices = parse_devices(LIST_INTEL_TWO)
+    def test_build_options_gives_one_deviceless_line_per_profile(self):
+        # The pre-proof menu is built from the availability alone: one line per
+        # profile, no device. The device rows are added later by `_prove` (one
+        # per proven GPU), so a two-GPU profile still shows ONE line here.
+        from stack.backends import Availability, READY
         availability = {b: Availability(READY) for b in ("cpu", "amd", "intel",
                                                           "nvidia", "apple")}
-        options = installer.build_options("linux", facts_for(), podman_engine(), "podman",
-                                          {"intel": devices}, availability)
-        intel = [o for o in options if o.backend == "intel"]
-        self.assertEqual([o.device.id for o in intel], ["Vulkan0", "Vulkan1"])
-        self.assertEqual(options[0].backend, "cpu")
+        options = installer.build_options(availability)
+        self.assertEqual([o.backend for o in options],
+                         ["cpu", "amd", "intel", "nvidia", "apple"],
+                         "catalogue order, cpu first, one line each")
+        self.assertTrue(all(o.device is None for o in options),
+                        "no device before _prove")
 
     def test_auto_picks_the_second_gpu_when_it_has_more_free_memory(self):
         # ONE vendor with TWO GPUs in the same --list-devices (this host's

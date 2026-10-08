@@ -32,7 +32,7 @@ from core.errors import CoreError
 from . import StackError, catalog, compose, fetch, facts, health, state, verify
 from .backends import (BACKENDS, MISSING, Availability, Option, READY,
                        default_option, runtime_label)
-from .engine import ContainerRuntime, log_tail
+from .engine import ContainerRuntime, EngineInfo, log_tail
 from .facts import HostFacts
 from .fetch import Transport
 
@@ -129,13 +129,15 @@ class Deps:
 @dataclass
 class _Ctx:
     """The settled data the later steps read instead of re-deriving: the
-    runtime (step 1), the platform (step 2), the ports and the images."""
+    runtime (step 1), the platform (step 2), the ports and the images, and
+    the engine once `_engine` has asked for it."""
     request: Request
     deps: Deps
     runtime: ContainerRuntime
     platform: str = ""
     ports: dict[str, int] = field(default_factory=dict)
     images: dict[str, str] = field(default_factory=dict)
+    engine: "EngineInfo | None" = None
 
 
 def provision(request: Request, deps: Deps) -> "state.StackState | None":
@@ -186,26 +188,16 @@ def choose_ports(wanted: dict[str, int],
     return got
 
 
-def build_options(platform: str, host: HostFacts, engine, runtime: str,
-                  proofs: Mapping[str, list], availability: Mapping[str, Availability]
-                  ) -> list[Option]:
-    """The menu: one option per profile, and for a proven GPU profile, ONE
-    option per proven device in `proofs` (spec: the menu lists each GPU the
-    `--list-devices` showed). The order is the catalogue's, cpu first; the
-    availability is shared by the profile's options. `provision` calls it
-    BEFORE the proofs, with an empty `proofs` (one deviceless option per
-    profile), and `_prove` then expands each proven profile into one option
-    per device the same way."""
+def build_options(availability: Mapping[str, Availability]) -> list[Option]:
+    """The menu before the proofs: one option per profile, in the catalogue's
+    order (cpu first), each carrying the profile's availability on this runtime
+    and no device yet. The device rows appear only after `_prove`, which builds
+    them inline for each proven device (a profile with two proven GPUs becomes
+    two options there), so this helper does not take the proofs.
+    """
     options: list[Option] = []
     for backend in BACKENDS:
-        av = availability[backend]
-        if av.state == READY and backend != "cpu":
-            seen = list(proofs.get(backend, ()))
-            if seen:
-                for device in seen:
-                    options.append(Option(backend, device, None, av))
-                continue
-        options.append(Option(backend, None, None, av))
+        options.append(Option(backend, None, None, availability[backend]))
     return options
 
 
@@ -333,12 +325,15 @@ def _engine_of(request: Request, deps: Deps, runtime: ContainerRuntime) -> tuple
 
 
 def _engine(ctx: _Ctx):
-    """The engine step 1 settled (it answered there, and the engines the
-    runtimes report are immutable for the life of the install): the later
-    steps read it through this rather than re-asking the runtime."""
-    engine = ctx.runtime.engine()
-    assert engine is not None  # step 1 checked it
-    return engine
+    """The engine step 1 settled, cached on the context: the engines the
+    runtimes report are immutable for the life of the install, and each
+    `engine()` call is a subprocess (`podman info`, plus more on macOS), so
+    the later steps read it through this rather than re-asking the runtime.
+    """
+    if ctx.engine is None:
+        ctx.engine = ctx.runtime.engine()
+    assert ctx.engine is not None  # step 1 checked it
+    return ctx.engine
 
 
 def _ask_runtime(deps: Deps, candidates: list[ContainerRuntime]) -> ContainerRuntime:
@@ -481,8 +476,7 @@ def _pull(ctx: _Ctx) -> None:
 def _options(ctx: _Ctx) -> list[Option]:
     """The menu before the proofs: every profile as an option, each with its
     availability on this runtime and no device yet (step 5 fills them)."""
-    return build_options(ctx.platform, ctx.deps.facts, _engine(ctx),
-                         ctx.runtime.name, {}, _availability(ctx))
+    return build_options(_availability(ctx))
 
 
 def _prove(options: list[Option], ctx: _Ctx) -> list[Option]:
