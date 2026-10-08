@@ -491,10 +491,15 @@ def section_lines(section: dict) -> list:
     if outdated:
         lines.append("  ..    newer catalogue pins for: " + ", ".join(outdated) +
                      " (qctx stack up --upgrade)")
-    # In EVERY case the verb must accuse a stopped stack and point at the fix
-    # (spec: `stack status` says it is down and points at `qctx stack up`).
-    # Not healthy covers both the `stopped` phase and the post-reboot case
-    # where the phase still says running but the endpoints answer nothing.
-    if section.get("healthy") is False:
+    # The fix the section points at. A `compose` phase is an install that did not
+    # finish: nothing verified the stack or wrote the config, so the install
+    # resumes it, whatever the endpoints answer (`stack up` refuses it). Any other
+    # stack that is not healthy (the `stopped` phase, or the post-reboot case
+    # where the phase still says running and the endpoints answer nothing) is
+    # started with `qctx stack up` (spec: `stack status` accuses a stopped stack
+    # and points at it).
+    if section.get("phase") == "compose":
+        lines.append("  ..    the last install did not finish; resume it with: qctx install")
+    elif section.get("healthy") is False:
         lines.append("  ..    the stack is down; start it with: qctx stack up")
     return lines

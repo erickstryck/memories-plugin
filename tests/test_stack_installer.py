@@ -830,10 +830,11 @@ class TestProvision(ProvisionTestCase):
                          [["logs", "--tail", "50", "qdrant"],
                           ["logs", "--tail", "50", "embed"],
                           ["logs", "--tail", "50", "rerank"]])
-        self.assertIn("qctx stack up", err.fix,
-                      "a failed start is retried with the lifecycle verb, not a "
-                      "re-install: the config is written only after the "
-                      "functional check passes")
+        self.assertIn("qctx install", err.fix,
+                      "a failed start leaves the state in `compose` and the config "
+                      "unwritten; only the install resumes, verifies and writes it "
+                      "(`qctx stack up` would mark it running and skip both)")
+        self.assertNotIn("stack up", err.fix)
         self.assertEqual(config.saves, [])
         self.assertEqual(state.load(self.stack).phase, "compose")
 

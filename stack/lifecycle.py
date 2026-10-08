@@ -120,6 +120,16 @@ def up(deps: LifeDeps, *, upgrade: bool = False,
     not reported as running.
     """
     st = _require_state(deps)
+    if st.phase == state.PHASE_COMPOSE:
+        # The last install did not finish: nothing verified the stack and nothing
+        # wrote the config. `up` does neither, so starting it and marking it running
+        # would hide that for good (the next install would see a healthy running
+        # stack and only report it). The install resumes and does both.
+        raise StackError("the last install did not finish (stack.json is still in the "
+                         "compose phase), and up neither verifies the stack nor writes "
+                         "the config", step="up",
+                         fix="re-run the install: qctx install (it resumes, verifies, "
+                             "then writes the config)")
     runtime, provider = runtime_for(st, deps.runtimes)
     if upgrade:
         resolved = catalog.resolve_images(images or {}, deps.env)

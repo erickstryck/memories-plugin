@@ -262,6 +262,21 @@ class TestStatus(_LifecycleCase):
 
 
 class TestUp(_LifecycleCase):
+    def test_up_refuses_a_stack_whose_install_did_not_finish(self):
+        # A failed install leaves stack.json in the `compose` phase with the
+        # config unwritten. `up` verifies nothing and writes no config, so
+        # bringing that stack up and marking it running would leave the plugin
+        # pointing elsewhere for good: the next `qctx install` sees a healthy
+        # running stack and only reports it. `up` refuses and names the install.
+        st = make_state(phase=state.PHASE_COMPOSE)
+        runtime = make_runtime()
+        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime])
+        with self.assertRaises(StackError) as ctx:
+            lifecycle.up(deps)
+        self.assertIn("qctx install", ctx.exception.fix)
+        self.assertEqual(state.load(self.stack).phase, state.PHASE_COMPOSE)
+        self.assertFalse(any(args and args[0] == "up" for args in compose_args_of(runtime)),
+                         "nothing is started for an unfinished install")
     def test_up_upgrade_reads_the_image_env_overrides(self):
         # spec: the QCTX_STACK_IMAGE_* overrides apply to `qctx install --stack`
         # AND to `qctx stack up --upgrade` (the --image flags, or the env vars;

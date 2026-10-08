@@ -233,7 +233,18 @@ class StackGroupSubprocess(unittest.TestCase):
         minimal = dict(base)
         minimal.update(healthy=False,
                        services={"qdrant": None, "embed": None, "rerank": None})
-        self.assertTrue(section_lines(minimal), "the minimal shape must not be empty")
+        minimal_lines = "\n".join(section_lines(minimal))
+        self.assertTrue(minimal_lines, "the minimal shape must not be empty")
+        self.assertNotIn("boot:", minimal_lines)
+        self.assertNotIn("config:", minimal_lines)
+        # an unfinished install (phase compose) is resumed by the install, never
+        # by `stack up`, which verifies nothing and writes no config
+        unfinished = dict(base)
+        unfinished.update(phase="compose", healthy=True, services={
+            "qdrant": 200, "embed": 200, "rerank": 200})
+        unfinished_lines = "\n".join(section_lines(unfinished))
+        self.assertIn("resume it with: qctx install", unfinished_lines)
+        self.assertNotIn("qctx stack up", unfinished_lines)
 
     def test_stack_help_lists_the_four_commands(self):
         done = self.run_cli("stack", "--help")

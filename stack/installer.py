@@ -718,7 +718,8 @@ def _write_compose_and_start(ctx: _Ctx, plan: compose.Plan) -> None:
         raise StackError(
             "the stack is not ready; the log tail of the services that did not "
             "come up is above", step="up",
-            fix="fix what the log names, then run qctx stack up again")
+            fix="fix what the log names, then re-run the install: qctx install (it "
+                "resumes, verifies, then writes the config)")
     for service in ready:
         deps.reporter.ok(f"{service} is ready")
 
