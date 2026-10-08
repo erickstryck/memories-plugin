@@ -747,7 +747,7 @@ usuário, como o wizard já faz com o PATH.
 
 | comando | faz |
 |---|---|
-| `qctx stack status [--json]` | lê o `stack.json`; `compose ps`; saúde dos três; pins contra o catálogo; se o config aponta para a stack; se a stack volta no boot. Sai 1 se a stack gerenciada não está saudável. Sem stack gerenciada, diz isso e sai 0 |
+| `qctx stack status [--json]` | lê o `stack.json`; saúde dos três por sonda nos endpoints (sem tocar num runtime: o status é barato e read-only, e a sonda dos endpoints é o sinal autoritativo de up/down); pins contra o catálogo; se o config aponta para a stack; se a stack volta no boot; e, se a stack está para baixo, aponta `qctx stack up`. Sai 1 se a stack gerenciada não está saudável. Sem stack gerenciada, diz isso e sai 0 |
 | `qctx stack up [--upgrade] [--image ROLE=REF]` | re-renderiza a partir do `stack.json` (ou do catálogo, com `--upgrade`), roda `compose up -d` e espera a prontidão |
 | `qctx stack down` | `compose down`, mantendo volume e modelos |
 | `qctx stack remove [--purge-models] [--purge-data]` | `compose down` e apaga `compose.yaml` e `stack.json`. `--purge-models` apaga os GGUFs. `--purge-data` apaga o volume do Qdrant, ou seja o acervo, e exige digitar o nome do projeto (ou `--yes`). Nunca mexe no config: diz o que ficou apontando para `127.0.0.1` |

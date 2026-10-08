@@ -799,7 +799,8 @@ Etapas, uma função privada cada, na ordem da spec ("O que ela faz, em ordem"):
    `MISSING` nele). A `note` do provider vai para o `reporter.info`.
 2. plataforma (Windows recusado com o caminho do README), disponibilidade de cada backend,
    portas (`choose_ports`, cada porta movida relatada), disco (bloqueia abaixo de
-   `MODELS_BYTES + 400 MiB` menos o que já está baixado), RAM (aviso abaixo de 6 GiB; o número
+   `MODELS_BYTES + 400 MiB` menos o que já está baixado), RAM (aviso abaixo de 8 GiB; os
+   dois servidores mediram ~7.3 GiB juntos na configuração da stack, ver o código; o número
    vem do engine, `EngineInfo.memory_bytes`: é ele que os containers usam, e no macOS o host tem
    mais memória do que a VM da máquina do Podman).
 3. `<stack>/models` criado; compose de cada perfil `READY` em `<stack>/probe/`; `compose config`
