@@ -152,6 +152,45 @@ class StackGroupSubprocess(unittest.TestCase):
         payload = json.loads(done.stdout)
         self.assertFalse(payload["managed"])
 
+    def test_section_lines_renders_the_stack_status_shape(self):
+        """`section_lines` is fed by TWO producers with different `services` shapes:
+        `check_section` (the install report) maps a service to its int status, but
+        `lifecycle.status` (the `qctx stack status` verb) maps it to
+        `{"url": …, "status": …}`. A section that is healthy must render every
+        200 service as up and a non-200 one as down in BOTH shapes -- the dict
+        shape used to fall through `status == 200` as a dict, so a running stack
+        printed 'ok endpoints: … down, … down, … down' (measured 2026-10-07, T15)."""
+        from stack.cli import section_lines
+        base = {"managed": True, "phase": "running", "runtime": "podman",
+                "profile": "intel", "ports": {"qdrant": 6333, "embed": 8003,
+                                              "rerank": 8004}}
+        # the lifecycle.status shape: a dict per service
+        lifecycle_shape = dict(base, healthy=True, services={
+            "qdrant": {"url": "http://127.0.0.1:6333", "status": 200},
+            "embed": {"url": "http://127.0.0.1:8003/v1", "status": 200},
+            "rerank": {"url": "http://127.0.0.1:8004/v1/rerank", "status": 200}})
+        lines = section_lines(lifecycle_shape)
+        endpoints = next(l for l in lines if "endpoints:" in l)
+        self.assertIn("qdrant up", endpoints)
+        self.assertIn("embed up", endpoints)
+        self.assertIn("rerank up", endpoints)
+        self.assertNotIn("down", endpoints)
+        # a non-200 (the model still loading) renders down, not up
+        partial = dict(base, healthy=False, services={
+            "qdrant": {"url": "http://127.0.0.1:6333", "status": 200},
+            "embed": {"url": "http://127.0.0.1:8003/v1", "status": 503},
+            "rerank": {"url": "http://127.0.0.1:8004/v1/rerank", "status": None}})
+        line = next(l for l in section_lines(partial) if "endpoints:" in l)
+        self.assertIn("qdrant up", line)
+        self.assertIn("embed down", line)
+        self.assertIn("rerank down", line)
+        # the check_section shape (int per service) still renders the same way
+        int_shape = dict(base, healthy=True,
+                         services={"qdrant": 200, "embed": 200, "rerank": 200})
+        endpoints = next(l for l in section_lines(int_shape) if "endpoints:" in l)
+        self.assertIn("qdrant up", endpoints)
+        self.assertNotIn("down", endpoints)
+
     def test_stack_help_lists_the_four_commands(self):
         done = self.run_cli("stack", "--help")
         for verb in ("status", "up", "down", "remove"):

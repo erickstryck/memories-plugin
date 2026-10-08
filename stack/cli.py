@@ -432,6 +432,17 @@ def check_section(env=os.environ) -> dict:
     }
 
 
+def _service_status(value):
+    """The live status of one service in a section's `services`, from either producer.
+
+    `check_section` (the install report) maps a service to its int status, but
+    `lifecycle.status` (the `stack status` verb) maps it to `{"url": …, "status":
+    …}`; both feed `section_lines`, so the up/down render reads the int out of
+    whichever shape arrived. A dict with no status (or a `None`) is not 200, so
+    it renders down."""
+    return value.get("status") if isinstance(value, dict) else value
+
+
 def section_lines(section: dict) -> list:
     """The report lines of a stack section dict, in the wizard's style. A dict, not a
     `Config`: the section is what `check_section` and `lifecycle.status` produce, and this
@@ -447,7 +458,7 @@ def section_lines(section: dict) -> list:
              f"({section.get('runtime')}, profile {section.get('profile')})"]
     if healthy is not None:
         lines.append(f"  {'ok   ' if healthy else 'FAIL '} endpoints: "
-                     + ", ".join(f"{name} {'up' if status == 200 else 'down'}"
+                     + ", ".join(f"{name} {'up' if _service_status(status) == 200 else 'down'}"
                                  for name, status in services.items()))
     ports = section.get("ports")
     if ports:
