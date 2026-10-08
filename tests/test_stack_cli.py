@@ -315,6 +315,31 @@ class TheInstallStep(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
 
+    def test_stack_up_refuses_an_image_without_upgrade(self):
+        """Without --upgrade `up` repeats exactly what stack.json holds, so an
+        `--image` there was accepted and silently dropped. It is refused, with the
+        command that does take it."""
+        import stack.cli as stack_cli
+        from stack import StackError
+        with mock.patch.object(stack_cli, "_life_deps",
+                               side_effect=AssertionError("must refuse before any runtime")), \
+                self.assertRaises(StackError) as ctx:
+            stack_cli._cmd_up(SimpleNamespace(image=["llama=example.org/llama:x"],
+                                              upgrade=False))
+        self.assertIn("--upgrade", ctx.exception.fix)
+
+    def test_the_stack_flag_offers_exactly_the_catalogue_profiles(self):
+        """`--stack` lists its choices by hand (the parser must not import the
+        heavy `stack.backends`); this holds the list to the registry, so a new
+        backend cannot be forgotten in the flag."""
+        import argparse
+        import stack.cli as stack_cli
+        from stack.backends import BACKENDS
+        parser = argparse.ArgumentParser()
+        stack_cli.add_install_flags(parser)
+        action = next(a for a in parser._actions if a.dest == "stack")
+        self.assertEqual(tuple(action.choices), ("auto", *BACKENDS))
+
     def test_the_lifecycle_verbs_get_the_real_environment(self):
         """`qctx stack up --upgrade` resolves the QCTX_STACK_IMAGE_* overrides from
         the `env` the CLI hands the lifecycle. The unit tests drive `lifecycle.up`
@@ -460,6 +485,35 @@ class TheInstallStep(unittest.TestCase):
         self.assertEqual(len(provision_calls), 0)
         self.assertNotIn("restart the stack now", said)
         self.assertIn("managed stack: running", said, "the status is printed")
+
+    def test_a_rebooted_stack_with_the_restart_declined_says_it_once(self):
+        """Interactive, restart declined: the install report above already printed
+        the stack block (with its `qctx stack up` pointer); the step adds its one
+        line and the question, and does not print the block a second time."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.lifecycle as lifecycle
+
+        stack_dir = make_stack_dir(self.root, phase="running")
+        unhealthy = {"managed": True, "phase": "running", "runtime": "docker",
+                     "profile": "cpu", "ports": {"qdrant": 6333, "embed": 8003,
+                                                 "rerank": 8004},
+                     "services": {"qdrant": None, "embed": None, "rerank": None},
+                     "healthy": False, "outdated_pins": []}
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(lifecycle, "status", return_value=(unhealthy, 1)), \
+                mock.patch.object(lifecycle, "up") as up:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                stack_cli.install_step(
+                    self.args(stack=None, yes=False),
+                    {"blockers": [], "ready": True, "checks": []},
+                    budgets=[], ask=lambda prompt: "n", interactive=True)
+        said = buf.getvalue()
+        up.assert_not_called()
+        self.assertNotIn("managed stack:", said, "the block is the report's, not repeated")
+        self.assertEqual(said.count("qctx stack up"), 1, said)
 
     def test_a_rebooted_stack_running_with_dead_endpoints_offers_to_restart(self):
         """The common post-reboot case: `down` is the only verb that writes

@@ -36,7 +36,7 @@ from typing import Callable, Mapping
 from core.config import Config
 
 from . import StackError, catalog, compose, health, state, verify
-from .engine import ContainerRuntime, Provider, first_line
+from .engine import ContainerRuntime, Provider, first_line, log_tail
 from .installer import ConfigSink, Prompter, Reporter
 from .process import Runner
 
@@ -143,25 +143,17 @@ def up(deps: LifeDeps, *, upgrade: bool = False,
     if upgrade:
         _compose(deps, runtime, provider, st.project, file, "pull", timeout=1800.0, stream=True)
     _compose(deps, runtime, provider, st.project, file, "up", "-d", timeout=600.0)
-    # A readiness wrapper records which service first answered 200, so a failure
-    # can show the log tail of exactly the ones that did NOT come up (the
-    # installer's own failure path shows the same evidence).
-    targets = health.endpoints(st.ports)
+    # `wait_ready` records each service as it comes up, so a failure shows the
+    # log tail of exactly the ones that did NOT (the installer's failed start
+    # shows the same evidence, through the same two helpers).
     ready: dict[str, float] = {}
-    by_url = {url: name for name, url in targets.items()}
-
-    def status(url: str) -> int | None:
-        answer = deps.status(url)
-        if answer == 200:
-            ready.setdefault(by_url[url], deps.clock())
-        return answer
-
     try:
-        health.wait_ready(targets, status=status, clock=deps.clock, sleep=deps.sleep)
+        health.wait_ready(health.endpoints(st.ports), status=deps.status,
+                          clock=deps.clock, sleep=deps.sleep, ready=ready)
     except StackError:
         for service in catalog.SERVICES:
             if service not in ready:
-                tail = _log_tail(deps, runtime, provider, st.project, file, service)
+                tail = log_tail(runtime, st.project, file, service, provider=provider)
                 deps.reporter.info(f"{service}:\n{tail}")
         raise StackError(
             "the stack is not ready; the log tail of the services that did not "
@@ -327,22 +319,6 @@ def _compose(deps: LifeDeps, runtime: ContainerRuntime, provider: Provider,
         detail = out.stderr.strip() or out.stdout.strip() or "(no output)"
         raise StackError(f"compose {' '.join(args)} failed: {detail}", step="lifecycle",
                          fix="check the runtime's logs for that service")
-
-
-def _log_tail(deps: LifeDeps, runtime: ContainerRuntime, provider: Provider,
-              project: str, file: Path, service: str) -> str:
-    """The last 50 lines of one service: the evidence a failed `up` shows (the same
-    evidence the installer's failed start shows). A container that never started has
-    no log, and a `logs` that fails -- a non-zero exit (the provider's own output is
-    the tail) or a RAISE (the provider hangs and the bound trips) -- degrades to
-    "(no log)": the log tail is evidence, not a dependency, and it must never mask
-    the readiness error, which is the one the operator needs."""
-    try:
-        out = runtime.compose(provider, project, file, "logs", "--tail", "50", service,
-                              timeout=60.0)
-    except StackError:
-        return "(no log)"
-    return out.stdout.strip() or out.stderr.strip() or "(no log)"
 
 
 def _delete_files(deps: LifeDeps, purge_models: bool) -> list[str]:

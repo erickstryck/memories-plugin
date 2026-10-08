@@ -138,6 +138,31 @@ def compose_argv(provider: Provider, project: str, file: Path, args: tuple[str, 
     return [*provider.argv, "-p", project, "-f", str(file), *args]
 
 
+def log_tail(runtime: "ContainerRuntime", project: str, file: Path, service: str,
+             provider: Provider | None = None) -> str:
+    """The last 50 lines of one service's log: the evidence a failed start shows,
+    in the installer and in `qctx stack up` alike (one copy, so the two cannot
+    drift). The tail is evidence, not a dependency, and it must never mask the
+    readiness error the caller is about to raise:
+    - a `logs` that exits non-zero still has output, and that output is the tail
+      (the provider's own complaint); with no output at all it reads "(no log)";
+    - a call that RAISES -- the provider lookup (`podman compose version`) or the
+      `logs` itself hanging past its bound, which the runner turns into a
+      StackError -- reads "(no log)" too.
+    `provider` is the one the caller already resolved; without it, it is looked
+    up here, inside the same guard."""
+    try:
+        if provider is None:
+            provider = runtime.compose_provider().provider
+        if provider is None:
+            return "(no log)"
+        out = runtime.compose(provider, project, file, "logs", "--tail", "50", service,
+                              timeout=60.0)
+    except StackError:
+        return "(no log)"
+    return out.stdout.strip() or out.stderr.strip() or "(no log)"
+
+
 def compose_version(stdout: str) -> str:
     """The token after `version` on the line that names compose: "Docker Compose version
     v5.2.0", or the second line of podman-compose's "podman version 5.7.0\\npodman-compose

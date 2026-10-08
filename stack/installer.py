@@ -32,7 +32,7 @@ from core.errors import CoreError
 from . import StackError, catalog, compose, fetch, facts, health, state, verify
 from .backends import (BACKENDS, MISSING, Availability, Option, READY,
                        default_option, runtime_label)
-from .engine import ContainerRuntime
+from .engine import ContainerRuntime, log_tail
 from .facts import HostFacts
 from .fetch import Transport
 
@@ -677,21 +677,9 @@ def _download(ctx: _Ctx) -> None:
 
 
 def _log_tail(ctx: _Ctx, file: Path, service: str) -> str:
-    """The last 50 lines of one service: the evidence a failed `up` shows.
-    A container that never started has no log, and a `logs` that fails -- a
-    non-zero exit (the provider's own output is the tail) or a RAISE (the
-    provider hangs and the bound trips) -- degrades to "(no log)": the log
-    tail is evidence, not a dependency, and it must never mask the readiness
-    error, which is the one the operator needs."""
-    provider = ctx.runtime.compose_provider().provider
-    if provider is None:  # pragma: no cover - step 1 guarantees a provider
-        return "(no log)"
-    try:
-        out = ctx.runtime.compose(provider, ctx.request.project, file,
-                                  "logs", "--tail", "50", service, timeout=60.0)
-    except StackError:
-        return "(no log)"
-    return out.stdout.strip() or out.stderr.strip() or "(no log)"
+    """The log tail of one service of this install (`engine.log_tail`, the one
+    copy `qctx stack up` uses too)."""
+    return log_tail(ctx.runtime, ctx.request.project, file, service)
 
 
 def _write_compose_and_start(ctx: _Ctx, plan: compose.Plan) -> None:
@@ -700,26 +688,18 @@ def _write_compose_and_start(ctx: _Ctx, plan: compose.Plan) -> None:
     of the spec). A failure — the `up` itself, or the wait — shows the log
     tail of every service that is NOT ready and stops with the state still in
     the `compose` phase: nothing is verified, and nothing reaches the config.
-    Services that ARE ready keep their readiness (the status wrapper records
-    it), so their logs are not the evidence."""
+    Services that ARE ready are recorded by `wait_ready` as they come up, so
+    their logs are not the evidence."""
     deps = ctx.deps
     deps.reporter.step("writing compose.yaml and starting the stack")
     compose_file = deps.stack_dir / "compose.yaml"
     compose_file.write_text(compose.dump(plan))
     state.save(deps.stack_dir, _state(ctx, plan, state.PHASE_COMPOSE))
-    targets = health.endpoints(plan.ports)
     ready: dict[str, float] = {}
-    by_url = {url: name for name, url in targets.items()}
-
-    def status(url: str) -> int | None:
-        answer = deps.status(url)
-        if answer == 200:
-            ready.setdefault(by_url[url], deps.clock())
-        return answer
-
     try:
         _run_compose(ctx, compose_file, "up", "-d", timeout=600.0, step="up")
-        health.wait_ready(targets, status=status, clock=deps.clock, sleep=deps.sleep)
+        health.wait_ready(health.endpoints(plan.ports), status=deps.status,
+                          clock=deps.clock, sleep=deps.sleep, ready=ready)
     except StackError:
         for service in catalog.SERVICES:
             if service not in ready:

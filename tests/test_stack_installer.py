@@ -899,6 +899,20 @@ class TestProvision(ProvisionTestCase):
                          "the readiness error must survive a failing logs fetch")
         self.assertNotIn("timed out", str(err))
 
+    def test_the_log_tail_survives_a_hanging_provider_lookup(self):
+        # The tail asks the runtime for its provider first; on podman that runs
+        # `podman compose version`, which can hang and raise like `logs` itself.
+        # That raise must degrade the tail to "(no log)" too, not escape.
+        from types import SimpleNamespace
+
+        class HungLookup:
+            def compose_provider(self):
+                raise StackError("timed out after 30.0s: podman compose version",
+                                 step="runtime")
+        ctx = SimpleNamespace(runtime=HungLookup(), request=SimpleNamespace(project="p"))
+        self.assertEqual(installer._log_tail(ctx, Path("/x/compose.yaml"), "embed"),
+                         "(no log)")
+
     def test_replacing_a_non_empty_value_asks_first(self):
         # The file already points elsewhere (a non-empty qdrant_url): the diff
         # is shown, and the replacement ASKS before it saves.

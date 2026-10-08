@@ -187,6 +187,13 @@ def _cmd_status(args) -> int:
 def _cmd_up(args) -> None:
     import stack.lifecycle as lifecycle
     images = catalog.parse_image_flags(list(args.image or []))
+    if images and not args.upgrade:
+        # Without --upgrade `up` repeats exactly what stack.json holds, so an
+        # override here would be dropped in silence: refuse it, naming the form
+        # that takes it.
+        raise StackError("--image needs --upgrade: without it, up repeats exactly the "
+                         "images stack.json holds", step="up",
+                         fix="qctx stack up --upgrade --image ROLE=REF")
     lifecycle.up(_life_deps(args, None), upgrade=args.upgrade, images=images or None)
 
 
@@ -333,7 +340,8 @@ def _step_managed(st, stack_dir, args, report, budgets, ask, installer, facts) -
                   "running); restart it with: qctx stack up")
             if args.yes or _confirm(ask, "restart the stack now? [y/N] "):
                 _restart(args, stack_dir, ask)
-                return
+            # declined: the report above already printed the stack's block
+            return
         for line in section_lines(section):
             print(line)
     else:

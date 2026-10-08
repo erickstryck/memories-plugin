@@ -77,14 +77,17 @@ def wait_ready(targets: Mapping[str, str], *,
                clock: Callable[[], float] = time.monotonic,
                sleep: Callable[[float], None] = time.sleep,
                timeout: float = READY_TIMEOUT_S,
-               interval: float = 1.0) -> dict[str, float]:
+               interval: float = 1.0,
+               ready: dict[str, float] | None = None) -> dict[str, float]:
     """Poll every target until it answers 200, or raise naming the one that did not.
 
     The answer is, per target, the clock time it first answered 200 — the
     installer reports it, and a slow load is a fact, not a guess. The loop
     polls in lockstep: one status call per target per round, so a fast
     service does not starve a slow one, and a round that found everything
-    ready stops before the next sleep.
+    ready stops before the next sleep. When the caller passes `ready`, that
+    dict is filled AS the services come up, so after a raise it still says
+    which ones did: the caller shows the log tail of the others only.
 
     When the deadline passes, the error names the service and its LAST
     answer: a 503 says the model is still loading, a None says nothing is
@@ -93,7 +96,7 @@ def wait_ready(targets: Mapping[str, str], *,
     """
     names = list(targets)
     pending = dict(targets)
-    ready_at: dict[str, float] = {}
+    ready_at: dict[str, float] = {} if ready is None else ready
     last_answer: dict[str, int | None] = {}
     started = clock()
     while pending:

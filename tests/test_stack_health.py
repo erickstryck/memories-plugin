@@ -58,6 +58,22 @@ class ScriptedStatus:
 
 
 class TestWaitReady(unittest.TestCase):
+    def test_ready_dict_says_who_came_up_even_when_the_wait_raises(self):
+        # qdrant answers 200 at once, embed never does: the wait raises naming
+        # embed, and the caller's `ready` dict still says qdrant came up (at
+        # clock 0), so the caller shows the log tail of embed only.
+        clock = FakeClock()
+        urls = {"qdrant": "http://127.0.0.1:6333/readyz",
+                "embed": "http://127.0.0.1:8003/health"}
+
+        def status(url, *, timeout=5.0):
+            return 200 if url.endswith("/readyz") else 503
+        ready = {}
+        with self.assertRaises(StackError):
+            health.wait_ready(urls, status=status, clock=clock, sleep=clock.sleep,
+                              timeout=3.0, interval=1.0, ready=ready)
+        self.assertEqual(ready, {"qdrant": 0.0})
+
     def test_503_then_200_is_ready(self):
         url = "http://127.0.0.1:8003/health"
         clock = FakeClock()
