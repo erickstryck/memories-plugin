@@ -232,8 +232,8 @@ asking.
 
 **The download has a progress bar.** The long part is the two models
 (836 MiB). It shows percent, MiB done of total, speed and ETA, rewriting one
-line on a terminal; off a terminal (a log, `--yes`) it writes one line per
-tenth of the download instead. A broken download resumes from where it left
+line on a terminal; when stdout is not a terminal (piped to a file or a log) it writes
+one line per tenth of the download instead. A broken download resumes from where it left
 off, and the speed and ETA then count the current run only.
 
 **What it costs, measured.** The download is the llama.cpp server image, 294 MiB

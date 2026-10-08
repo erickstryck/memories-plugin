@@ -1,10 +1,11 @@
 """The package's version. One owner, because the last hand-maintained one went stale.
 
 WHY THIS FILE EXISTS RATHER THAN A STRING IN EACH MANIFEST. This package declares itself in
-three manifests -- `plugin.yaml` (hermes, git install), `hosts/hermes/plugin.yaml` (hermes,
-symlink install) and `.claude-plugin/plugin.json` (claude-code) -- and none of them can read
-Python. So the number is physically written four times, and the ONLY thing that keeps the
-four honest is a test that compares them against this constant, which is the declared owner.
+four manifests -- `plugin.yaml` (hermes, git install), `hosts/hermes/plugin.yaml` (hermes,
+symlink install), `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`
+(claude-code) -- and none of them can read Python. So the number is physically written
+five times, and the ONLY thing that keeps the five honest is a test that compares them
+against this constant, which is the declared owner.
 
 WHY NOT GO ON WITHOUT A VERSION. The repo previously declared none on purpose, and the
 reasoning was sound as far as it went: a hand-maintained number goes stale, and this one

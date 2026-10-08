@@ -124,7 +124,8 @@ the fields that still point at the stack it just deleted, and with no readable s
 a `down` on every runtime that answers so a corrupt install still cleans up.
 
 `qctx stack status` answers in its **exit code** as well as in words: `0` when the managed
-stack is healthy, `1` when an endpoint does not answer or the last install did not finish
+stack is healthy, `1` when an endpoint does not answer, the last install did not finish, or
+the `stack.json` is corrupt (it then names the one fix that deletes it)
 (`qctx stack status || echo "not healthy"` in a script).
 
 The install flags that stand the stack up in the first place are on `qctx install`:
