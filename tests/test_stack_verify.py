@@ -201,16 +201,22 @@ class TestCalibrate(unittest.TestCase):
             [verify.Budget("hermes", 2.0, 2.0)],
             embedder=embedder, reranker=reranker,
             clock=clock, memory=lambda: {"embed": 1, "rerank": 1})
-        # The embedder's FIRST recorded call is the warm-up, a single short
-        # text, and it comes before the measured call of HARD_MAX_CHARS.
+        # The embedder's FIRST recorded call is the warm-up, and it has the SAME
+        # shape as the measured call (one HARD_MAX_CHARS text): on the GPU the
+        # first call of a new shape pays the backend's setup, so a small warm-up
+        # left that cost inside the measurement. Measured 2026-10-08 on this
+        # host's Intel Vulkan2, freshly loaded server each time, twice: the
+        # one-short-text/one-document warm-up gave embed 1.77/1.76 s, rerank
+        # 5.33/5.30 s; a same-shape warm-up gave 0.38/0.39 s and 1.98/1.98 s.
         self.assertEqual(embedder.calls[0][0], "embed")
         self.assertEqual(len(embedder.calls[0][1]), 1)
-        self.assertLess(len(embedder.calls[0][1][0]), core_chunk.HARD_MAX_CHARS)
+        self.assertEqual(len(embedder.calls[0][1][0]), core_chunk.HARD_MAX_CHARS)
         self.assertEqual(embedder.calls[1][0], "embed")
         self.assertEqual(len(embedder.calls[1][1][0]), core_chunk.HARD_MAX_CHARS)
-        # The reranker warms up with one document, then measures over the
-        # CALIBRATION_RERANK_DOCS documents of TARGET_CHARS.
-        self.assertEqual(len(reranker.calls[0][1]), 1)
+        # The reranker warms up with the measured pool too: CALIBRATION_RERANK_DOCS
+        # documents of TARGET_CHARS, then the same pool is timed.
+        self.assertEqual(len(reranker.calls[0][1]), verify.CALIBRATION_RERANK_DOCS)
+        self.assertEqual(len(reranker.calls[0][1][0]), core_chunk.TARGET_CHARS)
         self.assertEqual(len(reranker.calls[1][1]), verify.CALIBRATION_RERANK_DOCS)
         self.assertEqual(len(reranker.calls[1][1][0]), core_chunk.TARGET_CHARS)
         # One check per host, named after the host, never raised.

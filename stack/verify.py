@@ -21,7 +21,9 @@ unset them or let the installer rewrite the file.
 The calibration measures the WARM regime: the first call to a freshly loaded
 llama-server costs 3 to 7 times the next one (M7), and recall lives in the
 warm regime, so a warm-up call goes to each server before anything is
-timed. The samples are the plugin's own working set — one embed of
+timed, with the same inputs that are then timed (a smaller warm-up leaves the
+first call of the measured shape, and its GPU setup cost, inside the number).
+The samples are the plugin's own working set — one embed of
 `HARD_MAX_CHARS`, the ceiling a chunk can reach, and one rerank of
 `CALIBRATION_RERANK_DOCS` documents of `TARGET_CHARS`, the `TOP_K` the recall
 hook ranks. An over-budget measurement is a WARNING named after the host,
@@ -166,8 +168,8 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
     """Time the warm embed and rerank once, and compare each host's budget.
 
     One measurement per kind, shared by every host (the servers are the same
-    for all of them): a warm-up embed and a warm-up rerank first (M7), then
-    the timed embed of one `HARD_MAX_CHARS` text and the timed rerank of
+    for all of them): a warm-up embed and a warm-up rerank first (M7), on the
+    same inputs that are then timed: one `HARD_MAX_CHARS` text and a rerank of
     `CALIBRATION_RERANK_DOCS` `TARGET_CHARS` documents. `memory`, when given,
     is the runtime's `stats` for the stack's containers, read once per host so
     the check carries the containers' footprint beside the timing.
@@ -183,16 +185,20 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
     if reranker is None:
         reranker = build_reranker(cfg)
     query = "what is the capital of France?"
-    warm_text = "warm-up"
     embed_text = "x" * (core_chunk.HARD_MAX_CHARS - 1) + " "
-    rerank_docs = ["y" * core_chunk.TARGET_CHARS]
+    rerank_pool = ["y" * core_chunk.TARGET_CHARS] * CALIBRATION_RERANK_DOCS
 
     # M7: the first call to a freshly loaded server costs 3 to 7 times the
     # next one, and recall lives in the warm regime, so warm up both before
-    # any clock starts.
-    embedder.embed([warm_text])
+    # any clock starts -- with the SAME inputs that are then timed. On the GPU
+    # the first call of a new shape pays the backend's setup again, so a small
+    # warm-up left that cost inside the measurement (measured 2026-10-08, Intel
+    # Vulkan2, fresh server: rerank 5.3 s after a one-document warm-up, 1.98 s
+    # after a same-shape one), and every GPU install warned of a budget miss
+    # that recall never sees.
+    embedder.embed([embed_text])
     if reranker is not None:
-        reranker.rank(query, rerank_docs)
+        reranker.rank(query, rerank_pool)
 
     embed_start = clock()
     embedder.embed([embed_text])
@@ -200,7 +206,7 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
 
     rerank_start = clock()
     if reranker is not None:
-        reranker.rank(query, rerank_docs * CALIBRATION_RERANK_DOCS)
+        reranker.rank(query, rerank_pool)
     rerank_s = clock() - rerank_start
 
     checks: list[Check] = []
