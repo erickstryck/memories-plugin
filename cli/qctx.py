@@ -1077,7 +1077,11 @@ def cmd_install(args, cfg):
     _stack_install_step(args, report)
 
     # 3. config — the two passes, then the one field that is answered by the endpoint.
-    _ask_config(cfg, _interactive(args), report["memory_suggestions"])
+    # A FRESH read, not the `cfg` main() loaded before the step: the step may
+    # have just written the stack's URLs to the file, and the pass must show
+    # them as the current value (the whole reason the step sits here, before
+    # the configuration).
+    _ask_config(core.load(), _interactive(args), report["memory_suggestions"])
     _detect_vector_size()
 
     # 4. hosts — but only if the archive itself answers. Installing into a host on top

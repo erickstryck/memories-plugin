@@ -105,6 +105,61 @@ class CheckMode(unittest.TestCase):
             self.assertEqual(qctx.cmd_setup(args, None), 1,
                              "cutover.sh prints ok on a machine with nothing configured")
 
+    def test_stack_urls_show_as_the_current_value_in_the_config_pass(self):
+        """The stack step runs between the launcher and the configuration,
+        precisely so the config pass shows the stack's URLs as the current
+        value (spec: the position exists for that). `main()` loads the config
+        before the step; the pass must not read that stale object, because the
+        step wrote the file underneath it -- a user who retypes the shown
+        value would point the plugin back at the old host."""
+        import cli.qctx as qctx
+
+        old = {"qdrant_url": "http://old-host:6333",
+               "api_base_url": "http://old-host:8003/v1",
+               "rerank_url": "http://old-host:8004/v1/rerank",
+               "memory_collection": "mem"}
+        self.config.write_text(json.dumps(old))
+        stack_urls = {"qdrant_url": "http://127.0.0.1:6333",
+                      "api_base_url": "http://127.0.0.1:8003/v1",
+                      "embed_url": "",
+                      "rerank_url": "http://127.0.0.1:8004/v1/rerank"}
+
+        def stack_step(args, report):
+            # what the real step does to the file through its config sink:
+            data = json.loads(self.config.read_text())
+            data.update(stack_urls)
+            self.config.write_text(json.dumps(data))
+
+        args = SimpleNamespace(check=False, json=False, yes=False, config_only=False,
+                               host=None, stack=None, runtime=None, image=[])
+        ready = {"ready": False, "blockers": [], "checks": [], "memory_suggestions": []}
+        answers = "\n" * 17  # the five required and the twelve optional, Enter keeps
+        # in-process, `DEFAULT_CONFIG_PATH` was fixed at import (the real file);
+        # point it at the temp config so `core.load()`/`save` see it.
+        with mock.patch.object(qctx.core.setup, "diagnose", return_value=ready), \
+             mock.patch.object(qctx, "_plumbing", return_value=[]), \
+             mock.patch.object(qctx, "_host_sections", return_value=[]), \
+             mock.patch.object(qctx, "merged_report", return_value=ready), \
+             mock.patch.object(qctx, "_stack_section", return_value={"managed": False}), \
+             mock.patch.object(qctx, "_stack_install_step", side_effect=stack_step), \
+             mock.patch.object(qctx, "_detect_vector_size"), \
+             mock.patch.object(qctx, "install_launcher",
+                               return_value=Path(self.home) / ".local" / "bin" / "qctx"), \
+             mock.patch.object(qctx.core.install, "path_check",
+                               return_value=SimpleNamespace(ok=True)), \
+             mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": str(self.home),
+                                          "QCTX_INSTALL_FORCE_TTY": "1"}, clear=True), \
+             mock.patch.object(qctx.core.config, "DEFAULT_CONFIG_PATH", self.config), \
+             mock.patch.object(sys, "stdin", io.StringIO(answers)), \
+             contextlib.redirect_stdout(io.StringIO()) as shown:
+            # the cfg main() carries: loaded before the step wrote the file.
+            pre = qctx.core.load()
+            qctx.cmd_install(args, pre)
+        shown = shown.getvalue()
+        self.assertIn("qdrant_url [http://127.0.0.1:6333]:", shown)
+        self.assertIn("api_base_url [http://127.0.0.1:8003/v1]:", shown)
+        self.assertIn("rerank_url [http://127.0.0.1:8004/v1/rerank]:", shown)
+
     def test_check_answers_NOT_READY_in_the_exit_code(self):
         """The mode a script branches on has to answer in the channel a script reads.
         `scripts/cutover.sh` tests exactly this code, and a 0 with blockers made it print
