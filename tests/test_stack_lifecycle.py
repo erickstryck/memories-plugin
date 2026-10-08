@@ -360,6 +360,33 @@ class TestDown(_LifecycleCase):
         self.assertIn("qctx stack up", ctx.exception.fix,
                       "the fix must name the command that retries the start")
 
+    def test_up_failure_does_not_let_a_hanging_logs_mask_the_readiness_error(self):
+        # The log tail is evidence, not a dependency: a `compose logs` that
+        # itself RAISES -- the provider hangs and the 60s bound trips, and
+        # SubprocessRunner raises StackError(step="runtime") -- must not mask
+        # the readiness error, which is the one the operator needs. The tail
+        # degrades to "(no log)" and `up` still raises step="up". (A non-zero
+        # `logs` exit does not raise; the provider's own output shows as the
+        # tail -- the other test covers that path.)
+        st = make_state()
+        runtime = make_runtime()
+        def raise_logs(provider, project, file, *args, timeout, stream=False):
+            if args and args[0] == "logs":
+                raise StackError("timed out after 60.0s: compose logs",
+                                 step="runtime")
+            return Completed(0)
+        runtime.compose = raise_logs
+        ticks = iter([0.0, 601.0])
+        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime],
+                         status_fn=lambda url: 503,
+                         clock=lambda: next(ticks, 601.0))
+        with self.assertRaises(StackError) as ctx:
+            lifecycle.up(deps)
+        self.assertEqual(ctx.exception.step, "up",
+                         "the readiness error must survive a failing logs fetch")
+        self.assertNotIn("timed out", str(ctx.exception))
+        self.assertIn("log tail", ctx.exception.args[0] if ctx.exception.args else "")
+
     def test_down_keeps_volume_and_models_and_marks_stopped(self):
         st = make_state()
         models = self.stack / state.MODELS_DIR

@@ -751,6 +751,34 @@ class TestProvision(ProvisionTestCase):
         self.assertTrue(err.fix, "no runtime must still name the install")
         self.assertIn("install", err.fix.lower())
 
+    def test_a_hanging_logs_does_not_mask_a_failed_install_start(self):
+        # The installer's failed start shows the log tail of the services that
+        # did not come up. A `compose logs` that itself RAISES -- the provider
+        # hangs and the 60s bound trips, SubprocessRunner raising
+        # StackError(step="runtime") -- must not mask the readiness error: the
+        # tail degrades to "(no log)" and the error keeps step="up". (The
+        # existing test covers the non-zero-exit path, where the provider's
+        # output IS the tail.)
+        facts = facts_for()
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+
+        def compose_raises_logs(provider, project, file, *args, timeout, stream=False):
+            if args and args[0] == "logs":
+                raise StackError("timed out after 60.0s: compose logs", step="runtime")
+            return Completed(0)
+        podman.compose = compose_raises_logs
+        config = FakeConfigSink()
+        ticks = iter([0.0, 601.0])
+        err = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                       runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                       reporter=RecordingReporter(), config=config,
+                       status=lambda url: None,
+                       clock=lambda: next(ticks, 601.0))
+        self.assertIsInstance(err, StackError)
+        self.assertEqual(err.step, "up",
+                         "the readiness error must survive a failing logs fetch")
+        self.assertNotIn("timed out", str(err))
+
     def test_replacing_a_non_empty_value_asks_first(self):
         # The file already points elsewhere (a non-empty qdrant_url): the diff
         # is shown, and the replacement ASKS before it saves.

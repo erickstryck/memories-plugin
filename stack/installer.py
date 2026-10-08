@@ -669,13 +669,19 @@ def _download(ctx: _Ctx) -> None:
 
 def _log_tail(ctx: _Ctx, file: Path, service: str) -> str:
     """The last 50 lines of one service: the evidence a failed `up` shows.
-    The call is made quiet (a container that never started has no log), so
-    its failure is returned, not raised."""
+    A container that never started has no log, and a `logs` that fails -- a
+    non-zero exit (the provider's own output is the tail) or a RAISE (the
+    provider hangs and the bound trips) -- degrades to "(no log)": the log
+    tail is evidence, not a dependency, and it must never mask the readiness
+    error, which is the one the operator needs."""
     provider = ctx.runtime.compose_provider().provider
     if provider is None:  # pragma: no cover - step 1 guarantees a provider
         return "(no log)"
-    out = ctx.runtime.compose(provider, ctx.request.project, file,
-                              "logs", "--tail", "50", service, timeout=60.0)
+    try:
+        out = ctx.runtime.compose(provider, ctx.request.project, file,
+                                  "logs", "--tail", "50", service, timeout=60.0)
+    except StackError:
+        return "(no log)"
     return out.stdout.strip() or out.stderr.strip() or "(no log)"
 
 

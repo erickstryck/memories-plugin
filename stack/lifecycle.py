@@ -321,10 +321,15 @@ def _log_tail(deps: LifeDeps, runtime: ContainerRuntime, provider: Provider,
               project: str, file: Path, service: str) -> str:
     """The last 50 lines of one service: the evidence a failed `up` shows (the same
     evidence the installer's failed start shows). A container that never started has
-    no log, and a `logs` that itself fails must not mask the readiness error, so the
-    failure is read as "(no log)", not raised."""
-    out = runtime.compose(provider, project, file, "logs", "--tail", "50", service,
-                          timeout=60.0)
+    no log, and a `logs` that fails -- a non-zero exit (the provider's own output is
+    the tail) or a RAISE (the provider hangs and the bound trips) -- degrades to
+    "(no log)": the log tail is evidence, not a dependency, and it must never mask
+    the readiness error, which is the one the operator needs."""
+    try:
+        out = runtime.compose(provider, project, file, "logs", "--tail", "50", service,
+                              timeout=60.0)
+    except StackError:
+        return "(no log)"
     return out.stdout.strip() or out.stderr.strip() or "(no log)"
 
 
