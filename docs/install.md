@@ -229,11 +229,14 @@ podman` decides when both runtimes answer.
 **What it costs, measured.** The download is the llama.cpp server image, 294 MiB
 for the amd64 build and 290 MiB for the arm64 build, the Qdrant image, about
 71 MiB, and the two models, 836 MiB together (bge-m3 at 437,778,496 bytes and
-bge-reranker-v2-m3 at 438,376,864 bytes, both Q4_K_M). The two llama-servers
-measure about 1.8 GB of resident memory for the embed server and about 2.8 GB
-for the rerank server on the cpu, and about 200 MB per container on a GPU. The
-disk gate keeps 400 MiB of headroom beyond the models, because the Qdrant
-volume grows in it.
+bge-reranker-v2-m3 at 438,376,864 bytes, both Q4_K_M). The resident memory the
+two llama-servers hold depends on the batch flags they run with
+(`-c -b -ub 8192`) and the thread count, so the calibration reports the figure
+for your machine at install time; on this machine, measured with the stack's
+own configuration, the cpu embed server holds about 2.3 GB and the cpu rerank
+server about 5 GB, and on a GPU the embed server drops to about 190 MB while
+the rerank server still holds about 4.7 GB. The disk gate keeps 400 MiB of
+headroom beyond the models, because the Qdrant volume grows in it.
 
 **The ports.** Everything publishes on 127.0.0.1 only, so nothing leaves the
 machine: Qdrant on 6333, the embed server on 8003, the rerank server on 8004.
