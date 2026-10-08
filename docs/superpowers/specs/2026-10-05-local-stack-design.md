@@ -655,8 +655,16 @@ usuário, como o wizard já faz com o PATH.
   "failed to connect to the docker API" (medido em 2026-10-06). Com o socket parado e o
   `podman-compose` instalado, a etapa usa o `podman-compose`, que não precisa de socket, e diz
   isso numa linha. Sem nenhum dos dois, a correção no Linux é habilitar o `podman.socket` do
-  usuário. O provider usado fica gravado no `stack.json`, e o ciclo de vida usa sempre o
-  gravado: os dois providers rotulam os containers de forma diferente.
+  usuário. O provider usado fica gravado no `stack.json`, mas como informação
+  (status e texto de erro): o ciclo de vida o **re-deriva do runtime gravado**,
+  não o lê do arquivo. Isso é seguro porque a razão para gravá-lo já foi
+  neutralizada: os dois providers rotulam os containers de forma diferente só
+  no nome DEFAULT, e cada serviço leva um `container_name` explícito (M6),
+  então um `down`/`up`/`remove` que segue um restart endereça os mesmos
+  containers e o mesmo volume quem quer que os tenha criado. Re-derivar também
+  permanece certo quando o estado do socket muda: com o socket da API parado, o
+  `podman compose` (o wrapper do docker-compose) precisa ceder ao
+  `podman-compose` standalone, e o nome gravado apontaria para o errado.
 - **Hardware, no Linux nativo**: o barramento PCI `/sys/bus/pci/devices/*` (classe `0x03`, os
   vendors 0x1002 AMD, 0x8086 Intel e 0x10de NVIDIA; o ASPEED de BMC, 0x1a03, e as funções de
   áudio, classe `0x04`, são ignorados), `/dev/dri/renderD*` e `nvidia-smi -L`. Lê o PCI, não o

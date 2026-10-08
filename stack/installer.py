@@ -713,8 +713,9 @@ def _write_compose_and_start(ctx: _Ctx, plan: compose.Plan) -> None:
 
 
 def _state(ctx: _Ctx, plan: compose.Plan, phase: str) -> "state.StackState":
-    """The state the step writes: the provider used is recorded (the
-    lifecycle always uses the recorded one), `listen` the BARE host the
+    """The state the step writes: the provider used is recorded for the status
+    section and the error text (informational: the lifecycle re-resolves it
+    from the recorded runtime, see `lifecycle`), `listen` the BARE host the
     endpoints are published on (the ports live in `ports`), and the models
     the catalogue pins (filename to sha256)."""
     provider = ctx.runtime.compose_provider().provider

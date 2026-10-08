@@ -5,10 +5,22 @@ reports it, `up` starts it again (repeating the recorded images, or pulling the 
 with `--upgrade`), `down` stops it (volume and models intact), `remove` deletes it.
 
 TWO RULES KEEP IT SMALL. It never RE-PROBES the host: the CLI (Task 12) gathers the
-runtimes and passes them in, and `runtime_for` picks the one the state RECORDED -- it does
-not re-run discovery to guess a different provider than the stack was built with. It never
-RE-DOES the download: `up --upgrade` pulls images, it does not fetch models. The four verbs
-talk only to the seams in `LifeDeps`, so they run on fakes and a temp directory, no engine.
+runtimes and passes them in, and `runtime_for` picks the runtime the state RECORDED (it
+does not re-run discovery to pick a different RUNTIME than the stack was built with). It
+never RE-DOES the download: `up --upgrade` pulls images, it does not fetch models. The
+four verbs talk only to the seams in `LifeDeps`, so they run on fakes and a temp directory,
+no engine.
+
+The COMPOSE PROVIDER is a different case, and it is worth saying plainly: it is re-resolved
+from the recorded runtime every verb runs, NOT read out of `stack.json`. That is safe, not
+a bug, because the reason to record it is already gone. The two podman providers label
+containers differently only in their DEFAULT names, and every service sets an explicit
+`container_name` (M6, spec:348) so the down/up/remove that follows a restart address the
+same named containers and volume whichever provider created them. Re-resolving also stays
+correct across a socket-state change: when the API socket goes dead, `podman compose` (the
+docker-compose wrapper) must hand over to the standalone `podman-compose`, and the recorded
+name would point at the wrong one. `st.provider` is therefore informational -- the status
+section and the error text surface it -- and the verbs never act on it.
 
 `remove` is the one verb that must not trust its state: a corrupt `stack.json` still has a
 compose file and a volume to clean, so with no readable state it tries a `down` on every
@@ -205,12 +217,16 @@ def check_minor(installed: str, target: str) -> None:
 
 def runtime_for(st: state.StackState,
                 runtimes: list[ContainerRuntime]) -> tuple[ContainerRuntime, Provider]:
-    """The runtime and provider the STATE recorded, never a re-discovery.
+    """The runtime the STATE recorded, and the compose provider THAT runtime now
+    answers with.
 
-    It picks the runtime named in `stack.json` from the ones the CLI discovered and uses
-    the compose provider THAT runtime answers with. A recorded runtime that is no longer
-    here, or whose provider has gone, is an error with a fix: re-running discovery to find
-    a different provider than the stack was built with would change what `up` starts.
+    The runtime is never re-discovered to a different one: a re-run that guessed
+    docker when the stack was built on podman (or vice versa) would start the
+    wrong containers. A recorded runtime that is no longer here, or whose
+    provider has gone, is an error with a fix. The provider, by contrast, IS
+    read live from that runtime (see the module note): `st.provider` is
+    informational, and the live answer is what stays correct when the socket
+    state changes.
     """
     named = [r for r in runtimes if r.name == st.runtime]
     if not named:

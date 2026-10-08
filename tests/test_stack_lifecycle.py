@@ -394,6 +394,27 @@ class TestRuntimeFor(_LifecycleCase):
             lifecycle.runtime_for(st, [gone])
         self.assertTrue(ctx.exception.fix)
 
+    def test_it_uses_the_recorded_runtime_and_the_provider_it_now_answers(self):
+        # The spec's reason for recording the provider (the two podman providers
+        # "rotulam os containers de forma diferente") is already neutralized by the
+        # explicit `container_name` every service carries (M6), so the lifecycle
+        # may re-resolve the provider from the recorded RUNTIME and stay correct
+        # across a socket-state change. What must NOT drift is the runtime: with
+        # both podman and docker answering, it takes the one stack.json named.
+        st = make_state(runtime="podman", provider=["podman-compose"])
+        podman = make_runtime("podman", "podman-compose", argv=("podman", "compose"))
+        docker = make_runtime("docker", "docker compose", argv=("docker", "compose"))
+        runtime, provider = lifecycle.runtime_for(st, [docker, podman])
+        self.assertIs(runtime, podman, "a re-discovery of a different runtime")
+        self.assertEqual(provider.name, "podman-compose")
+        # and the provider is what the runtime answers NOW, not the recorded name:
+        # a socket going dead swaps the wrapper for the standalone compose.
+        podman_standalone = make_runtime("podman", "podman-compose",
+                                         argv=("podman-compose",))
+        _runtime, provider2 = lifecycle.runtime_for(st, [podman_standalone])
+        self.assertEqual(provider2.argv, ("podman-compose",),
+                         "the recorded provider name is informational, not reused")
+
 
 class TestBootStatus(_LifecycleCase):
     def test_boot_status_for_podman_reads_the_unit_and_linger(self):
