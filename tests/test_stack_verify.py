@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -226,6 +227,45 @@ class TestCalibrate(unittest.TestCase):
         self.assertEqual(info["hermes"]["embed_s"], 0.3)
         self.assertEqual(info["hermes"]["rerank_s"], 0.5)
         self.assertEqual(info["hermes"]["memory"], {"embed": 1, "rerank": 1})
+
+    def test_a_rerank_that_failed_is_a_warning_not_a_timing(self):
+        # `rank` NEVER raises: a failure (the client's 15 s timeout on a slow
+        # CPU, a refused connection) comes back as `info["ok"] = False`, which is
+        # what `core/reranking.py` line 151 returns. Reading the clock around it
+        # measured the failure, not a rerank, and a host whose recall cannot
+        # rerank must not read "within budget".
+        class FailingReranker(FakeReranker):
+            def rank(self, query, documents):
+                self.calls.append((query, list(documents)))
+                return [], {"ok": False, "contract": "jina", "was_logit": False,
+                            "error": "timed out after 15.0s"}
+        clock = FakeClock([0.0, 0.3, 0.0, 15.0])
+        checks, info = verify.calibrate(
+            verify.stack_config(PORTS), [verify.Budget("hermes", 60.0, 120.0)],
+            embedder=FakeEmbedder(), reranker=FailingReranker(),
+            clock=clock, memory=None)
+        self.assertFalse(checks[0].ok)
+        self.assertTrue(checks[0].warning, "the stack works; recall degrades")
+        self.assertIn("rerank failed", checks[0].detail)
+        self.assertIn("timed out after 15.0s", checks[0].detail)
+        self.assertNotIn("rerank 15.0 s (budget", checks[0].detail)
+        self.assertIsNone(info["hermes"]["rerank_s"], "no rerank was measured")
+
+    def test_no_reranker_is_not_a_failed_rerank(self):
+        # A host with no rerank configured (`build_reranker` -> None, e.g. no
+        # `rerank_model` on an external-endpoint machine) is not a failed one:
+        # `rerank_s` is None, the check is ok, and the detail says the rerank was
+        # not measured, not that it failed. `build_reranker` is mocked so the
+        # genuinely-absent path is reached (a real config here WOULD build one).
+        clock = FakeClock([0.0, 0.3])  # embed bracket only; no rerank clock calls
+        with mock.patch.object(verify, "build_reranker", return_value=None):
+            checks, info = verify.calibrate(
+                verify.stack_config(PORTS), [verify.Budget("hermes", 2.0, 2.0)],
+                embedder=FakeEmbedder(), clock=clock, memory=None)
+        self.assertTrue(checks[0].ok)
+        self.assertNotIn("rerank failed", checks[0].detail)
+        self.assertIn("not measured (no rerank configured)", checks[0].detail)
+        self.assertIsNone(info["hermes"]["rerank_s"])
 
     def test_over_budget_is_a_named_warning_never_a_raise(self):
         # Same four-call bracket as above: the measured embed is 0.3 s (under

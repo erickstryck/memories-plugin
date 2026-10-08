@@ -178,7 +178,10 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
     installer reports. An over-budget measurement sets `warning=True` and
     names the host, the kind, the measured value and the budget; it NEVER
     raises — the stack works, it just misses the deadline, and the fix is a
-    faster profile.
+    faster profile. A rerank whose server FAILED (the client's `ok=False`
+    answer, e.g. the 15 s timeout on a slow CPU) is the same kind of warning:
+    `rerank_s` is `None` (no rerank was measured), and recall on that host
+    degrades to the first stage until the server answers.
     """
     if embedder is None:
         embedder = build_embedder(cfg)
@@ -204,27 +207,55 @@ def calibrate(cfg: Config, budgets: list[Budget], *,
     embedder.embed([embed_text])
     embed_s = clock() - embed_start
 
-    rerank_start = clock()
+    rerank_s: float | None = None
+    rerank_error: str | None = None
     if reranker is not None:
-        reranker.rank(query, rerank_pool)
-    rerank_s = clock() - rerank_start
+        rerank_start = clock()
+        _pairs, rerank_info = reranker.rank(query, rerank_pool)
+        if rerank_info.get("ok"):
+            rerank_s = clock() - rerank_start
+        else:
+            # `rank` NEVER raises: a failure (the client's 15 s timeout on a slow
+            # CPU, a refused connection) comes back as `ok=False`. Reading the
+            # clock around it would measure the failure, not a rerank, and a host
+            # whose recall cannot rerank must not read "within budget".
+            rerank_error = rerank_info.get("error") or "no usable hits"
 
     checks: list[Check] = []
     info: dict = {}
+    # A rerank the host does not have at all (no `rerank_url`) is not a failure:
+    # it is `ok` and simply not measured. Only a rerank whose server FAILED
+    # (the client's `ok=False`, e.g. the 15 s timeout on a slow CPU) is the
+    # warning below, because that host's recall degrades to the first stage.
+    no_rerank = reranker is None
     for budget in budgets:
         over = []
         if embed_s > budget.embed_s:
             over.append(f"embed {embed_s:.1f} s over its {budget.embed_s:.1f} s budget")
-        if rerank_s > budget.rerank_s:
-            over.append(f"rerank {rerank_s:.1f} s over its {budget.rerank_s:.1f} s budget")
-        detail = (f"{budget.host}: embed {embed_s:.1f} s (budget {budget.embed_s:.1f} s), "
-                  f"rerank {rerank_s:.1f} s (budget {budget.rerank_s:.1f} s)")
+        if no_rerank:
+            detail = (f"{budget.host}: embed {embed_s:.1f} s (budget {budget.embed_s:.1f} s), "
+                      "rerank not measured (no rerank configured)")
+            suffix = ""
+            fix = None
+        elif rerank_s is not None:
+            if rerank_s > budget.rerank_s:
+                over.append(f"rerank {rerank_s:.1f} s over its {budget.rerank_s:.1f} s budget")
+            detail = (f"{budget.host}: embed {embed_s:.1f} s (budget {budget.embed_s:.1f} s), "
+                      f"rerank {rerank_s:.1f} s (budget {budget.rerank_s:.1f} s)")
+            suffix = " — recall will miss its deadline on this host"
+            fix = "a GPU profile is faster here; reinstall the stack with one"
+        else:
+            reason = rerank_error or "no usable hits"
+            over.append(f"rerank failed: {reason}")
+            detail = (f"{budget.host}: embed {embed_s:.1f} s (budget {budget.embed_s:.1f} s), "
+                      f"rerank not measured ({reason})")
+            suffix = (" — recall on this host degrades to the first stage "
+                      "until the rerank server answers")
+            fix = ("check the rerank server's log (qctx stack up shows it); "
+                   "the stack is up and the config will be written")
         if over:
-            detail = (f"{budget.host}: " + "; ".join(over) +
-                      " — recall will miss its deadline on this host")
-            check = Check(budget.host, False, detail,
-                          "a GPU profile is faster here; reinstall the stack with one",
-                          warning=True)
+            detail = (f"{budget.host}: " + "; ".join(over) + suffix)
+            check = Check(budget.host, False, detail, fix, warning=True)
         else:
             check = Check(budget.host, True, detail)
         checks.append(check)
