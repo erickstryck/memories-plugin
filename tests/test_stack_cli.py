@@ -315,6 +315,19 @@ class TheInstallStep(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
 
+    def test_the_lifecycle_verbs_get_the_real_environment(self):
+        """`qctx stack up --upgrade` resolves the QCTX_STACK_IMAGE_* overrides from
+        the `env` the CLI hands the lifecycle. The unit tests drive `lifecycle.up`
+        with an env they build, so only this test proves the CLI passes the real
+        one (a `_life_deps` that dropped it brought the bug back unnoticed)."""
+        import stack.cli as stack_cli
+        with TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"QCTX_STACK_DIR": tmp,
+                                             "QCTX_STACK_IMAGE_LLAMA": "example.org/llama:env"}), \
+                mock.patch.object(stack_cli, "_discover", return_value=[]):
+            deps = stack_cli._life_deps(SimpleNamespace(), None)
+        self.assertEqual(deps.env.get("QCTX_STACK_IMAGE_LLAMA"), "example.org/llama:env")
+
     def args(self, **over):
         base = dict(check=False, json=False, yes=True, config_only=False,
                     host=None, stack=None, runtime=None, image=None)

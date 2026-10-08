@@ -356,7 +356,8 @@ def _status_of(st, stack_dir):
     import stack.process as process
     deps = lifecycle.LifeDeps(runtimes=[], reporter=TerminalReporter(),
                               prompter=_prompter(None), config=CoreConfigSink(),
-                              stack_dir=stack_dir, runner=process.SubprocessRunner())
+                              stack_dir=stack_dir, runner=process.SubprocessRunner(),
+                              env=dict(os.environ))
     return lifecycle.status(deps)
 
 

@@ -200,7 +200,8 @@ def _life(workdir: Path):
     return lifecycle.LifeDeps(
         runtimes=_runtimes(), reporter=stack_cli.TerminalReporter(),
         prompter=stack_cli.TerminalPrompter(), config=_FileSink(_config_path(workdir)),
-        stack_dir=workdir / "stack", runner=process.SubprocessRunner())
+        stack_dir=workdir / "stack", runner=process.SubprocessRunner(),
+        env=dict(os.environ))
 
 
 def _remove(workdir: Path) -> None:

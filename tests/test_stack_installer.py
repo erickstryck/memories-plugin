@@ -319,6 +319,30 @@ class TestRuntimeAndPlatform(ProvisionTestCase):
         self.assertEqual(result.device, "Vulkan0")
         self.assertEqual(prompter.choices, [], "one option: nothing to choose")
 
+    def test_an_experimental_profile_with_two_devices_opens_its_menu(self):
+        # The reduced menu of an explicit experimental profile must take its
+        # default from the profile's own options: the whole-menu rule skips the
+        # experimental option and falls back to a cpu line this menu does not
+        # have (it died with "the menu has no cpu option to fall back to"). Two
+        # devices are needed to reach the menu at all (one is taken without
+        # asking). The two lines are an EXAMPLE in the LIST_APPLE shape; no Mac
+        # here, and a libkrun machine with two GPUs is not a measured case.
+        two_apple = ("Available devices:\n"
+                     "  Vulkan0: Apple M2 Max (Venus) (32768 MiB, 1000 MiB free)\n"
+                     "  Vulkan1: Apple M2 Max (Venus) (32768 MiB, 30000 MiB free)\n")
+        facts = facts_for(system="macos", arch="arm64", ram=None)
+        podman = make_runtime("podman", podman_engine(arch="arm64", vm="libkrun"),
+                              list_devices={"apple": two_apple})
+        prompter = ScriptedPrompter([1, True])  # take the second line, proceed
+        result = run_case(self.tmp, request=installer.Request(profile="apple"),
+                          runtimes=[podman], facts=facts, prompter=prompter,
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        _title, lines, default = prompter.choices[0]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(default, 1, "the default is the profile's most free device")
+        self.assertEqual(result.device, "Vulkan1")
+
     def test_stack_apple_goes_to_podman_without_asking(self):
         # The apple profile is Podman-only: it goes to Podman without asking,
         # even when Docker also answers.
@@ -821,6 +845,16 @@ class TestProvision(ProvisionTestCase):
         self.assertEqual(len(warns), 1, "a 5 GiB machine must get the RAM warning")
         self.assertNotIn("4.6", warns[0], "the opening-check figure is stale")
         self.assertIn("7.3", warns[0], "the measured stack figure")
+        # 7 GiB cannot hold the measured ~7.3 GiB: it must warn too (a 6 GiB
+        # threshold would stay silent here)
+        reporter7 = RecordingReporter()
+        run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                 runtimes=[make_runtime("podman", podman_engine(), argv=("podman", "compose"))],
+                 facts=facts_for(ram=7 * GIB), prompter=ScriptedPrompter([]),
+                 reporter=reporter7, config=FakeConfigSink())
+        self.assertTrue(any(method == "warn" and "RAM" in text
+                            for method, text in reporter7.calls),
+                        "a 7 GiB machine must get the RAM warning")
 
     def test_no_runtime_at_all_names_a_fix(self):
         # spec: every refusal carries the correction. When NO runtime binary

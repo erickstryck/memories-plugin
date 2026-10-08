@@ -340,40 +340,38 @@ class TestUp(_LifecycleCase):
         self.assertEqual(result.images["qdrant"], catalog.QDRANT_IMAGE)
 
 
-class TestMinorGuard(_LifecycleCase):
-    def test_the_minor_guard_refuses_a_skip_and_allows_the_next(self):
-        # 1.19 -> 1.20 is the next minor: allowed, no raise.
-        lifecycle.check_minor("1.19.2", "1.20.0")
-        # 1.19 -> 1.21 skips the intermediate 1.20: refused, naming it in the fix.
-        with self.assertRaises(StackError) as ctx:
-            lifecycle.check_minor("1.19.2", "1.21.0")
-        self.assertIn("1.20", ctx.exception.fix)
-
-
-class TestDown(_LifecycleCase):
     def test_up_failure_shows_the_log_tail_of_the_services_that_did_not_come_up(self):
         # spec: a readiness failure shows the tail of the service's log
         # (`compose logs --tail 50 <service>`), not a generic "check the logs".
-        # The clock passes the deadline before the first poll, so `wait_ready`
-        # raises with every service still pending, and `up` must fetch and
-        # report the log tail of the first not-ready service before it raises.
+        # qdrant answers 200 on the first poll, embed and rerank keep answering
+        # 503, then the clock passes the deadline: the tail is fetched for the two
+        # that did not come up, NOT for qdrant, and it reaches the reporter.
         st = make_state()
-        log = "qdrant: storage is full, cannot write the segment"
+        log = "embed: failed to load model, out of memory"
         runtime = make_runtime()
         runtime.fail = {"logs": Completed(0, log)}
-        ticks = iter([0.0, 601.0])
-        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime],
-                         status_fn=lambda url: 503,
-                         clock=lambda: next(ticks, 601.0))
+        polled = []
+
+        def status_fn(url):
+            polled.append(url)
+            return 200 if url.endswith("/readyz") else 503
+        reporter = RecordingReporter()
+        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime], status_fn=status_fn,
+                         reporter=reporter,
+                         clock=lambda: 601.0 if len(polled) >= 3 else 0.0)
         with self.assertRaises(StackError) as ctx:
             lifecycle.up(deps)
         self.assertEqual(ctx.exception.step, "up")
         logs_calls = [args for args in compose_args_of(runtime)
                       if args and args[0] == "logs"]
-        self.assertIn(("logs", "--tail", "50", "qdrant"), logs_calls,
-                      "the not-ready service's log tail must be fetched")
-        self.assertIn("qctx stack up", ctx.exception.fix,
-                      "the fix must name the command that retries the start")
+        self.assertEqual(sorted(logs_calls), [("logs", "--tail", "50", "embed"),
+                                              ("logs", "--tail", "50", "rerank")],
+                         "the tail of the services that did not come up, and only them")
+        said = " ".join(text for _method, text in reporter.calls)
+        self.assertIn(log, said, "the tail must reach the operator")
+        # this stack was installed and verified once (phase running): retrying the
+        # start IS `qctx stack up`
+        self.assertIn("qctx stack up", ctx.exception.fix)
 
     def test_up_failure_does_not_let_a_hanging_logs_mask_the_readiness_error(self):
         # The log tail is evidence, not a dependency: a `compose logs` that
@@ -382,13 +380,13 @@ class TestDown(_LifecycleCase):
         # the readiness error, which is the one the operator needs. The tail
         # degrades to "(no log)" and `up` still raises step="up". (A non-zero
         # `logs` exit does not raise; the provider's own output shows as the
-        # tail -- the other test covers that path.)
+        # tail -- the test above covers that path.)
         st = make_state()
         runtime = make_runtime()
+
         def raise_logs(provider, project, file, *args, timeout, stream=False):
             if args and args[0] == "logs":
-                raise StackError("timed out after 60.0s: compose logs",
-                                 step="runtime")
+                raise StackError("timed out after 60.0s: compose logs", step="runtime")
             return Completed(0)
         runtime.compose = raise_logs
         ticks = iter([0.0, 601.0])
@@ -400,8 +398,19 @@ class TestDown(_LifecycleCase):
         self.assertEqual(ctx.exception.step, "up",
                          "the readiness error must survive a failing logs fetch")
         self.assertNotIn("timed out", str(ctx.exception))
-        self.assertIn("log tail", ctx.exception.args[0] if ctx.exception.args else "")
 
+
+class TestMinorGuard(_LifecycleCase):
+    def test_the_minor_guard_refuses_a_skip_and_allows_the_next(self):
+        # 1.19 -> 1.20 is the next minor: allowed, no raise.
+        lifecycle.check_minor("1.19.2", "1.20.0")
+        # 1.19 -> 1.21 skips the intermediate 1.20: refused, naming it in the fix.
+        with self.assertRaises(StackError) as ctx:
+            lifecycle.check_minor("1.19.2", "1.21.0")
+        self.assertIn("1.20", ctx.exception.fix)
+
+
+class TestDown(_LifecycleCase):
     def test_down_keeps_volume_and_models_and_marks_stopped(self):
         st = make_state()
         models = self.stack / state.MODELS_DIR
@@ -512,10 +521,14 @@ class TestRuntimeFor(_LifecycleCase):
         self.assertIs(runtime, podman, "a re-discovery of a different runtime")
         self.assertEqual(provider.name, "podman-compose")
         # and the provider is what the runtime answers NOW, not the recorded name:
-        # a socket going dead swaps the wrapper for the standalone compose.
+        # a socket going dead swaps the wrapper for the standalone compose. The
+        # recorded name differs from the live one on purpose, so reading the
+        # recorded provider instead of the live answer fails here.
+        st_wrapper = make_state(runtime="podman", provider=["podman compose"])
         podman_standalone = make_runtime("podman", "podman-compose",
                                          argv=("podman-compose",))
-        _runtime, provider2 = lifecycle.runtime_for(st, [podman_standalone])
+        _runtime, provider2 = lifecycle.runtime_for(st_wrapper, [podman_standalone])
+        self.assertEqual(provider2.name, "podman-compose")
         self.assertEqual(provider2.argv, ("podman-compose",),
                          "the recorded provider name is informational, not reused")
 

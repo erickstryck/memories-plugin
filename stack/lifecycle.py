@@ -29,7 +29,7 @@ pointed at the stack now points at nothing, and `remove` says so.
 """
 import os
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -45,20 +45,22 @@ from .process import Runner
 class LifeDeps:
     """Everything a lifecycle verb may touch, injected. `runtimes` is the CLI's discovery
     (not re-run here); `runner` is what `boot_status` reads `systemctl`/`loginctl`
-    through; `status`/`clock`/`sleep` are the readiness probes, defaulted to the real ones
-    so a test swaps them for scripts and a frozen clock; `env` is what `up --upgrade`
-    resolves the `QCTX_STACK_IMAGE_*` overrides from (the spec applies them to `--upgrade`
-    too, the same way the install does)."""
+    through; `env` is what `up --upgrade` resolves the `QCTX_STACK_IMAGE_*` overrides
+    from (the spec applies them to `--upgrade` too, the same way the install does). It
+    is REQUIRED, not defaulted: a construction that forgot it would silently resolve
+    from nothing and bring back the ignored-override bug. `status`/`clock`/`sleep`
+    are the readiness probes, defaulted to the real ones so a test swaps them for
+    scripts and a frozen clock."""
     runtimes: list[ContainerRuntime]
     reporter: Reporter
     prompter: Prompter
     config: ConfigSink
     stack_dir: Path
     runner: Runner
+    env: Mapping[str, str]
     status: Callable[[str], int | None] = health.http_status
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
-    env: Mapping[str, str] = field(default_factory=dict)
 
 
 def status(deps: LifeDeps) -> tuple[dict, int]:
