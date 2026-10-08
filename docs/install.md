@@ -224,7 +224,17 @@ containers up, verifies that the endpoints answer and that the calibration is
 within budget, and then points the configuration at the stack it just built.
 `auto` picks the best profile the host serves; the other choices are `cpu`,
 `amd`, `intel`, `nvidia` and `apple`, and `--runtime docker` or `--runtime
-podman` decides when both runtimes answer.
+podman` decides when both runtimes answer. When a GPU profile proves more than
+one card, the menu lists each card on its own line, and `auto` picks the card
+with the most memory free; an explicit `--stack <profile>` reduces the menu to
+that profile's cards (its own default) and `--yes` takes that default without
+asking.
+
+**The download has a progress bar.** The long part is the two models
+(836 MiB). It shows percent, MiB done of total, speed and ETA, rewriting one
+line on a terminal; off a terminal (a log, `--yes`) it writes one line per
+tenth of the download instead. A broken download resumes from where it left
+off, and the speed and ETA then count the current run only.
 
 **What it costs, measured.** The download is the llama.cpp server image, 294 MiB
 for the amd64 build and 290 MiB for the arm64 build, the Qdrant image, about
@@ -252,6 +262,15 @@ volume the engine prefixes with the project:
 the containers and keeps both; `qctx stack remove` deletes the files, and only
 deletes the models (`--purge-models`) and the volume (`--purge-data`) when
 asked.
+
+**The calibration.** After the endpoints answer, the install measures one warm
+embed and one warm rerank (the same call the recall makes) and compares each
+host's budget against it. An over-budget result is a WARNING, never a block:
+the stack works, it just misses that host's deadline, and the warning names
+the host, the value and the budget, with the faster profile as the fix. A
+rerank whose server did not answer is the same kind of warning (it is not
+reported as a timing), and a memory reading that fails keeps the timing that
+was already measured.
 
 **After a reboot.** The containers carry `restart: always`, and how that
 survives depends on the runtime. On Docker the daemon has to start at boot, and

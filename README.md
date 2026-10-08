@@ -1,5 +1,7 @@
 # mnemosine
 
+![Mnemosine](docs/mnemosine.jpeg)
+
 Long-term semantic memory and a document index on top of [Qdrant](https://qdrant.tech),
 for agents. A pure-Python core (stdlib only), with thin adapters for the two hosts it
 ships with: claude-code and hermes-agent.

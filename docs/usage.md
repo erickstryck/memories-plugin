@@ -115,10 +115,17 @@ The endpoints running in containers on this machine are a group of their own, st
 `qctx stack up` takes `--upgrade` to pull the catalogue's images, with `--image ROLE=REF`
 to override one of them (the override is recorded in `stack.json` and repeated from then
 on); without `--upgrade` it repeats exactly what `stack.json` holds, and refuses an
-`--image`. A stack whose install did not finish (`stack status` says so) is resumed with
+`--image`. `--upgrade` also resolves the `QCTX_STACK_IMAGE_LLAMA` and
+`QCTX_STACK_IMAGE_QDRANT` environment variables, when the flag does not set the role
+(flag beats environment, environment beats the catalogue). A stack whose install did not
+finish (`stack status` says so) is resumed with
 `qctx install`, not with `stack up`. `qctx stack remove` never touches the configuration: it names
 the fields that still point at the stack it just deleted, and with no readable state it tries
 a `down` on every runtime that answers so a corrupt install still cleans up.
+
+`qctx stack status` answers in its **exit code** as well as in words: `0` when the managed
+stack is healthy, `1` when an endpoint does not answer or the last install did not finish
+(`qctx stack status || echo "not healthy"` in a script).
 
 The install flags that stand the stack up in the first place are on `qctx install`:
 `--stack` is the profile (`auto` picks the best one the host serves, or `cpu`, `amd`, `intel`,
