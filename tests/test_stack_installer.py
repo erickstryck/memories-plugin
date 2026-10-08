@@ -145,6 +145,14 @@ def default_calibrate(cfg, budgets, *, clock=None, memory=None):
     return checks, info
 
 
+def raising_calibrate(cfg, budgets, *, clock=None, memory=None):
+    """A `calibrate` that blows up the way the real one does when the
+    measurement fails: the runtime's `stats` raises (rootless without cgroups
+    v2) or the embedder refuses. The spec says calibration NEVER blocks, so
+    this must become a warning, not an aborted install."""
+    raise RuntimeError("the runtime's stats raised (rootless, no cgroups v2)")
+
+
 def facts_for(system="linux", arch="amd64", gpus=(), nodes=(), ram: int | None = 16 * GIB,
               disk=400 * GIB, nvidia=None, selinux=False, wsl=False) -> HostFacts:
     return HostFacts(system=system, arch=arch, wsl=wsl, ram_bytes=ram,
@@ -660,6 +668,29 @@ class TestProvision(ProvisionTestCase):
         self.assertEqual(config.saves, [])
         self.assertEqual(state.load(self.stack).phase, "compose")
         self.assertTrue((self.stack / "models" / "bge-m3-Q4_K_M.gguf").exists())
+
+    def test_a_failed_calibration_is_a_warning_not_an_aborted_install(self):
+        # Calibration NEVER blocks (spec): the functional check already
+        # passed, so the stack works; a measurement that failed (the
+        # runtime's `stats` on a rootless host without cgroups v2, the
+        # embedder refusing the 6000-char text) must come out as a warning,
+        # not an aborted install. An abort would leave the config unwritten
+        # and the state in `compose`, so every re-run re-provisioned to the
+        # same point, forever.
+        facts = facts_for()
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+        config = FakeConfigSink()
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(yes=True),
+                          runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=reporter, config=config,
+                          calibrate=raising_calibrate)
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(len(config.saves), 1, "the config is written")
+        self.assertEqual(result.phase, "running")
+        warns = [text for method, text in reporter.calls if method == "warn"]
+        self.assertTrue(any("calibration" in text for text in warns),
+                        f"the failure must come out as a warning: {warns}")
 
     def test_replacing_a_non_empty_value_asks_first(self):
         # The file already points elsewhere (a non-empty qdrant_url): the diff

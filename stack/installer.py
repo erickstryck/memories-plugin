@@ -758,12 +758,23 @@ def _calibrate(ctx: _Ctx, plan: compose.Plan) -> None:
     """Step 10, second half: the calibration, one check per host budget (a
     warning when it is over — an over-budget stack works, it just misses a
     deadline), the memory through the runtime's `stats` (Ruling 4: the lambda
-    is built here, and `calibrate` reads it once per host)."""
+    is built here, and `calibrate` reads it once per host). A measurement that
+    FAILS is a warning too, never an abort (spec: calibration never blocks):
+    the functional check already passed, so the stack works; what failed is
+    the reading of its speed and memory (the runtime's `stats` on a rootless
+    host without cgroups v2, the embedder refusing the probe), and an abort
+    here would leave the config unwritten and the state in `compose`, so
+    every re-run re-provisioned to the same point, forever."""
     names = [compose.container_name(plan.project, role) for role in ("embed", "rerank")]
     memory = lambda: ctx.runtime.stats(names)  # noqa: E731
     cfg = verify.stack_config(ctx.ports)
-    checks, info = ctx.deps.calibrate(cfg, ctx.deps.budgets, clock=ctx.deps.clock,
-                                      memory=memory)
+    try:
+        checks, info = ctx.deps.calibrate(cfg, ctx.deps.budgets, clock=ctx.deps.clock,
+                                          memory=memory)
+    except Exception as exc:  # the measurement, not the stack, is what failed
+        ctx.deps.reporter.warn(f"calibration: the measurement failed ({exc}); "
+                               "the stack is up, but its speed and memory were not checked")
+        return
     for check in checks:
         (ctx.deps.reporter.ok if check.ok else ctx.deps.reporter.warn)(
             f"{check.name}: {check.detail}")
