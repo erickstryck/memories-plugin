@@ -285,6 +285,24 @@ class TestRuntimeAndPlatform(ProvisionTestCase):
         self.assertEqual(prompter.choices, [])  # no question was asked
         self.assertEqual(result.runtime, "docker")
 
+    def test_stack_apple_without_yes_is_not_refused_and_one_option_asks_nothing(self):
+        # An explicit experimental profile is not refused: the user asked for it
+        # by name. Without --yes the reduced menu's default comes from the
+        # profile's own options, not the whole-menu rule (which skips the
+        # experimental option and falls back to a cpu line the reduced menu does
+        # not have). With ONE option there is nothing to choose: no menu at all.
+        facts = facts_for(system="macos", arch="arm64", ram=None)
+        podman = make_runtime("podman", podman_engine(arch="arm64", vm="libkrun"),
+                              list_devices={"apple": LIST_APPLE})
+        prompter = ScriptedPrompter([True])  # only the summary's proceed
+        result = run_case(self.tmp, request=installer.Request(profile="apple"),
+                          runtimes=[podman], facts=facts, prompter=prompter,
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(result.profile, "apple")
+        self.assertEqual(result.device, "Vulkan0")
+        self.assertEqual(prompter.choices, [], "one option: nothing to choose")
+
     def test_stack_apple_goes_to_podman_without_asking(self):
         # The apple profile is Podman-only: it goes to Podman without asking,
         # even when Docker also answers.
@@ -426,6 +444,19 @@ class TestMenu(ProvisionTestCase):
         self.assertEqual(result.profile, "intel")
         self.assertEqual(result.device, "Vulkan0")
 
+    def test_build_options_gives_one_option_per_proven_device(self):
+        # The public helper the plan names: a profile with two proven devices
+        # becomes two options, each with its device, in the order proven.
+        from stack.backends import Availability, READY, parse_devices
+        devices = parse_devices(LIST_INTEL_TWO)
+        availability = {b: Availability(READY) for b in ("cpu", "amd", "intel",
+                                                          "nvidia", "apple")}
+        options = installer.build_options("linux", facts_for(), podman_engine(), "podman",
+                                          {"intel": devices}, availability)
+        intel = [o for o in options if o.backend == "intel"]
+        self.assertEqual([o.device.id for o in intel], ["Vulkan0", "Vulkan1"])
+        self.assertEqual(options[0].backend, "cpu")
+
     def test_auto_picks_the_second_gpu_when_it_has_more_free_memory(self):
         # ONE vendor with TWO GPUs in the same --list-devices (this host's
         # shape: two Arc B70). The default is the proven GPU with the most
@@ -481,6 +512,8 @@ class TestMenu(ProvisionTestCase):
         title, lines, default = prompter.choices[0]
         self.assertEqual(len(lines), 2, f"the menu is not reduced: {lines}")
         self.assertFalse(any(line.startswith("cpu") for line in lines))
+        self.assertTrue(lines[default].startswith("intel: Vulkan1"),
+                        "the reduced menu's default is the profile's most free GPU")
         self.assertEqual(result.device, "Vulkan0", "the pick decides")
         podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"),
                               list_devices={"intel": LIST_INTEL_TWO})

@@ -190,9 +190,12 @@ def build_options(platform: str, host: HostFacts, engine, runtime: str,
                   proofs: Mapping[str, list], availability: Mapping[str, Availability]
                   ) -> list[Option]:
     """The menu: one option per profile, and for a proven GPU profile, ONE
-    option per proven device (spec: the menu lists each GPU the
+    option per proven device in `proofs` (spec: the menu lists each GPU the
     `--list-devices` showed). The order is the catalogue's, cpu first; the
-    availability is shared by the profile's options."""
+    availability is shared by the profile's options. `provision` calls it
+    BEFORE the proofs, with an empty `proofs` (one deviceless option per
+    profile), and `_prove` then expands each proven profile into one option
+    per device the same way."""
     options: list[Option] = []
     for backend in BACKENDS:
         av = availability[backend]
@@ -583,7 +586,9 @@ def _pick_option(ctx: _Ctx, options: list[Option]) -> Option:
                 step="profile", fix=fix)
         if request.yes:
             return _default_within(ready)
-        return _menu(ctx, ready)
+        if len(ready) == 1:
+            return ready[0]  # one option: there is nothing to choose
+        return _menu(ctx, ready, default=_default_within(ready))
     if request.profile == "auto" or request.yes:
         return default_option(options)
     return _menu(ctx, options)
@@ -603,11 +608,14 @@ def _default_within(options: list[Option]) -> Option:
     return best
 
 
-def _menu(ctx: _Ctx, options: list[Option]) -> Option:
-    """The menu loop: one line per option, the default the one the choice
-    rules give (the proven GPU with the most free memory, else the cpu); an
-    unavailable pick repeats its correction and the menu comes back."""
-    default = default_option(options)
+def _menu(ctx: _Ctx, options: list[Option], default: Option | None = None) -> Option:
+    """The menu loop: one line per option; an unavailable pick repeats its
+    correction and the menu comes back. The default is the one the caller
+    passes -- an explicit profile's reduced menu passes its own most free GPU
+    -- else the whole-menu rule (the proven, non-experimental GPU with the
+    most free memory, else the cpu)."""
+    if default is None:
+        default = default_option(options)
     while True:
         lines = [option_line(o, ctx.platform) for o in options]
         pick = ctx.deps.prompter.choose("which profile should run the stack?",
