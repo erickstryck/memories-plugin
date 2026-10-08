@@ -716,6 +716,26 @@ class TestProvision(ProvisionTestCase):
         self.assertNotIn("stack up again", err.fix,
                          f"`stack up` never re-verifies: {err.fix!r}")
 
+    def test_the_ram_warning_carries_the_measured_stack_figures(self):
+        # The two llama-servers measured ~7.3 GiB together in the stack's own
+        # configuration (embed ~2.3 GiB, rerank ~5.0 GiB), not the ~4.6 GiB of the
+        # opening check. A claim must be true: the warning carries a figure that
+        # is real, and the threshold sits at or above the measured need (a 6.5
+        # GiB machine cannot hold a 7.3 GiB stack, so it must be warned). The
+        # doc already carries these figures (1b35a87); the code caught up here.
+        facts = facts_for(ram=5 * GIB)
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=reporter, config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        warns = [text for method, text in reporter.calls
+                 if method == "warn" and "RAM" in text]
+        self.assertEqual(len(warns), 1, "a 5 GiB machine must get the RAM warning")
+        self.assertNotIn("4.6", warns[0], "the opening-check figure is stale")
+        self.assertIn("7.3", warns[0], "the measured stack figure")
+
     def test_replacing_a_non_empty_value_asks_first(self):
         # The file already points elsewhere (a non-empty qdrant_url): the diff
         # is shown, and the replacement ASKS before it saves.

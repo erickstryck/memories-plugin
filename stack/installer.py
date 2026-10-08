@@ -39,10 +39,12 @@ from .fetch import Transport
 #: volume grows in it, and a download that fills the disk to the byte cannot
 #: resume.
 DISK_HEADROOM = 400 * 2 ** 20
-#: Below this the RAM warning fires: the two servers measured ~4.6 GiB of
-#: RAM together on this machine (plus Qdrant), so less than 6 GiB may not
-#: hold them.
-RAM_WARN_BYTES = 6 * 2 ** 30
+#: Below this the RAM warning fires: the two servers measured ~7.3 GiB of RAM
+#: together in the stack's own configuration (cpu embed ~2.3 GiB, cpu rerank
+#: ~5.0 GiB, cgroup, 2026-10-08), so less than 8 GiB may not hold them plus
+#: Qdrant. (The ~4.6 GiB the warning used to carry was the opening-check
+#: figure, not the stack's: 1b35a87 fixed the doc, this fixes the code.)
+RAM_WARN_BYTES = 8 * 2 ** 30
 #: The manual path a host phase 1 cannot serve is pointed at.
 README_PATH = "README.md, section 'Local models'"
 #: The BARE host the endpoints are published on (phase 1); the ports live in
@@ -399,7 +401,7 @@ def _check_disk_and_ram(ctx: _Ctx) -> None:
     if ram is not None and ram < RAM_WARN_BYTES:
         ctx.deps.reporter.warn(
             f"only {ram / 2 ** 20:.0f} MiB of RAM for the containers: the two "
-            f"llama-servers measured ~4.6 GiB together, plus qdrant")
+            f"llama-servers measured ~7.3 GiB together in the cpu profile, plus qdrant")
 
 
 def _availability(ctx: _Ctx) -> dict[str, Availability]:
