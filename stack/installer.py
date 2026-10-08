@@ -187,18 +187,20 @@ def choose_ports(wanted: dict[str, int],
 def build_options(platform: str, host: HostFacts, engine, runtime: str,
                   proofs: Mapping[str, list], availability: Mapping[str, Availability]
                   ) -> list[Option]:
-    """The menu: one option per profile, each with the device its proof found
-    (None until it is proven, and always on the cpu) and the availability it
-    stands at. The order is the catalogue's, cpu first."""
+    """The menu: one option per profile, and for a proven GPU profile, ONE
+    option per proven device (spec: the menu lists each GPU the
+    `--list-devices` showed). The order is the catalogue's, cpu first; the
+    availability is shared by the profile's options."""
     options: list[Option] = []
     for backend in BACKENDS:
         av = availability[backend]
-        device = None
         if av.state == READY and backend != "cpu":
             seen = list(proofs.get(backend, ()))
             if seen:
-                device = seen[0]
-        options.append(Option(backend, device, None, av))
+                for device in seen:
+                    options.append(Option(backend, device, None, av))
+                continue
+        options.append(Option(backend, None, None, av))
     return options
 
 
@@ -496,7 +498,10 @@ def _prove(options: list[Option], ctx: _Ctx) -> list[Option]:
         file = ctx.deps.stack_dir / "probe" / f"{option.backend}.yaml"
         devices, tail = _probe_devices(ctx, option.backend, file)
         if devices:
-            out.append(Option(option.backend, devices[0], None, av))
+            # ONE option per proven GPU (spec: the menu lists each GPU the
+            # `--list-devices` showed): the default, the menu and an explicit
+            # `--stack <profile>` all see every line, not only the first.
+            out.extend(Option(option.backend, device, None, av) for device in devices)
         else:
             _demote(option.backend, tail, ctx)
             out.append(Option(option.backend, None, None,
@@ -553,10 +558,13 @@ def _demote(backend: str, tail: str, ctx: _Ctx) -> None:
 def _pick_option(ctx: _Ctx, options: list[Option]) -> Option:
     """Step 6: the menu. An explicit profile that is not READY here stops
     with its reason and fix — it does NOT fall back to the cpu, because the
-    user asked for it by name; only `auto` (and `--yes`, which takes the
-    default without asking) fall back. A profile that is None is the menu
-    itself, and a pick of an option this runtime does not serve repeats its
-    correction and asks again (the step does not install runtimes)."""
+    user asked for it by name; only `auto` (and `--yes` alone, which takes
+    the default without asking) fall back. An explicit profile that IS ready
+    reduces the menu to the profile's GPUs (spec: "o menu se reduz às GPUs
+    daquele perfil") and the pick decides; with `--yes` the profile's default
+    (its most free GPU) applies without asking. A profile that is None is the
+    menu itself, and a pick of an option this runtime does not serve repeats
+    its correction and asks again (the step does not install runtimes)."""
     request = ctx.request
     if request.profile is not None and request.profile != "auto":
         ready = [o for o in options
@@ -568,10 +576,26 @@ def _pick_option(ctx: _Ctx, options: list[Option]) -> Option:
             raise StackError(
                 f"{request.profile}: {av.reason or 'unavailable here'}",
                 step="profile", fix=fix)
-        return ready[0]
+        if request.yes:
+            return _default_within(ready)
+        return _menu(ctx, ready)
     if request.profile == "auto" or request.yes:
         return default_option(options)
     return _menu(ctx, options)
+
+
+def _default_within(options: list[Option]) -> Option:
+    """The profile's own default when the user named the profile and passed
+    `--yes`: the most free GPU among the profile's ready options. The
+    whole-menu rules of `default_option` do not apply here: the experimental
+    option the user asked for by name is not refused, and there is no cpu in
+    the reduced list to fall back to (a `--stack cpu` is just the cpu)."""
+    best, best_free = options[0], -1
+    for option in options:
+        free = option.device.free_mib if option.device is not None else 0
+        if free > best_free:
+            best, best_free = option, free
+    return best
 
 
 def _menu(ctx: _Ctx, options: list[Option]) -> Option:

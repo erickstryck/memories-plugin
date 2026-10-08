@@ -55,6 +55,13 @@ LIST_NVIDIA = ("Available devices:\n"
 #: Venus driver prints, which is what `vendor_of` reads as `apple`.
 LIST_APPLE = ("Available devices:\n"
               "  Vulkan0: Apple M2 Max (Venus) (32768 MiB, 30000 MiB free)\n")
+#: Two GPUs of ONE vendor in a single `--list-devices`: the shape this host
+#: measured on 2026-10-06 (two Arc B70, Vulkan0 and Vulkan2, 29268/29289 MiB
+#: free); the two lines and the MiB figures below are an example in that same
+#: shape, with distinct free memory so a pick by free memory is assertable.
+LIST_INTEL_TWO = ("Available devices:\n"
+                  "  Vulkan0: Intel(R) Graphics (BMG G31) (32656 MiB, 1000 MiB free)\n"
+                  "  Vulkan1: Intel(R) Graphics (BMG G31) (32656 MiB, 30000 MiB free)\n")
 
 # -- the patched catalogue models: 1 MiB each, the REAL hash of the bytes -----
 #
@@ -410,6 +417,70 @@ class TestMenu(ProvisionTestCase):
         self.assertNotIsInstance(result, StackError)
         self.assertEqual(result.profile, "intel")
         self.assertEqual(result.device, "Vulkan0")
+
+    def test_auto_picks_the_second_gpu_when_it_has_more_free_memory(self):
+        # ONE vendor with TWO GPUs in the same --list-devices (this host's
+        # shape: two Arc B70). The default is the proven GPU with the most
+        # free memory -- the second line, not the first (spec: "o padrão é a
+        # GPU provada de maior memória livre").
+        facts = facts_for(gpus=[("intel", "0000:02:00.0")], nodes=("renderD128",))
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"),
+                              list_devices={"intel": LIST_INTEL_TWO})
+        result = run_case(self.tmp, request=installer.Request(profile="auto", yes=True),
+                          runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(result.profile, "intel")
+        self.assertEqual(result.device, "Vulkan1")
+
+    def test_the_menu_lists_each_proved_gpu_and_defaults_to_the_most_free(self):
+        # The menu is one line PER proven GPU (spec: "cada GPU provada"), so
+        # both Intel lines appear, and the default is the one with the most
+        # free memory.
+        facts = facts_for(gpus=[("intel", "0000:02:00.0")], nodes=("renderD128",))
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"),
+                              list_devices={"intel": LIST_INTEL_TWO})
+        # the menu is cpu (0), amd unavailable (1), intel Vulkan0 (2), intel
+        # Vulkan1 (3), nvidia (4), apple (5): pick the default, the most free
+        # (Vulkan1, index 3), then proceed.
+        prompter = ScriptedPrompter([3, True])
+        result = run_case(self.tmp, request=installer.Request(),
+                          runtimes=[podman], facts=facts, prompter=prompter,
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        title, lines, default = prompter.choices[0]
+        self.assertEqual(result.device, "Vulkan1")
+        self.assertEqual(default,
+                         max(i for i, line in enumerate(lines)
+                             if line.startswith("intel: Vulkan1")))
+        self.assertTrue(any(line.startswith("intel: Vulkan0") for line in lines),
+                        f"the first proven GPU is missing from the menu: {lines}")
+        self.assertTrue(any(line.startswith("intel: Vulkan1") for line in lines),
+                        f"the second proven GPU is missing from the menu: {lines}")
+
+    def test_an_explicit_profile_reduces_the_menu_to_its_gpus(self):
+        # `--stack intel` keeps the menu, reduced to the profile's GPUs (both
+        # of them, no cpu line): the pick decides, and `--yes` takes the
+        # default (the most free) without asking.
+        facts = facts_for(gpus=[("intel", "0000:02:00.0")], nodes=("renderD128",))
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"),
+                              list_devices={"intel": LIST_INTEL_TWO})
+        prompter = ScriptedPrompter([0, True])  # the first line (Vulkan0), then proceed
+        result = run_case(self.tmp, request=installer.Request(profile="intel"),
+                          runtimes=[podman], facts=facts, prompter=prompter,
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        title, lines, default = prompter.choices[0]
+        self.assertEqual(len(lines), 2, f"the menu is not reduced: {lines}")
+        self.assertFalse(any(line.startswith("cpu") for line in lines))
+        self.assertEqual(result.device, "Vulkan0", "the pick decides")
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"),
+                              list_devices={"intel": LIST_INTEL_TWO})
+        result = run_case(self.tmp, request=installer.Request(profile="intel", yes=True),
+                          runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(result.device, "Vulkan1", "--yes takes the most free")
 
     def test_auto_never_picks_apple(self):
         # The apple is the only proven GPU and it is experimental: `auto` still
