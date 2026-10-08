@@ -225,14 +225,25 @@ def remove(deps: LifeDeps, *, purge_models: bool = False, purge_data: bool = Fal
 
 
 def check_minor(installed: str, target: str) -> None:
-    """The Qdrant storage guard on `up --upgrade`: refuse a jump that skips a minor.
+    """The Qdrant storage guard on `up --upgrade`: refuse a jump that crosses
+    a major or skips a minor.
 
-    Storage is compatible only between CONSECUTIVE minors, so `1.19 -> 1.21` is refused,
-    naming the intermediate `1.20` to install first. The next minor (and the same or an
-    older one) is allowed.
+    Storage is compatible only between CONSECUTIVE minors of the SAME major,
+    so `1.19 -> 1.21` is refused, naming the intermediate `1.20` to install
+    first, and `1.19 -> 2.0` (any other major, in either direction) is refused
+    naming the next step. The next minor (and the same or an older one in the
+    same major) is allowed.
     """
     i_major, i_minor = _minor(installed)
-    _t_major, t_minor = _minor(target)
+    t_major, t_minor = _minor(target)
+    if t_major != i_major:
+        raise StackError(
+            f"Qdrant {installed} -> {target} crosses a major ({i_major} to "
+            f"{t_major}); storage is compatible only between consecutive minors "
+            f"of the same major",
+            step="lifecycle",
+            fix="upgrade through each major in turn, one step at a time "
+                f"(e.g. --image qdrant=<ref>:v{i_major}.{i_minor + 1} first)")
     if t_minor > i_minor + 1:
         next_minor = f"{i_major}.{i_minor + 1}"
         raise StackError(

@@ -419,6 +419,20 @@ class TestMinorGuard(_LifecycleCase):
             lifecycle.check_minor("1.19.2", "1.21.0")
         self.assertIn("1.20", ctx.exception.fix)
 
+    def test_a_major_jump_is_not_a_consecutive_minor(self):
+        # The guard promises "consecutive minors of the same major": the check
+        # reads only the target's minor, so 1.19 -> 2.0 and 1.19 -> 3.4 sailed
+        # through (measured by the final review, probe on 69ef00d). Qdrant's
+        # storage guarantee does not cross a major, so a jump there is exactly
+        # what the guard exists to refuse.
+        for target in ("2.0.0", "3.4.0", "10.1.0"):
+            with self.assertRaises(StackError, msg=target):
+                lifecycle.check_minor("1.19.2", target)
+        # same major, next minor, still allowed; older major never allowed either
+        lifecycle.check_minor("1.19.2", "1.20.5")
+        with self.assertRaises(StackError):
+            lifecycle.check_minor("2.1.0", "1.20.0")
+
 
 class TestDown(_LifecycleCase):
     def test_down_keeps_volume_and_models_and_marks_stopped(self):
