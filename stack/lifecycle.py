@@ -29,9 +29,9 @@ pointed at the stack now points at nothing, and `remove` says so.
 """
 import os
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from core.config import Config
 
@@ -44,9 +44,11 @@ from .process import Runner
 @dataclass
 class LifeDeps:
     """Everything a lifecycle verb may touch, injected. `runtimes` is the CLI's discovery
-    (not re-run here); `runner` is what `boot_status` reads `systemctl` and `loginctl`
+    (not re-run here); `runner` is what `boot_status` reads `systemctl`/`loginctl`
     through; `status`/`clock`/`sleep` are the readiness probes, defaulted to the real ones
-    so a test swaps them for scripts and a frozen clock."""
+    so a test swaps them for scripts and a frozen clock; `env` is what `up --upgrade`
+    resolves the `QCTX_STACK_IMAGE_*` overrides from (the spec applies them to `--upgrade`
+    too, the same way the install does)."""
     runtimes: list[ContainerRuntime]
     reporter: Reporter
     prompter: Prompter
@@ -56,6 +58,7 @@ class LifeDeps:
     status: Callable[[str], int | None] = health.http_status
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
+    env: Mapping[str, str] = field(default_factory=dict)
 
 
 def status(deps: LifeDeps) -> tuple[dict, int]:
@@ -119,7 +122,7 @@ def up(deps: LifeDeps, *, upgrade: bool = False,
     st = _require_state(deps)
     runtime, provider = runtime_for(st, deps.runtimes)
     if upgrade:
-        resolved = catalog.resolve_images(images or {}, {})
+        resolved = catalog.resolve_images(images or {}, deps.env)
         check_minor(st.qdrant_version, catalog.qdrant_version(resolved["qdrant"]))
     else:
         resolved = dict(st.images)
@@ -128,12 +131,30 @@ def up(deps: LifeDeps, *, upgrade: bool = False,
     if upgrade:
         _compose(deps, runtime, provider, st.project, file, "pull", timeout=1800.0, stream=True)
     _compose(deps, runtime, provider, st.project, file, "up", "-d", timeout=600.0)
+    # A readiness wrapper records which service first answered 200, so a failure
+    # can show the log tail of exactly the ones that did NOT come up (the
+    # installer's own failure path shows the same evidence).
+    targets = health.endpoints(st.ports)
+    ready: dict[str, float] = {}
+    by_url = {url: name for name, url in targets.items()}
+
+    def status(url: str) -> int | None:
+        answer = deps.status(url)
+        if answer == 200:
+            ready.setdefault(by_url[url], deps.clock())
+        return answer
+
     try:
-        health.wait_ready(health.endpoints(st.ports), status=deps.status,
-                          clock=deps.clock, sleep=deps.sleep)
+        health.wait_ready(targets, status=status, clock=deps.clock, sleep=deps.sleep)
     except StackError:
-        raise StackError("the stack is not ready", step="up",
-                         fix="check the runtime's logs for that container") from None
+        for service in catalog.SERVICES:
+            if service not in ready:
+                tail = _log_tail(deps, runtime, provider, st.project, file, service)
+                deps.reporter.info(f"{service}:\n{tail}")
+        raise StackError(
+            "the stack is not ready; the log tail of the services that did not "
+            "come up is above", step="up",
+            fix="fix what the log names, then run qctx stack up again") from None
     st.images = dict(resolved)
     if upgrade:
         st.qdrant_version = catalog.qdrant_version(resolved["qdrant"])
@@ -294,6 +315,17 @@ def _compose(deps: LifeDeps, runtime: ContainerRuntime, provider: Provider,
         detail = out.stderr.strip() or out.stdout.strip() or "(no output)"
         raise StackError(f"compose {' '.join(args)} failed: {detail}", step="lifecycle",
                          fix="check the runtime's logs for that service")
+
+
+def _log_tail(deps: LifeDeps, runtime: ContainerRuntime, provider: Provider,
+              project: str, file: Path, service: str) -> str:
+    """The last 50 lines of one service: the evidence a failed `up` shows (the same
+    evidence the installer's failed start shows). A container that never started has
+    no log, and a `logs` that itself fails must not mask the readiness error, so the
+    failure is read as "(no log)", not raised."""
+    out = runtime.compose(provider, project, file, "logs", "--tail", "50", service,
+                          timeout=60.0)
+    return out.stdout.strip() or out.stderr.strip() or "(no log)"
 
 
 def _delete_files(deps: LifeDeps, purge_models: bool) -> list[str]:

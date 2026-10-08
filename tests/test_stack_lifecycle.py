@@ -69,10 +69,13 @@ def make_runtime(name="podman", provider_name="podman-compose",
 
 
 def make_deps(stack_dir: Path, *, state_obj=None, runtimes=None, status_fn=None,
-              config=None, runner=None, prompter=None, reporter=None):
+              config=None, runner=None, prompter=None, reporter=None, clock=None,
+              env=None):
     """A `LifeDeps` over a temp stack directory. The state is written with the real
     `state.save` when given, and the probes default to the all-200 http, a frozen clock
-    and a no-op sleep, so `wait_ready` passes in one round without touching the network."""
+    and a no-op sleep, so `wait_ready` passes in one round without touching the network.
+    Pass `clock` for a ticking one (a readiness-failure test needs the deadline to pass),
+    and `env` for the `QCTX_STACK_IMAGE_*` overrides `up --upgrade` resolves from."""
     if state_obj is not None:
         state.save(stack_dir, state_obj)
         # A provisioned stack has both files; render the real compose so the
@@ -102,7 +105,9 @@ def make_deps(stack_dir: Path, *, state_obj=None, runtimes=None, status_fn=None,
     return lifecycle.LifeDeps(
         runtimes=runtimes, reporter=reporter, prompter=prompter, config=config,
         stack_dir=stack_dir, runner=runner, status=status_fn,
-        clock=lambda: 0.0, sleep=lambda seconds: None)
+        clock=clock if clock is not None else (lambda: 0.0),
+        sleep=lambda seconds: None,
+        env=env if env is not None else {})
 
 
 def compose_args_of(runtime) -> list:
@@ -257,6 +262,39 @@ class TestStatus(_LifecycleCase):
 
 
 class TestUp(_LifecycleCase):
+    def test_up_upgrade_reads_the_image_env_overrides(self):
+        # spec: the QCTX_STACK_IMAGE_* overrides apply to `qctx install --stack`
+        # AND to `qctx stack up --upgrade` (the --image flags, or the env vars;
+        # whatever is used is recorded). `up --upgrade` used to resolve with an
+        # EMPTY env, so an exported override was ignored exactly when it was
+        # documented to apply -- and a recorded override was silently replaced
+        # by the catalogue pin (the status pins the user is nudged to --upgrade).
+        st = make_state(images={"llama": "custom-llama:1", "qdrant": "custom-qdrant:1"})
+        runtime = make_runtime()
+        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime],
+                         status_fn=lambda url: 200,
+                         env={"QCTX_STACK_IMAGE_LLAMA": "example.org/llama:env"})
+        result = lifecycle.up(deps, upgrade=True)
+        self.assertEqual(result.images["llama"], "example.org/llama:env")
+        self.assertEqual(result.images["qdrant"], catalog.QDRANT_IMAGE,
+                         "a role with no override takes the catalogue pin")
+        self.assertEqual(state.load(self.stack).images["llama"],
+                         "example.org/llama:env",
+                         "what was used is recorded in stack.json")
+
+    def test_up_without_upgrade_ignores_the_env_overrides(self):
+        # The mirror of the test above, from the other side: without --upgrade,
+        # `up` repeats EXACTLY what stack.json holds -- an env override that
+        # appeared after the install does not leak into a plain restart.
+        st = make_state(images={"llama": "custom-llama:1", "qdrant": "custom-qdrant:1"})
+        runtime = make_runtime()
+        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime],
+                         status_fn=lambda url: 200,
+                         env={"QCTX_STACK_IMAGE_LLAMA": "example.org/llama:env"})
+        result = lifecycle.up(deps)
+        self.assertEqual(result.images, {"llama": "custom-llama:1",
+                                         "qdrant": "custom-qdrant:1"})
+
     def test_up_without_upgrade_repeats_the_recorded_images(self):
         recorded = {"llama": "custom-llama:1", "qdrant": "custom-qdrant:1"}
         st = make_state(images=recorded)
@@ -298,6 +336,30 @@ class TestMinorGuard(_LifecycleCase):
 
 
 class TestDown(_LifecycleCase):
+    def test_up_failure_shows_the_log_tail_of_the_services_that_did_not_come_up(self):
+        # spec: a readiness failure shows the tail of the service's log
+        # (`compose logs --tail 50 <service>`), not a generic "check the logs".
+        # The clock passes the deadline before the first poll, so `wait_ready`
+        # raises with every service still pending, and `up` must fetch and
+        # report the log tail of the first not-ready service before it raises.
+        st = make_state()
+        log = "qdrant: storage is full, cannot write the segment"
+        runtime = make_runtime()
+        runtime.fail = {"logs": Completed(0, log)}
+        ticks = iter([0.0, 601.0])
+        deps = make_deps(self.stack, state_obj=st, runtimes=[runtime],
+                         status_fn=lambda url: 503,
+                         clock=lambda: next(ticks, 601.0))
+        with self.assertRaises(StackError) as ctx:
+            lifecycle.up(deps)
+        self.assertEqual(ctx.exception.step, "up")
+        logs_calls = [args for args in compose_args_of(runtime)
+                      if args and args[0] == "logs"]
+        self.assertIn(("logs", "--tail", "50", "qdrant"), logs_calls,
+                      "the not-ready service's log tail must be fetched")
+        self.assertIn("qctx stack up", ctx.exception.fix,
+                      "the fix must name the command that retries the start")
+
     def test_down_keeps_volume_and_models_and_marks_stopped(self):
         st = make_state()
         models = self.stack / state.MODELS_DIR

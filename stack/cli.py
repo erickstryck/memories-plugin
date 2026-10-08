@@ -169,7 +169,8 @@ def _life_deps(args, ask):
     return lifecycle.LifeDeps(
         runtimes=_discover(), reporter=TerminalReporter(),
         prompter=_prompter(ask), config=CoreConfigSink(),
-        stack_dir=state.stack_dir(os.environ), runner=process.SubprocessRunner())
+        stack_dir=state.stack_dir(os.environ), runner=process.SubprocessRunner(),
+        env=dict(os.environ))
 
 
 def _cmd_status(args) -> int:
