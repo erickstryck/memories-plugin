@@ -271,7 +271,14 @@ class TheRealRuntime(unittest.TestCase):
                 self.assertEqual(_status_code(workdir), 0,
                                  "the stack must be healthy again after up")
                 data = json.loads(_config_path(workdir).read_text())
-                ports = _it_ports()
+                # The ports the stack RECORDED, not the ones it was asked for:
+                # `choose_ports` moves a busy port (a previous leg's teardown
+                # can still hold the it ports for a few seconds), and the config
+                # must name where the stack actually listens.
+                import stack.state as state
+                ports = state.load(workdir / "stack").ports
+                self.assertEqual(len(set(ports.values())), 3,
+                                 f"three services, three ports: {ports}")
                 self.assertEqual(data["api_base_url"],
                                  f"http://127.0.0.1:{ports['embed']}/v1")
                 self.assertEqual(data["rerank_url"],
