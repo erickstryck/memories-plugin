@@ -102,11 +102,6 @@ def _seed_models(dest: Path) -> None:
             if candidate.exists():
                 source = candidate
         if source is None:
-            # The last place a finished install on this machine left them.
-            source = Path.home() / ".hermes" / "cache" / "scratch" \
-                / "stack-work" / "models" / model.filename
-            source = source if source.exists() else None
-        if source is None:
             raise AssertionError(
                 f"no local copy of the pinned model {model.filename}: set "
                 "QCTX_STACK_IT_MODELS to a directory holding it (the models are "
@@ -115,8 +110,14 @@ def _seed_models(dest: Path) -> None:
             os.link(source, target)
         except OSError:
             shutil.copy2(source, target)
-        blob = target.read_bytes()
-        if hashlib.sha256(blob).hexdigest() != model.sha256 or len(blob) != model.size:
+        # hash in chunks: the file is ~438 MiB and must not be read whole.
+        digest = hashlib.sha256()
+        size = 0
+        with open(target, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        if digest.hexdigest() != model.sha256 or size != model.size:
             target.unlink(missing_ok=True)
             raise AssertionError(f"seeded {model.filename} is not the pinned file")
 
@@ -227,15 +228,17 @@ def _measure_rerank_s(workdir: Path) -> float:
 
 
 def _engine_containers() -> list:
+    """The engine's containers, through the runtime under test (the check must
+    use the same engine the leg provisioned on, not an assumed one)."""
     import subprocess
-    out = subprocess.run(["podman", "ps", "-a", "--format", "{{.Names}}"],
+    out = subprocess.run([_it_runtime(), "ps", "-a", "--format", "{{.Names}}"],
                          capture_output=True, text=True, timeout=60)
     return [n for n in out.stdout.split() if n]
 
 
 def _engine_volumes() -> list:
     import subprocess
-    out = subprocess.run(["podman", "volume", "ls", "--format", "{{.Name}}"],
+    out = subprocess.run([_it_runtime(), "volume", "ls", "--format", "{{.Name}}"],
                          capture_output=True, text=True, timeout=60)
     return [n for n in out.stdout.split() if n]
 
