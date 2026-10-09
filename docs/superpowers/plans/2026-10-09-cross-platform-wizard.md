@@ -206,7 +206,7 @@ git commit -F <msg>   # feat(stack): the cpu profile runs on windows (official i
     runtime != docker -> `RUNTIME` com `needs="docker"`;
     senão `READY` (a presença da GPU é provada no passo de prova, não aqui);
   - `service_patch(runtime, gpu_index) -> {"devices": ["/dev/dxg"],
-    "volumes": ["/usr/lib/wsl:/usr/lib/wsl"],
+    "volumes": ["/usr/lib/wsl:/usr/lib/wsl:ro"],
     "environment": ["LD_LIBRARY_PATH=/usr/lib/wsl/lib"]}`;
   - `devices_seen(output) -> [d for d in parse_devices(output)
     if "Microsoft Direct3D12" in d.name]` (o adapter real; `llvmpipe` não conta).
@@ -424,7 +424,7 @@ git commit -F <msg>   # feat(stack): the dzn numerical check (similarity and rer
 
 - [ ] **Step 2: conferir `windows-docker-dzn.yaml`** - o service `embed` (e
   `rerank`) carrega `image: ghcr.io/erickstryck/llama-dzn:b11382-mesa26.0.3`,
-  `devices: [/dev/dxg]`, `volumes: [/usr/lib/wsl:/usr/lib/wsl]`,
+  `devices: [/dev/dxg]`, `volumes: [/usr/lib/wsl:/usr/lib/wsl:ro]`,
   `environment: [LD_LIBRARY_PATH=/usr/lib/wsl/lib]`, e a porta
   `127.0.0.1:<p>:8080`. `windows-docker-cpu.yaml` é idêntico a
   `linux-docker-cpu.yaml` (imagem oficial, sem device); `windows-podman-cpu.yaml`
