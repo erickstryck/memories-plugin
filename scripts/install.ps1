@@ -204,10 +204,9 @@ function Resolve-Command {
 # ===========================================================================
 if ($MyInvocation.InvocationName -ne '.') {
 
-  # Resolve the clone root from this file's location (scripts/..), so install.sh
-  # is always the one from the same copy the user cloned.
+  # Resolve install.sh from this file's own directory (scripts/), so it is
+  # always the one from the same copy the user cloned.
   $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-  $root      = Split-Path -Parent $scriptDir
   $installSh = Join-Path $scriptDir 'install.sh'
 
   # --- Verification 1: is WSL2 even present? (where.exe wsl) ---------------
