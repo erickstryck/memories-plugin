@@ -742,6 +742,41 @@ class TestProvision(ProvisionTestCase):
         infos = [t for m, t in reporter.calls if m == "info"]
         self.assertTrue(any("podman-restart.service" in t for t in infos))
 
+    def test_the_final_summary_precedes_the_reboot_hint(self):
+        # Step 12 prints the summary block (the running headline, the three
+        # URLs, the api-key) BEFORE the reboot hint, and the headline
+        # carries the runtime and the backend it runs with.
+        facts = facts_for()
+        podman = make_runtime("podman", podman_engine(), argv=("podman", "compose"))
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(yes=True),
+                          runtimes=[podman], facts=facts,
+                          prompter=ScriptedPrompter([]), reporter=reporter,
+                          config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        calls = [t for m, t in reporter.calls]
+        i_headline = next(i for i, t in enumerate(calls)
+                          if t == "stack: running (podman, cpu)")
+        # the summary lines start with their label (the config diff lines of
+        # step 11 start with "config:", so the labels anchor the BLOCK)
+        i_qdrant = next(i for i, t in enumerate(calls)
+                        if t.startswith("qdrant") and "http://127.0.0.1:6333" in t)
+        i_embed = next(i for i, t in enumerate(calls)
+                       if t.startswith("embed") and "http://127.0.0.1:8003/v1" in t)
+        i_rerank = next(i for i, t in enumerate(calls)
+                        if t.startswith("rerank") and "http://127.0.0.1:8004/v1/rerank" in t)
+        i_reboot = next(i for i, t in enumerate(calls)
+                        if "podman-restart.service" in t)
+        for i in (i_headline, i_qdrant, i_embed, i_rerank):
+            self.assertLess(i, i_reboot)
+        # the headline is the `ok` line (the 'running' fact), the rest `info`
+        self.assertEqual(dict((t, m) for m, t in reporter.calls)[
+            "stack: running (podman, cpu)"], "ok")
+        # the disk's config has no key, so the block carries the default
+        self.assertTrue(any(t.startswith("api-key")
+                            and "(nenhuma: Qdrant local sem chave)" in t
+                            for t in calls))
+
     def test_happy_path_each_gpu_profile(self):
         cases = {
             "amd": (facts_for(gpus=[("amd", "0000:44:00.0")], nodes=("renderD128",)),

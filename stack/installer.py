@@ -36,7 +36,7 @@ from core.embedding import Embedder
 from core.errors import CoreError
 from core.reranking import Reranker
 
-from . import StackError, catalog, compose, fetch, facts, health, process, state, verify
+from . import StackError, catalog, compose, fetch, facts, health, process, state, summary, verify
 from .backends import (BACKENDS, MISSING, Availability, Option, READY,
                        default_option, runtime_label)
 from .engine import ContainerRuntime, EngineInfo, log_tail
@@ -307,7 +307,7 @@ def provision(request: Request, deps: Deps) -> "state.StackState | None":
     _verify_numerical(ctx, plan)
     _calibrate(ctx, plan)
     _save_config(ctx, plan, dim)
-    return _finish(ctx)
+    return _finish(ctx, plan)
 
 
 def choose_ports(wanted: dict[str, int],
@@ -1152,10 +1152,19 @@ def _save_config(ctx: _Ctx, plan: compose.Plan, dim: int | None) -> None:
                            f"remove its export from your shell rc")
 
 
-def _finish(ctx: _Ctx) -> "state.StackState":
+def _finish(ctx: _Ctx, plan: compose.Plan) -> "state.StackState":
     """Step 12: the state in `running`, the probe files gone (their job is
-    done and they are not part of the stack), and how the stack comes back
-    after a reboot on this runtime."""
+    done and they are not part of the stack), the final summary (what was
+    done, the URLs, the api-key), and how the stack comes back after a
+    reboot on this runtime.
+
+    The summary is rendered from the DISK's config re-read through
+    `deps.config.current_file()` — not from what this process's memory
+    holds: a declined config write leaves the file untouched, and the
+    block must show what the file says (the URLs are the plan's, the
+    stack is running on them either way). The first line goes to the
+    reporter as `ok` (the 'running' fact), the rest as `info`, and the
+    reboot hint follows the block, unchanged."""
     deps = ctx.deps
     saved = state.load(deps.stack_dir)
     if saved is None:
@@ -1173,7 +1182,10 @@ def _finish(ctx: _Ctx) -> "state.StackState":
     for file in probe.iterdir():
         file.unlink()
     probe.rmdir()
-    deps.reporter.ok("stack.json: running")
+    lines = summary.render_summary(deps.config.current_file(), plan)
+    deps.reporter.ok(lines[0])
+    for line in lines[1:]:
+        deps.reporter.info(line)
     for line in reboot_hint(ctx.runtime.name, ctx.platform):
         deps.reporter.info(line)
     return saved
