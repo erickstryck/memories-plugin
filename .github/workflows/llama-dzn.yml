@@ -1,0 +1,166 @@
+# The llama-dzn image: the official llama.cpp server-vulkan build plus Mesa's
+# dzn Vulkan driver (Vulkan over D3D12), the only GPU path inside WSL2
+# (spec-mestra, "Imagem propria e GPU no Windows (fase 3)" -> "Build e
+# publicacao"). It builds images/llama-dzn/Dockerfile — the same context the
+# installer's local-build fallback uses (DZN_BUILD_CONTEXT in
+# stack/installer.py).
+#
+# The tag this workflow publishes is pinned in stack/catalog.py
+# (LLAMA_DZN_IMAGE): tag-only until the first publish, then step 3 of the
+# BUMP PROCEDURE there pins it as tag@digest, copying the DIGEST THIS RUN
+# publishes (the "Record the published reference" step prints it in the run
+# summary). This workflow never edits the catalogue.
+#
+# The GHCR package starts PRIVATE (a new package is private by default).
+# Making it public is a ONE-TIME MANUAL step (the package's visibility in
+# the GHCR settings). Until it is public, anonymous pulls fail and the
+# installer's local-build fallback covers the gap — so this workflow must
+# not assume the package is public.
+#
+# Triggers:
+# - pull_request touching the image definition: build ONLY, no push (a PR to
+#   the image is checked without publishing), using the Dockerfile as
+#   committed (its own pinned defaults).
+# - workflow_dispatch: build + publish, with the three bump knobs (the
+#   llama.cpp build, the base digest, the Mesa version) defaulting to the
+#   current values, and a provenance attestation on the published image.
+#   The knobs are fed to the Dockerfile's ARGs (LLAMA_BASE, MESA_URL); the
+#   MESA_SHA256 stays the committed pin, so bumping the Mesa version without
+#   re-measuring and committing its sha256 FAILS the build (a wrong-hash
+#   build is a supply-chain defect and must not ship).
+#
+# amd64 ONLY, like the published pin.
+
+name: llama-dzn
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_build:
+        description: The llama.cpp build the tag names (the base image's build)
+        required: false
+        default: 'b11382'
+      base_digest:
+        description: The base image reference (the official llama.cpp, digest-pinned)
+        required: false
+        default: 'ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9'
+      mesa_version:
+        description: The Mesa version the dzn is compiled from and the tag names (its tarball's sha256 is the committed pin in the Dockerfile — bump it together)
+        required: false
+        default: '26.0.3'
+  pull_request:
+    paths:
+      - 'images/llama-dzn/Dockerfile'
+      - '.github/workflows/llama-dzn.yml'
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: build (linux/amd64)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Resolve the tag
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # The published tag: the llama.cpp build, then the Mesa version
+            # (defaults give b11382-mesa26.0.3, the catalogue's pin).
+            echo "tag=${{ inputs.llama_build }}-mesa${{ inputs.mesa_version }}" >> "$GITHUB_OUTPUT"
+          else
+            # The PR path is build-only: a local tag that is never pushed.
+            echo "tag=pr-${GITHUB_EVENT_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare the build args (publish path only)
+        if: github.event_name == 'workflow_dispatch'
+        id: args
+        run: |
+          # The bump knobs, fed to the Dockerfile's ARGs as a newline-
+          # separated build-args list. A GITHUB_OUTPUT heredoc produces real
+          # newlines (the Actions expression `format()` would not). On the PR
+          # path this step is skipped, so build-args is empty and the
+          # Dockerfile's own committed defaults are used.
+          {
+            echo 'build_args<<DZN_BUILD_ARGS'
+            echo "LLAMA_BASE=${{ inputs.base_digest }}"
+            echo "MESA_URL=https://mesa3d.org/archive/mesa-${{ inputs.mesa_version }}.tar.xz"
+            echo 'DZN_BUILD_ARGS'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The publish path only. The package starts private (see the header);
+      # the login is with GITHUB_TOKEN, which the repository can always use
+      # to push its own packages regardless of visibility.
+      - name: Log in to GHCR (publish path only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the dzn image (and push on the publish path)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: images/llama-dzn
+          file: images/llama-dzn/Dockerfile
+          # amd64 only: the official pin and the dzn target are amd64.
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'workflow_dispatch' }}
+          tags: ghcr.io/erickstryck/llama-dzn:${{ steps.ref.outputs.tag }}
+          # The publish path feeds the dispatch inputs into the Dockerfile's
+          # ARGs; the PR path passes nothing, so the Dockerfile as committed
+          # — with its own pinned defaults — is what gets checked.
+          build-args: ${{ steps.args.outputs.build_args }}
+          cache-from: type=gha
+          # Fork PRs run with a read-only token and cannot write the GHA
+          # cache; only the publish path stores it.
+          cache-to: ${{ github.event_name == 'workflow_dispatch' && 'type=gha,mode=max' || '' }}
+
+      # The operator copies this digest into the catalogue: step 3 of the
+      # BUMP PROCEDURE in stack/catalog.py pins LLAMA_DZN_IMAGE as
+      # tag@digest. The digest is the one of the pushed manifest.
+      - name: Record the published reference (for the BUMP PROCEDURE)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          ref="ghcr.io/erickstryck/llama-dzn:${{ steps.ref.outputs.tag }}@${{ steps.build.outputs.digest }}"
+          {
+            echo '## Published image'
+            echo
+            echo "$ref"
+            echo
+            echo 'Pin it as tag@digest in LLAMA_DZN_IMAGE (stack/catalog.py,'
+            echo 'step 3 of the BUMP PROCEDURE). The package stays private'
+            echo 'until the one-time manual visibility change.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  attest:
+    name: attest build provenance
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Attest the published image's build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/erickstryck/llama-dzn:${{ needs.build.outputs.tag }}
+          subject-digest: ${{ needs.build.outputs.digest }}
+          resource-type: container-image
