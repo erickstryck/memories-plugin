@@ -139,7 +139,7 @@ class VendorOfTest(unittest.TestCase):
         self.assertEqual("apple", vendor_of("Virtio-GPU Venus (Apple M2 Pro)"))
         self.assertEqual("apple", vendor_of("Venus (Apple M3)"))
         self.assertIsNone(vendor_of("llvmpipe (LLVM 19.1.7, 256 bits)"))
-        # The dzn device (Windows, phase 3) wraps the adapter's own name: Mesa's
+        # The dzn device (Windows) wraps the adapter's own name: Mesa's
         # src/microsoft/vulkan/dzn_device.c at mesa-26.0.3, line 1071, names it
         # "Microsoft Direct3D12 (%s)" with the adapter's description, and a WSL2
         # container printed `deviceName = Microsoft Direct3D12 (NVIDIA GeForce GTX

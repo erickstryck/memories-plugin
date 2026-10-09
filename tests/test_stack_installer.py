@@ -17,6 +17,7 @@ NVIDIA card nor a Mac, in the same `Vulkan<n>: name (total MiB, free MiB free)`
 shape the parser was written for.
 """
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -1100,6 +1101,136 @@ class TestTheDznLocalBuildFallback(ProvisionTestCase):
                           config=FakeConfigSink(), dzn_reachable=spy)
         self.assertNotIsInstance(result, StackError)
         self.assertEqual(calls, [])
+
+
+class TestTheReachabilityCheckOfThePin(unittest.TestCase):
+    """`dzn_image_reachable` builds the manifest GET from the ref it is given:
+    the ref the BUMP PROCEDURE pins after the first publish is `tag@digest`,
+    and ghcr.io's manifest path takes the digest WITH its `sha256:` prefix
+    (measured 2026-10-09: `sha256:<hex>` -> 200, the combined
+    `tag@sha256:<hex>` -> 404, the bare hex -> 404). Both urllib calls are
+    faked, so the test drives the manifest ref the function builds without a
+    network."""
+
+    #: The measured image: the public ggml-org/llama.cpp b11382 index digest.
+    DIGEST = "431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9"
+
+    @staticmethod
+    def _token_payload():
+        class _FakeFile:
+            status = 200
+            payload = json.dumps({"token": "tok"}).encode()
+
+            def read(self):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        return _FakeFile()
+
+    def _check(self, ref, token=None, manifest_status=None):
+        """`dzn_image_reachable` with the token step faked (a token that
+        answers, unless `token` gives another payload) and the manifest step
+        driven by `manifest_status`, which sees every manifest URL the
+        function builds."""
+        token_file = token if token is not None else self._token_payload()
+
+        def fake_urlopen(request, timeout=None):
+            self.assertTrue(request.full_url.endswith(":pull"))
+            return token_file
+
+        with mock.patch.object(installer, "_registry_manifest_status",
+                               side_effect=manifest_status), \
+                mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            return installer.dzn_image_reachable(ref)
+
+    def test_a_digest_pinned_ref_reads_the_digest_with_its_sha256_prefix(self):
+        # The part AFTER the `@` is the manifest ref: it carries the `sha256:`
+        # prefix, and neither the combined `tag@sha256` (the old parse's
+        # answer, which 404s) nor the bare hex is ever built.
+        seen = []
+
+        def manifest_status(url, _headers):
+            seen.append(url)
+            return 200
+
+        ref = "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382" \
+              f"@sha256:{self.DIGEST}"
+        self.assertTrue(self._check(ref, manifest_status=manifest_status))
+        (url,) = seen
+        self.assertEqual("https://ghcr.io/v2/ggml-org/llama.cpp/manifests/"
+                         f"sha256:{self.DIGEST}", url)
+
+    def test_a_digest_pinned_published_pin_is_reachable_by_the_measured_contract(self):
+        # The fake answers the registry's measured contract (2026-10-09): the
+        # digest with its `sha256:` prefix is pullable (200); the combined
+        # `tag@sha256:<hex>` path and the bare hex are not (404). It answers
+        # BY THE REF IT IS GIVEN, so this pins the ref the function builds:
+        # the old parse read a published pin as unreachable.
+        def manifest_status(url, _headers):
+            return 200 if url.endswith(f"/manifests/sha256:{self.DIGEST}") \
+                else 404
+
+        ref = "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382" \
+              f"@sha256:{self.DIGEST}"
+        self.assertTrue(self._check(ref, manifest_status=manifest_status))
+
+    def test_a_digest_pinned_ref_the_registry_404s_stays_unreachable(self):
+        # The fix must not read every digest-pinned ref as reachable: a digest
+        # the registry answers 404 for (not published) keeps the fallback.
+        seen = []
+
+        def manifest_status(url, _headers):
+            seen.append(url)
+            return 404
+
+        ref = ("ghcr.io/erickstryck/llama-dzn:b11382-mesa26.0.3@sha256:"
+               + "0" * 64)
+        self.assertFalse(self._check(ref, manifest_status=manifest_status))
+        self.assertEqual(
+            "https://ghcr.io/v2/erickstryck/llama-dzn/manifests/"
+            "sha256:" + "0" * 64, seen[0])
+
+    def test_a_tag_only_ref_reads_the_tag(self):
+        seen = []
+
+        def manifest_status(url, _headers):
+            seen.append(url)
+            return 200
+
+        self.assertTrue(self._check(
+            "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382",
+            manifest_status=manifest_status))
+        self.assertEqual("https://ghcr.io/v2/ggml-org/llama.cpp/"
+                         "manifests/server-vulkan-b11382", seen[0])
+
+    def test_no_token_means_unreachable_before_any_manifest_read(self):
+        seen = []
+
+        def manifest_status(url, _headers):
+            seen.append(url)
+            return 200
+
+        class _NoTokenFile:
+            status = 200
+            payload = json.dumps({"token": ""}).encode()
+
+            def read(self):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        self.assertFalse(self._check(
+            "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382",
+            token=_NoTokenFile(), manifest_status=manifest_status))
+        self.assertEqual([], seen)
 
 
 if __name__ == "__main__":

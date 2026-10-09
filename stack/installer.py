@@ -162,8 +162,13 @@ def dzn_image_reachable(ref: str) -> bool:
     1. `GET <host>/token?scope=repository:<owner>/<repo>:pull` -> the JSON
        carries a `token` (a public image needs no login for this; measured
        token len 56);
-    2. `GET <host>/v2/<owner>/<repo>/manifests/<tag>` with
-       `Authorization: Bearer <token>` and the OCI index `Accept` header.
+    2. `GET <host>/v2/<owner>/<repo>/manifests/<manifest-ref>` with
+       `Authorization: Bearer *** and the OCI index `Accept` header, where
+       the manifest ref is the TAG of a tag-only ref and, for a
+       `tag@digest` pin (the BUMP PROCEDURE's shape after the first
+       publish), the digest WITH its `sha256:` prefix — the registry 404s
+       the combined `tag@sha256:<hex>` ref and the bare hex alike (both
+       measured 2026-10-09).
 
     A 200 is reachable; 403 or 404 are not; a network error is not. The raw
     status of step 2 WITHOUT the token is 401 for a public image AND for a
@@ -175,10 +180,21 @@ def dzn_image_reachable(ref: str) -> bool:
     registry, separator, remainder = ref.partition("/")
     if not separator:
         return False
-    parts = remainder.split(":")
-    if len(parts) < 2:
-        return False
-    repository, tag = parts[0], parts[1]
+    repository, digest_separator, digest = remainder.partition("@")
+    if digest_separator:
+        # A digest-pinned ref (`tag@digest`, the BUMP PROCEDURE's shape after
+        # the first publish): the registry's manifest path takes the digest
+        # WITH its `sha256:` prefix — the part after the `@` — never the
+        # combined ref and never the bare hex (both 404, measured 2026-10-09).
+        repository, _separator, _tag = repository.partition(":")
+        if not digest:
+            return False
+        manifest_ref = digest
+    else:
+        repository, tag_separator, tag = repository.partition(":")
+        if not tag_separator or not tag:
+            return False
+        manifest_ref = tag
     host = f"https://{registry}"
     token_url = (f"{host}/token?scope=repository:{urllib.parse.quote(repository)}:pull")
     try:
@@ -189,8 +205,11 @@ def dzn_image_reachable(ref: str) -> bool:
         return False
     if not token:
         return False
+    # The colon of the digest's `sha256:` prefix (and of a tag) is legal in a
+    # URL path: keep it, or the registry reads the ref as `sha256%3A<...>`
+    # (404) where the same ref with its colon answers 200 (measured).
     manifest_url = (f"{host}/v2/{repository}/manifests/"
-                    f"{urllib.parse.quote(tag, safe='')}")
+                    f"{urllib.parse.quote(manifest_ref, safe=':')}")
     status = _registry_manifest_status(
         manifest_url, {"Authorization": f"Bearer {token}", "Accept": _OCI_INDEX_ACCEPT})
     return status == 200
