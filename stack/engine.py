@@ -85,6 +85,22 @@ class ContainerRuntime(Protocol):
     def stats(self, names: list[str]) -> dict[str, int]: ...
 
 
+class ComposeRuntime(Protocol):
+    """The part of `ContainerRuntime` a caller that only drives containers needs:
+    the compose provider and the `compose` command, named by the runtime. The
+    installer wants the whole `ContainerRuntime` (it proves GPUs via `engine`
+    and reads the footprint via `stats`); the lifecycle verbs and the log tail
+    only ever `compose`, so they depend on this narrower protocol instead of
+    receiving methods they will not call (interface segregation). A real
+    `ContainerRuntime` satisfies it structurally, so no construction changes."""
+    name: str
+
+    def compose_provider(self) -> ProviderInfo: ...
+
+    def compose(self, provider: Provider, project: str, file: Path, *args: str,
+                timeout: float, stream: bool = False) -> Completed: ...
+
+
 def socket_alive(path: str | None, timeout: float = 2.0) -> bool:
     """The only socket verdict the code trusts (see `stack.podman`). A connect is the test;
     `podman info`'s `exists` field is not read because it lies when the socket file is gone."""
@@ -138,7 +154,7 @@ def compose_argv(provider: Provider, project: str, file: Path, args: tuple[str, 
     return [*provider.argv, "-p", project, "-f", str(file), *args]
 
 
-def log_tail(runtime: "ContainerRuntime", project: str, file: Path, service: str,
+def log_tail(runtime: "ComposeRuntime", project: str, file: Path, service: str,
              provider: Provider | None = None) -> str:
     """The last 50 lines of one service's log: the evidence a failed start shows,
     in the installer and in `qctx stack up` alike (one copy, so the two cannot

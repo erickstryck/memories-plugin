@@ -36,7 +36,7 @@ from typing import Callable, Mapping
 from core.config import Config
 
 from . import StackError, catalog, compose, health, state, verify
-from .engine import ContainerRuntime, Provider, first_line, log_tail
+from .engine import ComposeRuntime, Provider, first_line, log_tail
 from .installer import ConfigSink, Prompter, Reporter
 from .process import Runner
 
@@ -51,7 +51,7 @@ class LifeDeps:
     from nothing and bring back the ignored-override bug. `status`/`clock`/`sleep`
     are the readiness probes, defaulted to the real ones so a test swaps them for
     scripts and a frozen clock."""
-    runtimes: list[ContainerRuntime]
+    runtimes: list[ComposeRuntime]
     reporter: Reporter
     prompter: Prompter
     config: ConfigSink
@@ -93,8 +93,7 @@ def status(deps: LifeDeps) -> tuple[dict, int]:
                        "status": deps.status(endpoints[name])}
                 for name in catalog.SERVICES}
     healthy = all(s["status"] == 200 for s in services.values())
-    outdated = [role for role in catalog.IMAGES
-                if st.images.get(role) != catalog.IMAGES[role]]
+    outdated = catalog.outdated_pins(st.images)
     return {
         "managed": True,
         "phase": st.phase,
@@ -255,7 +254,7 @@ def check_minor(installed: str, target: str) -> None:
 
 
 def runtime_for(st: state.StackState,
-                runtimes: list[ContainerRuntime]) -> tuple[ContainerRuntime, Provider]:
+                runtimes: list[ComposeRuntime]) -> tuple[ComposeRuntime, Provider]:
     """The runtime the STATE recorded, and the compose provider THAT runtime now
     answers with.
 
@@ -323,7 +322,7 @@ def _safe_load(directory: Path) -> state.StackState | None:
         return None
 
 
-def _compose(deps: LifeDeps, runtime: ContainerRuntime, provider: Provider,
+def _compose(deps: LifeDeps, runtime: ComposeRuntime, provider: Provider,
              project: str, file: Path, *args: str, timeout: float,
              stream: bool = False) -> None:
     """One compose command through the recorded runtime and provider. A failure names the
