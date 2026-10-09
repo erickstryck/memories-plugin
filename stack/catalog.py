@@ -118,6 +118,16 @@ def server_command(role: str, device: str | None) -> list[str]:
             "-dev", device or "none"]
 
 
+def outdated_pins(images: Mapping[str, str]) -> list[str]:
+    """The catalogue roles whose pin moved past the recorded one, in the
+    catalogue's order. The single owner of the comparison, so the status, the
+    install step and the install report cannot drift apart (the three copies
+    that used to live in `lifecycle.status`, `cli._step_managed` and
+    `cli.check_section`). An empty recording counts every role as moved: a
+    state written before the catalogue carried images is out of date."""
+    return [role for role in IMAGES if images.get(role) != IMAGES[role]]
+
+
 def qdrant_version(ref: str) -> str:
     """The `x.y.z` off a Qdrant reference's tag, for the minor guard on `up --upgrade`.
 

@@ -328,8 +328,6 @@ def _step_managed(st, stack_dir, args, report, budgets, ask, installer, facts) -
     `stopped` stack is known-dead and offers the restart without a probe; the
     interrupted `compose` phase resumes by provisioning again."""
     import stack.state as state
-    outdated = [role for role in catalog.IMAGES
-                if st.images.get(role) != catalog.IMAGES[role]]
     if st.phase == state.PHASE_STOPPED:
         print("  ..    the stack is stopped; restart it with: qctx stack up")
         if args.yes or _confirm(ask, "restart the stack now? [y/N] "):
@@ -352,9 +350,6 @@ def _step_managed(st, stack_dir, args, report, budgets, ask, installer, facts) -
         print("  ..    the last install was interrupted; it resumes by provisioning again")
         _provision(args, stack_dir, budgets, ask, installer, facts)
         return
-    if outdated:
-        print("  ..    the catalogue has newer pins for: " + ", ".join(outdated) +
-              "; upgrade with: qctx stack up --upgrade")
 
 
 def _status_of(st, stack_dir):
@@ -445,8 +440,7 @@ def check_section(env=os.environ) -> dict:
     endpoints = health.endpoints(st.ports)
     services = {name: health.http_status(url) for name, url in endpoints.items()}
     healthy = all(answer == 200 for answer in services.values())
-    outdated = [role for role in catalog.IMAGES
-                if st.images.get(role) != catalog.IMAGES[role]]
+    outdated = catalog.outdated_pins(st.images)
     return {
         "managed": True,
         "phase": st.phase,
