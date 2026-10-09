@@ -224,7 +224,7 @@ def add_install_flags(parser) -> None:
     """The three flags the `qctx install` step reads: the profile, the runtime and the
     image overrides. `--image` appends, so several may be given."""
     parser.add_argument("--stack", choices=("auto", "cpu", "amd", "intel", "nvidia",
-                                            "apple"), default=None,
+                                            "apple", "dzn"), default=None,
                         help="stand up the local stack with this profile (auto picks the "
                              "best one the host serves)")
     parser.add_argument("--runtime", choices=("docker", "podman"), default=None,

@@ -511,10 +511,10 @@ class TestMenu(ProvisionTestCase):
         # per proven GPU), so a two-GPU profile still shows ONE line here.
         from stack.backends import Availability, READY
         availability = {b: Availability(READY) for b in ("cpu", "amd", "intel",
-                                                          "nvidia", "apple")}
+                                                          "nvidia", "apple", "dzn")}
         options = installer.build_options(availability)
         self.assertEqual([o.backend for o in options],
-                         ["cpu", "amd", "intel", "nvidia", "apple"],
+                         ["cpu", "amd", "intel", "nvidia", "apple", "dzn"],
                          "catalogue order, cpu first, one line each")
         self.assertTrue(all(o.device is None for o in options),
                         "no device before _prove")
