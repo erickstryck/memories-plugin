@@ -214,7 +214,7 @@ faltar, oferecer o comando exato para rodar:
 | host | como se sabe que está instalado | o que o wizard oferece rodar |
 |---|---|---|
 | claude-code | `mnemosine@mnemosine` em `installed_plugins.json` | `claude plugin marketplace add …` + `claude plugin install …@…` |
-| hermes | `$HERMES_HOME/plugins/mnemosine` existe (dir ou symlink) e `hermes config get memory.provider` responde `memories` | `hermes plugins install … --enable --force` + `hermes config set memory.provider mnemosine` |
+| hermes | `$HERMES_HOME/plugins/mnemosine` existe (dir ou symlink) e `hermes config get memory.provider` responde `mnemosine` | `hermes plugins install … --enable --force` + `hermes config set memory.provider mnemosine` |
 
 Duas coisas que o wizard **explica antes de perguntar**, porque as duas são decisão do
 usuário e não detalhe:
@@ -222,7 +222,7 @@ usuário e não detalhe:
 - o `--force` do hermes existe porque o scanner classifica esta árvore como `caution` — ela
   traz dois scripts que editam configuração do host, que é o trabalho declarado dos
   cutovers. O wizard mostra esse motivo e o comando; não esconde o `--force` no meio.
-- apontar `memory.provider` para `memories` **substitui** o provedor externo que estiver
+- apontar `memory.provider` para `mnemosine` **substitui** o provedor externo que estiver
   ali, porque o hermes ativa exatamente um. O wizard mostra qual é o valor atual antes de
   perguntar.
 

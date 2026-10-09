@@ -1166,16 +1166,16 @@ Expected: `FAILED` com abspath, `OK` com realpath
 ```bash
 H=~/.hermes/hermes-agent
 LINK=$(mktemp -d)/plugins; mkdir -p "$LINK"
-ln -s ~/dev/mnemosine/hosts/hermes "$LINK/memories"
+ln -s ~/dev/mnemosine/hosts/hermes "$LINK/mnemosine"
 HERMES_HOME=$(dirname "$LINK") python3 -c "
 import sys; sys.path.insert(0,'$H')
 from plugins.memory import discover_memory_providers
 found = {n: (d, ok) for n, d, ok in discover_memory_providers()}
-print('  memories descoberto?', 'memories' in found)
-print('  ', found.get('memories'))
+print('  mnemosine descoberto?', 'mnemosine' in found)
+print('  ', found.get('mnemosine'))
 "
 ```
-Expected: `memories descoberto? True`
+Expected: `mnemosine descoberto? True`
 
 - [ ] **Step 8: Commit**
 
@@ -2408,7 +2408,7 @@ say ""
 say "=== now ==="
 say "  1. Close every hermes session and start a NEW one from a fresh terminal."
 say "  2. Confirm the provider is the new one:"
-say "       hermes memory setup   # 'memories' should be listed and selected"
+say "       hermes memory setup   # 'mnemosine' should be listed and selected"
 say "  3. The old points remain reachable read-only:"
 say "       qctx memory search-collections \"<topic>\" --collections hermes_memory"
 say "  4. To go back: restore $CONFIG.bak-$STAMP and remove $LINK."
