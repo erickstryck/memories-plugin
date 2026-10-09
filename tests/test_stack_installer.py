@@ -373,18 +373,40 @@ class TestRuntimeAndPlatform(ProvisionTestCase):
         self.assertIn("apple runs on Podman only", str(err))
         self.assertNotIn("only only", str(err))  # the label already carries it
 
-    def test_windows_is_refused_with_the_readme_path(self):
+    def test_wsl2_is_the_windows_platform_and_not_refused(self):
         # WSL is read from the kernel (the `wsl` fact here stands for the
-        # `microsoft` in osrelease): the platform is windows and the step is
-        # not offered in phase 1, pointing at the README's manual path.
+        # `microsoft` in osrelease): `platform_of` classifies it as windows,
+        # and step 2 ACCEPTS that -- the refusal of the phase-1 plan is gone,
+        # with it the pointer at the README's manual path. The flow dies only
+        # later, where the profile is not READY yet (Task 2 makes `cpu`
+        # READY on windows), still naming the platform.
         facts = facts_for(wsl=True)
         docker = make_runtime("docker", docker_engine())
-        err = run_case(self.tmp, request=installer.Request(yes=True),
+        err = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
                        runtimes=[docker], facts=facts, prompter=ScriptedPrompter([]),
                        reporter=RecordingReporter(), config=FakeConfigSink())
         self.assertIsInstance(err, StackError)
-        self.assertEqual(err.step, "platform")
-        self.assertIn("Local models", str(err))
+        self.assertNotEqual(err.step, "platform",
+                            "windows is no longer refused by step 2")
+        self.assertNotIn("Local models", str(err),
+                         "no pointer at the manual path for a windows platform")
+
+    def test_wsl2_with_no_runtime_aborts_at_the_runtime_step(self):
+        # WSL2, no runtime answering (Docker Desktop off, or WSL integration
+        # unchecked, or podman absent): the abort is step 1's -- the runtime
+        # one -- not the platform refusal (which native Windows gets from the
+        # CLI's one-line gate and never reaches the installer). The existing
+        # refusal names the install.
+        facts = facts_for(wsl=True)
+        err = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                       runtimes=[], facts=facts, prompter=ScriptedPrompter([]),
+                       reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertIsInstance(err, StackError)
+        self.assertEqual(err.step, "runtime")
+        self.assertTrue(err.fix, "no runtime must still name the install")
+        self.assertIn("install", err.fix.lower())
+        self.assertNotIn("Local models", str(err),
+                         "the abort is about the runtime, not the manual path")
 
     def test_a_dead_podman_socket_uses_podman_compose_and_records_it(self):
         # M3: with the API socket dead, `podman compose` (which runs

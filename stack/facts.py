@@ -336,3 +336,16 @@ def is_windows_host(probe: Probe) -> bool:
     it answers the same question with the same two reads (`/etc/os-release` names no
     WSL, so the `/proc` kernel release is the only WSL source)."""
     return probe.system().strip().lower() == "windows" or _wsl(probe)
+
+
+def is_native_windows(probe: Probe) -> bool:
+    """Native Windows (no WSL): the system name says Windows, whatever the kernel
+    says. This is the gate the one-line `install_step` refusal runs on (cross-platform
+    wizard plan, Task 1): on a bare Windows the wizard runs only through python, so
+    there is no bash, no container runtime and no stack path, and the one line pointing
+    at the README's manual path is its whole answer. WSL2 is NOT native -- its distro
+    reports the system name Linux -- so it is False here and is classified instead by
+    `platform_of` (and by the runtime discovery, which decides whether WSL2 has an
+    answering runtime at all). Like `is_windows_host`, it is cheap: one read, no
+    hardware probe."""
+    return probe.system().strip().lower() == "windows"

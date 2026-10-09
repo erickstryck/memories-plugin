@@ -269,11 +269,14 @@ def install_step(args, report: dict, *, budgets: list,
     import stack.installer as installer
     import stack.state as state
 
-    # The plan's first branch: on Windows (WSL included) the step is not offered in
-    # phase 1 -- it says the one line and returns. The gate is cheap (host system +
-    # kernel release only, no hardware probe) so it runs on every call, even the ones
-    # that would end in a no-op.
-    if facts.is_windows_host(facts.Probe()):
+    # The plan's first branch, now native-only: on bare Windows (the system name says
+    # Windows, WSL or not) the step is not offered -- it says the one line and returns.
+    # WSL2 reports the system name Linux, so it falls through here: it proceeds to the
+    # platform and runtime steps, and only a WSL2 with NO answering runtime dies, in the
+    # `step="runtime"` abort of `installer._choose_runtime` (cross-platform wizard plan,
+    # Task 1). The gate is cheap (the system name only, no hardware probe), so it runs on
+    # every call, even the ones that would end in a no-op.
+    if facts.is_native_windows(facts.Probe()):
         _windows_line()
         return
 
@@ -379,10 +382,13 @@ def _restart(args, stack_dir, ask) -> None:
 
 
 def _windows_line() -> None:
-    """The one line and return the plan's first `install_step` branch requires on Windows
-    (WSL included): phase 1 does not offer the step there, so it points at the README's
-    manual path instead of offering and dying in `installer._check_platform` (review
-    round R7, item 2)."""
+    """The one line and return the plan's first `install_step` branch requires on native
+    Windows: there the wizard runs only through python, so phase 1 points at the
+    README's manual path instead of offering and dying in the runtime discovery (review
+    round R7, item 2). It serves native Windows ONLY: a WSL2 with an answering runtime
+    passes the gate and proceeds to the platform and runtime steps, and a WSL2 with no
+    runtime hits the existing `step="runtime"` abort in `installer._choose_runtime`
+    (cross-platform wizard plan, Task 1)."""
     print("  ..    the local stack is not available on this platform in this version "
           "(windows, incl. wsl); set it up by hand: see '## Local models' in the README")
 

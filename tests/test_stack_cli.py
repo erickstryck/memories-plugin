@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO))
 CLI = REPO / "cli" / "qctx.py"
 
 from tests.isolation import hermetic_env  # noqa: E402
+from stack import StackError  # noqa: E402
 
 
 def _exec(path: Path, script: str) -> Path:
@@ -422,7 +423,7 @@ class TheInstallStep(unittest.TestCase):
         with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
                 mock.patch.object(stack_cli, "_discover",
                                   return_value=[SimpleNamespace(name="docker")]), \
-                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
                 mock.patch.object(lifecycle, "up", fake_up), \
                 mock.patch.object(installer, "provision", fake_provision), \
                 redirect_stdout(io.StringIO()):
@@ -469,7 +470,7 @@ class TheInstallStep(unittest.TestCase):
         with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
                 mock.patch.object(stack_cli, "_discover",
                                   return_value=[SimpleNamespace(name="docker")]), \
-                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
                 mock.patch.object(lifecycle, "up", fake_up), \
                 mock.patch.object(lifecycle, "status", return_value=(healthy, 0)), \
                 mock.patch.object(installer, "provision", fake_provision):
@@ -501,7 +502,7 @@ class TheInstallStep(unittest.TestCase):
                      "services": {"qdrant": None, "embed": None, "rerank": None},
                      "healthy": False, "outdated_pins": []}
         with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
-                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
                 mock.patch.object(lifecycle, "status", return_value=(unhealthy, 1)), \
                 mock.patch.object(lifecycle, "up") as up:
             buf = io.StringIO()
@@ -551,7 +552,7 @@ class TheInstallStep(unittest.TestCase):
         with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
                 mock.patch.object(stack_cli, "_discover",
                                   return_value=[SimpleNamespace(name="docker")]), \
-                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
                 mock.patch.object(lifecycle, "up", fake_up), \
                 mock.patch.object(lifecycle, "status",
                                   return_value=(unhealthy, 1)), \
@@ -569,11 +570,14 @@ class TheInstallStep(unittest.TestCase):
         self.assertEqual(len(provision_calls), 0)
         self.assertIn("qctx stack up", said, "the offer names the fix")
 
-    def test_windows_is_not_offered_it_says_the_line_and_returns(self):
-        """The plan's first `install_step` branch: on Windows (WSL included) the step is
-        not offered in phase 1 -- it says the one line, points at the README's
-        `## Local models`, and returns. It must not offer and then die in
-        `installer._check_platform` with `StackError(step="platform")`."""
+    def test_native_windows_is_not_offered_it_says_the_line_and_returns(self):
+        """The plan's first `install_step` branch, now native-only: on bare
+        Windows (the system name says Windows, WSL or not) the step is not
+        offered -- it says the one line, points at the README's `## Local
+        models`, and returns. It must not offer and then die in
+        `installer._check_platform` with `StackError(step="platform")`. WSL2
+        does NOT take this branch: it reports the system name Linux and is
+        classified by the runtime discovery instead (the next two tests)."""
         import stack.cli as stack_cli
         import stack.facts as facts
         import stack.installer as installer
@@ -594,7 +598,7 @@ class TheInstallStep(unittest.TestCase):
         stack_dir.mkdir(exist_ok=True)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
-                mock.patch.object(facts, "is_windows_host", return_value=True), \
+                mock.patch.object(facts, "is_native_windows", return_value=True), \
                 mock.patch.object(installer, "provision", fake_provision), \
                 mock.patch.object(lifecycle, "up", fake_up), \
                 redirect_stdout(buf):
@@ -603,10 +607,92 @@ class TheInstallStep(unittest.TestCase):
                 {"blockers": [{"name": "Qdrant"}], "ready": False, "checks": []},
                 budgets=[], ask=lambda prompt: "", interactive=True)
         out = buf.getvalue()
-        self.assertEqual(len(provision_calls), 0, "Windows never provisions in phase 1")
-        self.assertEqual(len(up_calls), 0, "Windows never restarts in phase 1")
+        self.assertEqual(len(provision_calls), 0, "native Windows never provisions")
+        self.assertEqual(len(up_calls), 0, "native Windows never restarts")
         self.assertIn("Local models", out, "the line must point at the README section")
         self.assertIn("not available", out, "the line must say it is not available")
+
+    def test_wsl2_with_a_runtime_proceeds_to_provision(self):
+        """WSL2 is no longer the one-line refusal: the gate reads the native
+        system name, a WSL2 distro reports `Linux`, and with a runtime that
+        answers the step goes on and provisions (the platform it is then
+        classified as, `windows`, is accepted by `_check_platform`)."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+
+        provision_calls = []
+
+        def fake_provision(request, deps):
+            provision_calls.append(request)
+            return None
+
+        stack_dir = self.root / "stack"
+        stack_dir.mkdir(exist_ok=True)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(stack_cli, "_discover",
+                                  return_value=[SimpleNamespace(name="docker")]), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
+                mock.patch.object(facts, "collect",
+                                  return_value=facts.HostFacts(
+                                      system="linux", arch="amd64", wsl=True,
+                                      ram_bytes=None, disk_free_bytes=None,
+                                      gpus=(), render_nodes=(), selinux=False)), \
+                mock.patch.object(installer, "provision", fake_provision), \
+                redirect_stdout(buf):
+            stack_cli.install_step(
+                self.args(stack="auto", yes=True),
+                {"blockers": [{"name": "Qdrant"}], "ready": False, "checks": []},
+                budgets=[], ask=lambda prompt: "", interactive=True)
+        out = buf.getvalue()
+        self.assertEqual(len(provision_calls), 1,
+                         "WSL2 with an answering runtime provisions")
+        self.assertEqual(provision_calls[0].profile, "auto")
+        self.assertEqual(provision_calls[0].yes, True)
+        self.assertNotIn("Local models", out,
+                         "the refusal line must not be said on WSL2")
+        self.assertNotIn("not available", out,
+                         "the refusal line must not be said on WSL2")
+
+    def test_wsl2_with_no_runtime_aborts_with_step_runtime(self):
+        """WSL2 with no runtime answering: the abort is the runtime one,
+        naming the install, NOT the one-line platform refusal (which only
+        covers native Windows). The refusal is `installer._choose_runtime`'s,
+        and it rises unchanged from `provision`."""
+        import stack.cli as stack_cli
+        import stack.facts as facts
+        import stack.installer as installer
+
+        def fake_provision(request, deps):
+            raise StackError("no container runtime with a compose provider answers",
+                             step="runtime", fix="install Docker or Podman")
+
+        stack_dir = self.root / "stack"
+        stack_dir.mkdir(exist_ok=True)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
+                mock.patch.object(stack_cli, "_discover", return_value=[]), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
+                mock.patch.object(facts, "collect",
+                                  return_value=facts.HostFacts(
+                                      system="linux", arch="amd64", wsl=True,
+                                      ram_bytes=None, disk_free_bytes=None,
+                                      gpus=(), render_nodes=(), selinux=False)), \
+                mock.patch.object(installer, "provision", fake_provision), \
+                redirect_stdout(buf):
+            with self.assertRaises(StackError) as ctx:
+                stack_cli.install_step(
+                    self.args(stack="auto", yes=True),
+                    {"blockers": [{"name": "Qdrant"}], "ready": False, "checks": []},
+                    budgets=[], ask=lambda prompt: "", interactive=True)
+        self.assertEqual(ctx.exception.step, "runtime")
+        self.assertTrue(ctx.exception.fix, "the runtime abort must name a fix")
+        self.assertIn("install", ctx.exception.fix.lower(),
+                      "the runtime abort must name the install")
+        out = buf.getvalue()
+        self.assertNotIn("Local models", out,
+                         "no platform refusal: the abort names the runtime, not the platform")
 
     def test_the_offer_explains_what_it_would_do_before_it_asks(self):
         """The spec's "Quando aparece": a no-stack blocker explains what it would do --
@@ -633,7 +719,7 @@ class TheInstallStep(unittest.TestCase):
         stack_dir.mkdir(exist_ok=True)
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {"QCTX_STACK_DIR": str(stack_dir)}), \
-                mock.patch.object(facts, "is_windows_host", return_value=False), \
+                mock.patch.object(facts, "is_native_windows", return_value=False), \
                 mock.patch.object(installer, "provision", fake_provision), \
                 redirect_stdout(buf):
             stack_cli.install_step(

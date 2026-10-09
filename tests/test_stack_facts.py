@@ -35,6 +35,7 @@ from stack.facts import (  # noqa: E402
     Probe,
     VENDORS,
     collect,
+    is_native_windows,
     is_windows_host,
     normalize_system,
     platform_of,
@@ -494,6 +495,45 @@ class TestIsWindowsHost(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             self.assertFalse(is_windows_host(
                 Probe(root=Path(raw), system=lambda: "Linux", machine=lambda: "x86_64")))
+
+
+class TestIsNativeWindows(unittest.TestCase):
+    """The native-Windows gate `install_step` uses to say the one line and
+    return. It is the system NAME alone, independent of the kernel: the one
+    line is the answer for a bare Windows (the wizard runs there only through
+    python, so there is no runtime to discover), while a WSL2 reports
+    `Linux` and is classified instead by `platform_of` and the runtime
+    discovery (cross-platform wizard plan, Task 1)."""
+
+    def test_is_native_windows_is_only_the_system_name(self):
+        # native Windows (no microsoft in the kernel) -> True
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "proc" / "sys" / "kernel").mkdir(parents=True)
+            (root / "proc" / "sys" / "kernel" / "osrelease").write_text(
+                "10.0.26100.1\ngeneric\n")
+            self.assertTrue(is_native_windows(
+                Probe(root=root, system=lambda: "Windows", machine=lambda: "AMD64")))
+        # WSL2 (system Linux, microsoft in the kernel) -> False
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "proc" / "sys" / "kernel").mkdir(parents=True)
+            (root / "proc" / "sys" / "kernel" / "osrelease").write_text(
+                "5.15.167.4-microsoft-standard-WSL2\n")
+            self.assertFalse(is_native_windows(
+                Probe(root=root, system=lambda: "Linux", machine=lambda: "x86_64")))
+        # ordinary linux -> False
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "proc" / "sys" / "kernel").mkdir(parents=True)
+            (root / "proc" / "sys" / "kernel" / "osrelease").write_text(
+                "7.0.0-34-generic\n")
+            self.assertFalse(is_native_windows(
+                Probe(root=root, system=lambda: "Linux", machine=lambda: "x86_64")))
+        # and macOS, for completeness
+        with tempfile.TemporaryDirectory() as raw:
+            self.assertFalse(is_native_windows(
+                Probe(root=Path(raw), system=lambda: "Darwin", machine=lambda: "arm64")))
 
 
 if __name__ == "__main__":

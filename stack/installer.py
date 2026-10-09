@@ -364,11 +364,13 @@ def _ask_runtime(deps: Deps, candidates: list[ContainerRuntime]) -> ContainerRun
 
 
 def _check_platform(deps: Deps) -> str:
-    """Step 2, first: the platform. Windows (WSL included) enters in phase 3;
-    until then the step is not offered, and the refusal points at the manual
-    path the README keeps for it."""
+    """Step 2, first: the platform. `windows` is the WSL2 case (`platform_of`
+    classifies WSL as windows; native Windows never reaches this function -- the
+    CLI's one-line gate returns first), so it is accepted here (cross-platform
+    wizard plan, Task 1). The refusal that remains is for the platforms that are
+    not any of the three, and it still points at the manual path."""
     platform = facts.platform_of(deps.facts)
-    if platform not in ("linux", "macos"):
+    if platform not in ("linux", "macos", "windows"):
         raise StackError("the stack runs on linux and macos in this version",
                          step="platform",
                          fix=f"until windows arrives (phase 3), set it up by hand: "
