@@ -331,9 +331,16 @@ def _engine(ctx: _Ctx):
     `engine()` call is a subprocess (`podman info`, plus more on macOS), so
     the later steps read it through this rather than re-asking the runtime.
     """
+    if ctx.engine is not None:
+        return ctx.engine
+    ctx.engine = ctx.runtime.engine()
     if ctx.engine is None:
-        ctx.engine = ctx.runtime.engine()
-    assert ctx.engine is not None  # step 1 checked it
+        # Step 1 already refused a runtime that answers without an engine; this is
+        # the safety net if that invariant ever breaks. With `python -O` an assert
+        # here would vanish and the next line would raise AttributeError instead of
+        # a rejection that names the step.
+        raise StackError(f"{ctx.runtime.name} reports no engine", step="runtime",
+                         fix="check the runtime is running and reachable, then retry")
     return ctx.engine
 
 
@@ -714,7 +721,14 @@ def _state(ctx: _Ctx, plan: compose.Plan, phase: str) -> "state.StackState":
     endpoints are published on (the ports live in `ports`), and the models
     the catalogue pins (filename to sha256)."""
     provider = ctx.runtime.compose_provider().provider
-    assert provider is not None
+    if provider is None:
+        # Step 1 refused a runtime with no compose provider; this is the safety net
+        # if that invariant ever breaks (a `python -O` assert would raise AttributeError
+        # instead of a rejection that names the step).
+        raise StackError(
+            f"{ctx.runtime.name} has no compose provider to record in the state",
+            step="state",
+            fix="check the runtime's compose provider, then retry")
     now = state.now()
     return state.StackState(
         role="local", listen=LISTEN_HOST, platform=ctx.platform,
@@ -839,7 +853,14 @@ def _finish(ctx: _Ctx) -> "state.StackState":
     after a reboot on this runtime."""
     deps = ctx.deps
     saved = state.load(deps.stack_dir)
-    assert saved is not None  # step 9 wrote it
+    if saved is None:
+        # Step 9 saved the state right after the stack came up; if it is not
+        # there, something removed it between the steps. Name the step instead
+        # of the AttributeError a `python -O` assert would leave behind.
+        raise StackError(
+            f"the state step 9 saved to {deps.stack_dir} is gone before step 12",
+            step="state",
+            fix="re-run the install: qctx install")
     saved.phase = state.PHASE_RUNNING
     saved.updated_at = state.now()
     state.save(deps.stack_dir, saved)
