@@ -89,7 +89,7 @@ device (a dzn roda CPU, é a oficial + o driver), e comparar a **ordem** das
 similaridades (tem de bater), o **desvio** frente aos intervalos que decidem os
 cortes (não um limiar absoluto de cosseno) e a **ordem** do rerank de pares
 fixos. Falhou, aborta antes de gravar o config e oferece o CPU com o motivo
-("oferece CPU e diz por quê", spec-mestra) — o menu não a executa, o que o
+("oferece CPU e diz por quê", spec-mestra) - o menu não a executa, o que o
 executa é o passo de verificação da stack no ar. O perfil `cpu` no WSL2 não usa
 o dzn (roda a imagem oficial, sem device, como no Linux): ele passa pela
 verificação funcional que já existe, sem a numérica.

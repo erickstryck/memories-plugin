@@ -127,7 +127,7 @@ def is_native_windows(probe: Probe) -> bool:
     return probe.system().strip().lower() == "windows"
 ```
 
-- [ ] **Step 4: trocar o gate em `stack/cli.py`** — de
+- [ ] **Step 4: trocar o gate em `stack/cli.py`** - de
   `if facts.is_windows_host(facts.Probe()):` para
   `if facts.is_native_windows(facts.Probe()):`, e atualizar o comentário do ramo
   (o texto atual afirma que a recusa vale para WSL incluído; isso fica falso).
@@ -162,21 +162,21 @@ git commit -F <msg>   # feat(stack): WSL2 with a runtime is the windows platform
 **Interfaces:**
 - Produz: `Cpu.runtimes("windows") -> frozenset({"docker","podman"})`;
   `Cpu.availability("windows", ...) -> READY`; `Cpu.service_patch` continua `{}`
-  (a imagem oficial, `-dev none` — o `cpu` no WSL2 não usa a dzn, spec de
+  (a imagem oficial, `-dev none` - o `cpu` no WSL2 não usa a dzn, spec de
   2026-10-09, risco registrado).
 - A constante vira `_SUPPORTED_PLATFORMS = ("linux", "macos", "windows")`; só a
   `Cpu` a consome (verificado: os demais backends comparam a plataforma
   diretamente).
 - Consome: nada de novo.
 
-- [ ] **Step 1: teste** — `Cpu().runtimes("windows")` == {docker,podman};
+- [ ] **Step 1: teste** - `Cpu().runtimes("windows")` == {docker,podman};
   `Cpu().availability("windows", facts, engine, "docker")` tem state `READY`;
   `Cpu().service_patch("docker", None)` == {}; e `runtimes("linux")`/`"macos"`
   inalterados.
 
 - [ ] **Step 2: rodar e confirmar FAIL** (hoje `runtimes("windows")` == frozenset()).
 
-- [ ] **Step 3: implementar** — renomear a constante, adicionar `windows`,
+- [ ] **Step 3: implementar** - renomear a constante, adicionar `windows`,
   atualizar o comentário (a recusa de uma linha agora mora no
   `is_native_windows`).
 
@@ -230,7 +230,7 @@ git commit -F <msg>   # feat(stack): the cpu profile runs on windows (official i
 
 - [ ] **Step 4: rodar a suíte focal**, confirmar GREEN.
 
-- [ ] **Step 5: mutação** — apagar o filtro `"Microsoft Direct3D12" in d.name` de
+- [ ] **Step 5: mutação** - apagar o filtro `"Microsoft Direct3D12" in d.name` de
   `devices_seen`; o teste do llvmpipe deve falhar (prova que o filtro é coberto).
 
 - [ ] **Step 6: commit**
@@ -266,16 +266,16 @@ git commit -F <msg>   # feat(stack): the dzn gpu backend for windows (own image,
   além do gravado. É o comportamento documentado do `outdated_pins`.
 - Consome: `BACKENDS[...].image_role`, `catalog.resolve_images`, o runner do compose.
 
-- [ ] **Step 1: teste do catálogo** — `"llama-dzn" in IMAGES`;
+- [ ] **Step 1: teste do catálogo** - `"llama-dzn" in IMAGES`;
   `parse_image_flags(["llama-dzn=REF"])` aceita o novo role;
   `resolve_images` devolve o ref da dzn pelo env `QCTX_STACK_IMAGE_LLAMA_DZN` e
   pela flag, com a precedência flag > env > catálogo.
 
-- [ ] **Step 2: teste do compose** — um `Plan` com `backend="dzn"` renderiza o
+- [ ] **Step 2: teste do compose** - um `Plan` com `backend="dzn"` renderiza o
   service com `image == plan.images["llama-dzn"]`; um `Plan` com `backend="cpu"`
   continua com `plan.images["llama"]`.
 
-- [ ] **Step 3: teste do fallback** (Foco 4) — `dzn_image_ref(False, runner, ref)`
+- [ ] **Step 3: teste do fallback** (Foco 4) - `dzn_image_ref(False, runner, ref)`
   com um runner fake registra o `docker build` e devolve `(ref, True)`;
   `dzn_image_ref(True, runner, ref)` não chama o runner.
 
@@ -287,7 +287,7 @@ git commit -F <msg>   # feat(stack): the dzn gpu backend for windows (own image,
 
 - [ ] **Step 6: rodar a suíte focal**, confirmar GREEN.
 
-- [ ] **Step 7: mutação** — reverter `_server` para `plan.images["llama"]` fixo; o
+- [ ] **Step 7: mutação** - reverter `_server` para `plan.images["llama"]` fixo; o
   teste do compose (dzn usa o ref da dzn) deve falhar.
 
 - [ ] **Step 8: commit**
@@ -312,9 +312,9 @@ git commit -F <msg>   # feat(stack): the llama-dzn image pin, the image_role sea
   que no WSL2 é `linux`). `ctx.platform` é definido antes (`provision` roda
   `_check_platform` antes de `_check_disk_and_ram`).
 - Consome: `EngineInfo.memory_bytes` (o docker publica `MemTotal`, o podman
-  `memTotal` — verificado em `stack/docker.py:59` / `stack/podman.py:75`).
+  `memTotal` - verificado em `stack/docker.py:59` / `stack/podman.py:75`).
 
-- [ ] **Step 1: teste** (Foco 5) — facts.system=="linux" + `ctx.platform`=="windows"
+- [ ] **Step 1: teste** (Foco 5) - facts.system=="linux" + `ctx.platform`=="windows"
   + `engine.memory_bytes` pequeno + `facts.ram_bytes` grande: o warn de RAM usa o
   número do **engine** (o da VM), não o `MemAvailable` da distro. E
   platform=="linux": continua usando `facts.ram_bytes` (regressão).
@@ -388,10 +388,10 @@ git commit -F <msg>   # fix(stack): the WSL2 ram figure is the engine's VM, not 
 
 - [ ] **Step 5: rodar a suíte focal**, confirmar GREEN.
 
-- [ ] **Step 6: mutação** — trocar a checagem 2 por um limiar absoluto de cosseno
+- [ ] **Step 6: mutação** - trocar a checagem 2 por um limiar absoluto de cosseno
   (ex.: `> 0.1`); o teste "desvio maior que o menor intervalo" deve continuar
   passando **e** um novo caso com desvio 0.05 e intervalo 0.02 (absoluto < 0.1,
-  relativo > intervalo) deve falhar — prova que a checagem é relativa, como a
+  relativo > intervalo) deve falhar - prova que a checagem é relativa, como a
   spec-mestra exige.
 
 - [ ] **Step 7: commit**
@@ -415,14 +415,14 @@ git commit -F <msg>   # feat(stack): the dzn numerical check (similarity and rer
 - Consome: o `render`/`dump` do compose, os backends `cpu`/`dzn` (Tasks 2/3), o
   pin da dzn (Task 4), o `Plan`.
 - A prova do dzn **reusa** o `_prove` existente (o probe file é o compose do
-  Windows, com a imagem dzn e `/dev/dxg`): nenhum novo código de prova — a fixture
+  Windows, com a imagem dzn e `/dev/dxg`): nenhum novo código de prova - a fixture
   muda.
 
 - [ ] **Step 1: adicionar a linha windows à matriz** do `test_stack_compose`
   (docker-cpu, docker-dzn, podman-cpu) e rodar
   `python3 tests/test_stack_compose.py --regen` para gerar os fixtures.
 
-- [ ] **Step 2: conferir `windows-docker-dzn.yaml`** — o service `embed` (e
+- [ ] **Step 2: conferir `windows-docker-dzn.yaml`** - o service `embed` (e
   `rerank`) carrega `image: ghcr.io/erickstryck/llama-dzn:b11382-mesa26.0.3`,
   `devices: [/dev/dxg]`, `volumes: [/usr/lib/wsl:/usr/lib/wsl]`,
   `environment: [LD_LIBRARY_PATH=/usr/lib/wsl/lib]`, e a porta
@@ -521,7 +521,7 @@ git commit -F <msg>   # feat(stack): the final summary (what was done, the URLs,
   testes: `apt-get install -y powershell` (ou o canal Microsoft); confirmar
   `pwsh --version`. **Fallback honesto:** se não instalar, a Task 9 para nos
   passos de teste escrito, e o commit registra que a verificação PowerShell ficou
-  pendente do CI Windows — **não** rotular de verde o que não rodou.
+  pendente do CI Windows - **não** rotular de verde o que não rodou.
 
 - [ ] **Step 2: escrever `tests/wsl_gateway.Tests.ps1`** cobrindo (com strings de
   fixture, sem chamar wsl/docker de verdade):
@@ -542,7 +542,7 @@ git commit -F <msg>   # feat(stack): the final summary (what was done, the URLs,
 
 - [ ] **Step 5: rodar os testes PowerShell**, confirmar GREEN.
 
-- [ ] **Step 6: revisar o exit code** — o script propaga o exit do processo na
+- [ ] **Step 6: revisar o exit code** - o script propaga o exit do processo na
   distro (o abort do wizard não vira erro genérico do PowerShell).
 
 - [ ] **Step 7: commit**
@@ -609,12 +609,12 @@ git commit -F <msg>   # feat(stack): the llama-dzn image (Dockerfile) and its pu
 - Higiene: sem em dash, sem HOME real, sem identificador de máquina (o grep das
   restrições globais).
 
-- [ ] **Step 1: README** — bloco "Windows": `.\install.ps1` (e a forma de primeira
+- [ ] **Step 1: README** - bloco "Windows": `.\install.ps1` (e a forma de primeira
   execução `powershell -ExecutionPolicy Bypass -File .\install.ps1`, que evita a
   recusa de política), as três verificações, que quem instala WSL2/Docker é o
   usuário, e `-Command status` para o dia a dia; a jornada de seis passos é a mesma.
 
-- [ ] **Step 2: install.md** — atualizar a seção standalone (a escrita em
+- [ ] **Step 2: install.md** - atualizar a seção standalone (a escrita em
   `ad2bed7`) para refletir a reversão: o Windows roda pela jornada normal via
   WSL2; o manual "Local models" fica para quem não quer o plugin.
 
