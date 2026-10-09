@@ -195,9 +195,12 @@ function Resolve-Command {
 # ...), InvocationName is the script path, so the body runs. This is what lets
 # tests/wsl_gateway.Tests.ps1 load the functions without touching wsl/docker.
 #
-# The body is written inline (not as a function) because a bare `exit` inside a
-# function only RETURNS from the function; the script's real exit code must
-# come from a top-level `exit $LASTEXITCODE` (spec rule 5).
+# The body is written as top-level code under the dot-source guard, so the
+# entry script reads as a straight-line flow. Each terminal branch ends the
+# script with the exit code it names - the in-distro $LASTEXITCODE for
+# delegation, 1 for an abort - per spec rule 5; a native call's exit code does
+# not by itself become the script's (measured: a script ending right after a
+# failed native call still exits 0).
 # ===========================================================================
 if ($MyInvocation.InvocationName -ne '.') {
 
@@ -219,8 +222,7 @@ if ($MyInvocation.InvocationName -ne '.') {
 
   if ($wslPresent) {
     # --- Verification 2: which distro, and what exists inside it? ----------
-    $null = wsl -l -v 2>&1
-    $wslList = $Output | Out-String
+    $wslList = (wsl -l -v 2>&1) | Out-String
     $table   = @(ConvertTo-DistroTable $wslList)
     $distroName = Select-Distro $table $Distro
 
