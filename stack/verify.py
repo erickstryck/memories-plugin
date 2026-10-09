@@ -395,7 +395,7 @@ def numerical_compare(gpu_vecs: list[list[float]], cpu_vecs: list[list[float]],
     The answer is `(ok, reason)`: `""` when the checks pass (the caller
     prints the measured max deviation from its own vectors), and when one
     fails, the reason names WHICH check failed — 'order', the measured
-    deviation and the gap it was above, or 'rerank'.
+    deviation and the gap it was at or above, or 'rerank'.
     """
     n = len(gpu_vecs)
     if len(cpu_vecs) != n:
