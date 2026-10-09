@@ -385,7 +385,8 @@ def numerical_compare(gpu_vecs: list[list[float]], cpu_vecs: list[list[float]],
         order of their descending sort is the order the cuts follow;
     (2) the deviation `max |gpu_sim[i] - cpu_sim[i]|` (index by index, the
         texts aligned) is small RELATIVE to the gaps that decide the cuts —
-        it must be strictly below the minimum gap between adjacent
+        a PERFECT match (deviation 0) passes regardless, and any NONZERO
+        deviation must be strictly below the minimum gap between adjacent
         similarities of the gpu answer sorted descending, NOT below an
         absolute cosine threshold (a 0.04 deviation passes an absolute 0.1
         while it flips every cut whose gap is 0.02 or less);
@@ -415,19 +416,22 @@ def numerical_compare(gpu_vecs: list[list[float]], cpu_vecs: list[list[float]],
                        f"{gpu_order}, cpu {cpu_order}); the cuts would land "
                        "on different texts")
     # (2) the deviation, relative to the gaps: the minimum gap between
-    # adjacent similarities of the gpu answer, descending. A deviation
-    # strictly above it can push one similarity past the next and flip a
-    # cut; at or below it, no cut moves. A zero gap (a tie in the gpu
+    # adjacent similarities of the gpu answer, descending. A PERFECT match
+    # (deviation 0) passes unconditionally — nothing moved, so no cut can
+    # flip. Any NONZERO deviation must be STRICTLY below that gap: at or
+    # above it, the deviation pushes a similarity onto or past a boundary —
+    # the cut flips, or the similarity lands exactly on one and the
+    # comparison is ambiguous — so it fails. A zero gap (a tie in the gpu
     # answer) makes ANY nonzero deviation fail — the conservative reading,
     # because a corpus with no gap there carries no cut to protect.
     dev = max(abs(g - c) for g, c in zip(gpu_sim, cpu_sim))
     srt = sorted(gpu_sim, reverse=True)
     min_gap = min(a - b for a, b in zip(srt, srt[1:]))
-    if dev > min_gap:
+    if dev > 0.0 and dev >= min_gap:
         return False, (f"the maximum deviation of the dzn similarities from "
-                       f"the no-device ones is {dev:.4f}, above the minimum "
-                       f"gap {min_gap:.4f} between adjacent similarities; "
-                       "a cut could flip")
+                       f"the no-device ones is {dev:.4f}, at or above the "
+                       f"minimum gap {min_gap:.4f} between adjacent "
+                       "similarities; a cut could flip")
     # (3) the rerank order of the fixed pairs.
     if list(gpu_rank) != list(cpu_rank):
         return False, (f"the rerank order of the fixed pairs differs (gpu "

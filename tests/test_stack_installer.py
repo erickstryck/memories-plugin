@@ -18,10 +18,11 @@ shape the parser was written for.
 """
 import hashlib
 import json
+import math
 import sys
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from unittest import mock
 
@@ -250,10 +251,12 @@ def run_case(tmp, *, request, runtimes, facts, prompter, reporter, config,
     the `Runner` the local build runs through; a test passes a recording
     `FakeRunner` and reads its `.calls` to prove the exact `docker build`.
     `numerical` is the dzn check's compare, `(gpu_side, cpu_side) -> (ok,
-    reason)`: None (the default) is the REAL `verify.numerical_compare` driven
-    by the real `build_embedder`/`build_reranker` over the stack's endpoints
-    (which the tests do not reach, because they inject a fake), and a test
-    passes its own compare to drive the step both ways without a server."""
+    reason)`: None (the default) is the PRODUCTION 2-dict binding —
+    `installer._default_numerical`, which unpacks the two `{"vecs", "rank"}`
+    sides to the 4-arg pure `verify.numerical_compare`, driven by the real
+    `build_embedder`/`build_reranker` over the stack's endpoints (which the
+    tests do not reach, because they inject a fake), and a test passes its own
+    compare to drive the step both ways without a server."""
     transport = UrlTransport({_EMBED.url(): FakeTransport(b"x" * _EMBED.size),
                               _RERANK.url(): FakeTransport(b"y" * _RERANK.size)})
     env = {"HOME": str(tmp)}
@@ -1353,6 +1356,35 @@ def failing_numerical(_gpu, _cpu):
     absolute cosine threshold — the spec's relative rule)."""
     return False, ("the gpu similarity deviates 0.04 from the no-device one, "
                    "above the minimum gap 0.02 between adjacent similarities")
+
+
+class TestTheDefaultNumericalBinding(unittest.TestCase):
+    """The PRODUCTION default of `Deps.numerical` (no override, exactly as
+    `stack/cli.py` builds the Deps): it must accept the two side-dicts the
+    step calls it with (`{"vecs": ..., "rank": ...}`) and return `(bool, str)`
+    with no TypeError. This is the gap the fix round closes — the old default
+    was the 4-arg pure `verify.numerical_compare`, which a 2-dict call cannot
+    bind, so a real dzn install would TypeError AFTER the stack was up."""
+
+    def test_the_default_binding_takes_two_side_dicts(self):
+        # The DEFAULT value of the `numerical` field, exactly as a Deps built
+        # with no override carries it (the production binding the reviewer
+        # named as the untested gap).
+        default_fn = next(f for f in fields(installer.Deps)
+                          if f.name == "numerical").default
+        sims = [0.9, 0.7, 0.5, 0.4, 0.35, 0.2, 0.1, 0.05]
+        vecs = [[1.0, 0.0]]
+        for s in sims:
+            vecs.append([s, math.sqrt(max(0.0, 1.0 - s * s))])
+        rank = [i for i, _ in sorted(enumerate(sims), key=lambda p: -p[1])]
+        side = {"vecs": vecs, "rank": rank}  # the step's own two-dict shape
+        result = default_fn(side, side)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], bool)
+        self.assertIsInstance(result[1], str)
+        # identical sides -> every check passes, so the unpacking is correct.
+        self.assertEqual(result, (True, ""))
 
 
 class TestTheDznNumericalCheck(ProvisionTestCase):

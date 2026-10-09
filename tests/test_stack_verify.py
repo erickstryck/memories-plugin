@@ -512,6 +512,40 @@ class TestNumericalCompare(unittest.TestCase):
         ok, reason = verify.numerical_compare(gpu, cpu, _ranks(sims), _ranks(sims))
         self.assertTrue(ok)
 
+    def test_a_deviation_equal_to_the_min_gap_fails_and_just_below_passes(self):
+        # The boundary the spec pins: the deviation must be STRICTLY below the
+        # minimum gap, so a deviation that EQUALS the gap fails — and one just
+        # below it passes (proving the fix did not over-tighten). The
+        # similarities are dyadic (powers of 1/2), so `dev` and `min_gap` are
+        # exact by construction and the test does not depend on libm rounding:
+        # `verify.cosine` is stubbed to return them, and the deviation branch
+        # (not the cosine) is what is under test.
+        axis = object()
+        g1, g2, g3 = object(), object(), object()
+        eq1, eq2, eq3 = object(), object(), object()
+        below1, below2, below3 = object(), object(), object()
+        table = {
+            g1: 0.5, g2: 0.25, g3: 0.125,             # gpu answer: min gap 0.125
+            eq1: 0.5, eq2: 0.25, eq3: 0.0,             # deviation 0.125 == min gap
+            below1: 0.5, below2: 0.25, below3: 0.0625,  # deviation 0.0625 < gap
+        }
+        with mock.patch.object(verify, "cosine",
+                               side_effect=lambda _axis, v: table[v]):
+            # The vectors are sentinels, not real floats: `cosine` is stubbed
+            # to answer from `table`, so the branch under test (deviation vs
+            # min gap) runs over the dyadic values with no libm in the path.
+            # dev == min_gap (both exactly 0.125) -> FAIL, naming the gap.
+            ok, reason = verify.numerical_compare(  # type: ignore[arg-type]
+                [axis, g1, g2, g3], [axis, eq1, eq2, eq3], [0, 1, 2], [0, 1, 2])
+            self.assertFalse(ok)
+            self.assertIn("gap", reason)
+            # dev 0.0625 < min gap 0.125 -> PASS.
+            ok, reason = verify.numerical_compare(  # type: ignore[arg-type]
+                [axis, g1, g2, g3], [axis, below1, below2, below3],
+                [0, 1, 2], [0, 1, 2])
+            self.assertTrue(ok)
+            self.assertEqual(reason, "")
+
 
 if __name__ == "__main__":
     unittest.main()

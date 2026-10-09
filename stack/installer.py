@@ -225,6 +225,16 @@ def dzn_image_reachable(ref: str) -> bool:
     return status == 200
 
 
+def _default_numerical(gpu_side: dict, cpu_side: dict) -> tuple[bool, str]:
+    """The PRODUCTION default of `Deps.numerical`: the 2-dict contract the
+    step calls it with (each side `{"vecs": ..., "rank": ...}`, built in
+    `_verify_numerical`), unpacked to the 4-arg PURE `verify.numerical_compare`.
+    A test that injects its own compare replaces this whole default, so this
+    is the only binding a real `--stack dzn` install runs."""
+    return verify.numerical_compare(gpu_side["vecs"], cpu_side["vecs"],
+                                    gpu_side["rank"], cpu_side["rank"])
+
+
 @dataclass
 class Deps:
     """Everything `provision` may touch, injected. `facts` is read here, not
@@ -246,7 +256,14 @@ class Deps:
     status: Callable[[str], int | None] = health.http_status
     diagnose: Callable[[Config], dict] = core_setup.diagnose
     calibrate: Callable[..., tuple] = verify.calibrate
-    numerical: Callable[..., tuple[bool, str]] = verify.numerical_compare
+    # The 2-dict contract the step calls it with: `deps.numerical(gpu_side,
+    # cpu_side)`, each side `{"vecs": ..., "rank": ...}` (installer.py's
+    # `_verify_numerical`). The default adapts those to the 4-arg PURE
+    # `verify.numerical_compare` — the production binding. (The old default was
+    # the bare 4-arg function, so a real dzn install TypeErred AFTER the stack
+    # was up, and the test fakes — which already use 2 dicts — were the only
+    # thing keeping the suite green.)
+    numerical: Callable[..., tuple[bool, str]] = _default_numerical
     numerical_embedder: Callable[[Config], Embedder] = build_embedder
     numerical_reranker: Callable[[Config], Reranker | None] = build_reranker
     clock: Callable[[], float] = time.monotonic
@@ -1042,6 +1059,10 @@ def _verify_numerical(ctx: _Ctx, plan: compose.Plan) -> None:
                 "profile gives; re-run the install with --stack cpu (the "
                 "official image, no device, the numbers the check compares "
                 "against)")
+    # INTENTIONAL: the compare returns only `(ok, reason)`, so the ok line
+    # re-derives the measured max deviation from the vectors (cosine against
+    # the gpu query vector, max over the aligned texts) — the SAME definition
+    # `verify.numerical_compare` checks against, so no second source of truth.
     axis = gpu_side["vecs"][0]
     max_deviation = max(abs(verify.cosine(axis, g) - verify.cosine(axis, c))
                         for g, c in zip(gpu_side["vecs"][1:], cpu_side["vecs"][1:]))
