@@ -82,13 +82,17 @@ probe file é o compose do Windows, com a imagem dzn: o que o container vê na p
 o que verá depois. Falhou a prova, o perfil desce para indisponível com o rabo do
 stderr, como já acontece; GPU que não chega ao container, o motivo diz por quê.
 
-A **verificação numérica** do dzn é a da spec-mestra, e vale para o item GPU do
-menu no Windows: embedar textos fixos no perfil dzn e no mesmo perfil sem device,
-e comparar a **ordem** das similaridades (tem de bater), o **desvio** frente aos
-intervalos que decidem os cortes (não um limiar absoluto de cosseno) e a **ordem**
-do rerank de pares fixos. Falhou, o item sai do menu com o motivo. O perfil `cpu`
-no WSL2 não usa o dzn (roda a imagem oficial, sem device, como no Linux): ele
-passa pela verificação funcional que já existe, sem a numérica.
+A **verificação numérica** do dzn é a da spec-mestra, e corre **depois** de o
+perfil escolhido estar no ar (o menu antecede o download, e a comparação precisa
+de modelos rodando): embedar textos fixos no perfil dzn e no mesmo perfil sem
+device (a dzn roda CPU, é a oficial + o driver), e comparar a **ordem** das
+similaridades (tem de bater), o **desvio** frente aos intervalos que decidem os
+cortes (não um limiar absoluto de cosseno) e a **ordem** do rerank de pares
+fixos. Falhou, aborta antes de gravar o config e oferece o CPU com o motivo
+("oferece CPU e diz por quê", spec-mestra) — o menu não a executa, o que o
+executa é o passo de verificação da stack no ar. O perfil `cpu` no WSL2 não usa
+o dzn (roda a imagem oficial, sem device, como no Linux): ele passa pela
+verificação funcional que já existe, sem a numérica.
 
 ### A imagem dzn
 
