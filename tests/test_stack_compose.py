@@ -42,14 +42,16 @@ FIXTURES = REPO / "tests" / "fixtures" / "stack"
 PLATFORMS = ("linux", "macos", "windows")
 
 #: The spec's nine ("Fixtures golden"), plus the two windows cpu fixtures Task 2
-#: serves (a WSL2 host runs the cpu on the official image, identical to linux).
-#: There is no `macos-docker-apple`: Docker Desktop passes no GPU to a container.
-#: The windows dzn fixtures join this set with Task 7.
+#: serves (a WSL2 host runs the cpu on the official image, identical to linux),
+#: plus the one windows dzn fixture Task 7 serves (the dzn image, /dev/dxg, and
+#: the WSL passthrough). There is no `macos-docker-apple`: Docker Desktop passes
+#: no GPU to a container.
 PHASE1_FIXTURES = {
     "linux-docker-cpu", "linux-docker-dri", "linux-docker-nvidia",
     "linux-podman-cpu", "linux-podman-dri", "linux-podman-nvidia",
     "macos-docker-cpu", "macos-podman-cpu", "macos-podman-apple",
     "windows-docker-cpu", "windows-podman-cpu",
+    "windows-docker-dzn",
 }
 
 STACK_DIRS = {"linux": Path("/home/me/.local/share/mnemosine/stack"),
