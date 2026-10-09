@@ -30,6 +30,7 @@ hook ranks. An over-budget measurement is a WARNING named after the host,
 never a raise: the stack works, it just misses that host's deadline, and the
 fix is a faster profile, not a red install.
 """
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable, Mapping
@@ -292,3 +293,143 @@ def env_overrides(env: Mapping[str, str], wanted: dict[str, str]) -> list[tuple[
                 out.append((name, env[name]))
             break
     return out
+
+
+# -- the numerical check of the dzn profile -----------------------------------
+#
+# The dzn driver (Mesa over D3D12, the only GPU path on Windows) declares
+# itself non-conformant ("not a conformant Vulkan implementation, testing use
+# only"), so the install does not trust a bare "it ran": with the dzn stack UP
+# it embeds this FIXED corpus on the running dzn profile AND on the same
+# profile without a device (the dzn image is the official one plus the
+# driver, and runs CPU), and compares the two answers. The MENU does not run
+# this — the menu precedes the download, and the comparison needs models
+# running — the verification step of the stack that is up does. The corpus is
+# this module's own constant (Ruling R1): the calibration's is synthetic and
+# degenerate (one 4095-char text and 20 IDENTICAL documents — made to time
+# calls, where every similarity is a tie and the check degenerates).
+
+
+#: The query the corpus is scored against: its own text, not one of the
+#: documents below.
+NUMERICAL_QUERY = "what is the capital city of france?"
+
+#: Eight DISTINCT, stable, English documents, of differing topic and length
+#: (a short one-liner to a few hundred chars): the texts the check embeds.
+#: They only need to be stable and distinct — the model, not the prose, is
+#: the subject — but distinct topics and lengths give the similarities real
+#: gaps, and the relative deviation is measured against those gaps.
+NUMERICAL_TEXTS: tuple[str, ...] = (
+    "the capital of france is paris, on the seine river, the country's largest "
+    "city and its political and economic heart",
+    "a potato is a tuber grown from the solanum tuberosum plant, cooked by "
+    "boiling, baking or frying, and one of the most produced crops in the world",
+    "the compiler translates source code into machine instructions, optimizes "
+    "the result, and reports errors with the line and column of the offending "
+    "token, so the build stops with a message a human can act on",
+    "the river danube flows from the black forest through eight countries, "
+    "past the cities of regensburg, vienna and budapest, before it reaches the "
+    "black sea through the delta that carries its name",
+    "fermentation is the metabolic process by which yeast converts sugars "
+    "into alcohol and carbon dioxide, and it turns grain into bread, grapes "
+    "into wine, and cabbage into sauerkraut, a method of preservation that "
+    "predates the refrigerator by millennia",
+    "the tides rise and fall with the moon, because its gravity pulls the "
+    "oceans into two bulges, one facing the moon and one facing away, and the "
+    "earth's rotation carries a coast under each bulge about every twelve "
+    "hours",
+    "a lighthouse is a tower that keeps a lamp and a lens at sea level or "
+    "above it, so that the light turns and sweeps the horizon, marking the "
+    "position of rocks and shallow water to the ships that pass at night, "
+    "and the pattern of each light is as unique to it as a voice is to a "
+    "singer, recorded in the nautical almanac of the coast it guards",
+    "a symphony is a work for orchestra in several movements, the slow one "
+    "often in the middle, the fast one closing the whole, and the composer "
+    "writes each part for the family of instruments that plays it, so the "
+    "strings carry the melody while the winds answer it, a conversation "
+    "conducted down to the bar",
+)
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """The cosine of the angle between two float vectors, zero-safe.
+
+    A zero-norm vector has no direction, so the cosine of it is DEFINED as
+    0.0 (the value a degenerate embedding would contribute to any comparison)
+    instead of raising: the check is deterministic over the degenerate corpus
+    the dzn can produce, and a divide-by-zero would report a bug where the
+    answer is a measured failure.
+    """
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def numerical_compare(gpu_vecs: list[list[float]], cpu_vecs: list[list[float]],
+                      gpu_rank: list[int], cpu_rank: list[int]) -> tuple[bool, str]:
+    """The three checks the spec-mestra fixes for the dzn ('Verificação
+    numérica'), PURE: the vectors and the rerank orders arrive precomputed,
+    so the test drives them with fakes and no server runs.
+
+    `gpu_vecs`/`cpu_vecs` are the embeddings of the FIXED corpus (the
+    `NUMERICAL_QUERY` plus the `NUMERICAL_TEXTS`, in that order) on the
+    running dzn profile and on the same profile without a device;
+    `gpu_rank`/`cpu_rank` are the rerank orders of the fixed query-document
+    pairs (the indices of `Reranker.rank`, already sorted by score).
+
+    (1) the ORDER of the similarities between the texts is the same — the
+        similarities are cosine against the query's own vector, and the
+        order of their descending sort is the order the cuts follow;
+    (2) the deviation `max |gpu_sim[i] - cpu_sim[i]|` (index by index, the
+        texts aligned) is small RELATIVE to the gaps that decide the cuts —
+        it must be strictly below the minimum gap between adjacent
+        similarities of the gpu answer sorted descending, NOT below an
+        absolute cosine threshold (a 0.04 deviation passes an absolute 0.1
+        while it flips every cut whose gap is 0.02 or less);
+    (3) the RERANK order of the fixed pairs matches.
+
+    The answer is `(ok, reason)`: `""` when the checks pass (the caller
+    prints the measured max deviation from its own vectors), and when one
+    fails, the reason names WHICH check failed — 'order', the measured
+    deviation and the gap it was above, or 'rerank'.
+    """
+    n = len(gpu_vecs)
+    if len(cpu_vecs) != n:
+        return False, (f"the two sides embedded {len(gpu_vecs)} and "
+                       f"{len(cpu_vecs)} vectors of the corpus of {n}; the "
+                       "comparison cannot align them")
+    axis = gpu_vecs[0]  # the query's own vector, on the gpu side
+    gpu_sim = [cosine(axis, v) for v in gpu_vecs[1:]]
+    cpu_sim = [cosine(axis, v) for v in cpu_vecs[1:]]
+    # (1) the order: the indices of the similarities sorted descending, on
+    # both sides. A swap anywhere flips a cut the recall makes by rank, and
+    # no deviation rule below can excuse it.
+    gpu_order = [i for i, _ in sorted(enumerate(gpu_sim), key=lambda p: -p[1])]
+    cpu_order = [i for i, _ in sorted(enumerate(cpu_sim), key=lambda p: -p[1])]
+    if gpu_order != cpu_order:
+        return False, ("the order of the similarities differs between the "
+                       "dzn and the no-device profile (gpu "
+                       f"{gpu_order}, cpu {cpu_order}); the cuts would land "
+                       "on different texts")
+    # (2) the deviation, relative to the gaps: the minimum gap between
+    # adjacent similarities of the gpu answer, descending. A deviation
+    # strictly above it can push one similarity past the next and flip a
+    # cut; at or below it, no cut moves. A zero gap (a tie in the gpu
+    # answer) makes ANY nonzero deviation fail — the conservative reading,
+    # because a corpus with no gap there carries no cut to protect.
+    dev = max(abs(g - c) for g, c in zip(gpu_sim, cpu_sim))
+    srt = sorted(gpu_sim, reverse=True)
+    min_gap = min(a - b for a, b in zip(srt, srt[1:]))
+    if dev > min_gap:
+        return False, (f"the maximum deviation of the dzn similarities from "
+                       f"the no-device ones is {dev:.4f}, above the minimum "
+                       f"gap {min_gap:.4f} between adjacent similarities; "
+                       "a cut could flip")
+    # (3) the rerank order of the fixed pairs.
+    if list(gpu_rank) != list(cpu_rank):
+        return False, (f"the rerank order of the fixed pairs differs (gpu "
+                       f"{list(gpu_rank)}, cpu {list(cpu_rank)})")
+    return True, ""

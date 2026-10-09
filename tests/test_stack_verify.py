@@ -18,6 +18,7 @@ The clock is `time.monotonic` in the shape the code calls it with: a zero-arg
 function, so the test advances it by hand.
 """
 import ast
+import math
 import os
 import sys
 import tempfile
@@ -355,6 +356,161 @@ class TestTheRecallTopK(unittest.TestCase):
         self.assertIsNotNone(top_k, "the TOP_K = env_num(...) assignment in hooks/recall.py")
         self.assertIsInstance(top_k, ast.Constant)
         self.assertEqual(int(top_k.value), verify.CALIBRATION_RERANK_DOCS)
+
+
+class TestCosine(unittest.TestCase):
+    def test_identical_vectors_are_one(self):
+        # The norms' squares can miss the dot by an ulp, so the comparison is
+        # to within precision, not byte-equality.
+        self.assertAlmostEqual(verify.cosine([0.5, -1.0, 2.0], [0.5, -1.0, 2.0]), 1.0,
+                               places=12)
+
+    def test_orthogonal_vectors_are_zero(self):
+        self.assertEqual(verify.cosine([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), 0.0)
+
+    def test_the_known_pair(self):
+        # [1, 0] vs [1, 1]: the cosine is 1/sqrt(2) by the definition itself.
+        self.assertAlmostEqual(verify.cosine([1.0, 0.0], [1.0, 1.0]), 1 / math.sqrt(2),
+                               places=12)
+
+    def test_a_zero_norm_vector_is_a_degenerate_input(self):
+        # A zero-norm vector has no direction: the cosine of it is defined as
+        # 0.0, deterministically, so a degenerate corpus cannot divide by zero.
+        self.assertEqual(verify.cosine([0.0, 0.0], [0.0, 0.0]), 0.0)
+        self.assertEqual(verify.cosine([0.0, 0.0], [1.0, 1.0]), 0.0)
+
+
+class TestNumericalTexts(unittest.TestCase):
+    """The fixed corpus of the dzn check: Ruling R1 makes it its own constant
+    (the calibration's is synthetic and degenerate: one 4095-char text and 20
+    IDENTICAL documents, a corpus in which every similarity is a tie)."""
+
+    def test_the_corpus_is_fixed_distinct_and_english(self):
+        # 8 DISTINCT, stable, English texts: a fixed query plus 7 documents.
+        # The documents differ in topic AND in length (30 to ~600 chars), so
+        # the similarities the models compute over them have real gaps — the
+        # gaps the relative deviation is measured against.
+        texts = verify.NUMERICAL_TEXTS
+        query = verify.NUMERICAL_QUERY
+        self.assertEqual(len(texts), 8)
+        self.assertNotIn(query, texts, "the query is a separate constant")
+        self.assertEqual(len(set(texts)), 8, "the texts must be distinct")
+        self.assertEqual(len(set(texts) | {query}), 9, "no text equals the query")
+        self.assertTrue(all(t.isascii() and t.strip() for t in [*texts, query]))
+        self.assertTrue(all(t == t.lower() for t in texts), "lowercase English")
+        self.assertLessEqual(len(query), 200)
+        self.assertTrue(30 <= min(len(t) for t in texts)
+                        <= max(len(t) for t in texts) <= 800,
+                        "the documents span short to a few hundred chars")
+
+    def test_the_query_is_not_one_of_the_documents(self):
+        # The query must be its own text: embedding it as a ninth vector and
+        # ranking the eight documents against it is what the check compares.
+        self.assertNotIn(verify.NUMERICAL_QUERY, verify.NUMERICAL_TEXTS)
+
+
+def _side(sims):
+    """The vectors one side of the comparison embedded: `[1, 0]` for the query
+    and `[s, sqrt(1 - s^2)]` for each document, so `cosine(query, doc_i)` is
+    EXACTLY `sims[i]` (the dot is `s`, both norms are 1) — a compare over
+    these sides measures the deviation of the sims themselves, the order of
+    the similarities is the order of the sims, and the gaps are the gaps of
+    the sims. Distinct sims keep the documents distinct."""
+    vecs = [[1.0, 0.0]]
+    for s in sims:
+        vecs.append([s, math.sqrt(max(0.0, 1.0 - s * s))])
+    return vecs
+
+
+def _ranks(sims):
+    """The similarity order of `sims`: the indices sorted by sim descending —
+    the order a healthy reranker of these texts would answer."""
+    return [i for i, _ in sorted(enumerate(sims), key=lambda p: -p[1])]
+
+
+class TestNumericalCompare(unittest.TestCase):
+    def test_identical_sims_and_rank_pass(self):
+        sims = [0.9, 0.7, 0.5, 0.4, 0.35, 0.2, 0.1, 0.05]
+        gpu, cpu = _side(sims), _side(sims)
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks(sims), _ranks(sims))
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_an_order_swap_fails_naming_order(self):
+        # The two texts adjacent in similarity TRADE PLACES between the gpu
+        # and the cpu answers (the values of documents 2 and 3 are swapped):
+        # the ORDER of the similarities differs, which flips a cut — the
+        # check (1) failure, reported before any deviation is considered.
+        sims = [0.9, 0.7, 0.5, 0.4, 0.35, 0.2, 0.1, 0.05]
+        swapped = list(sims)
+        swapped[2], swapped[3] = swapped[3], swapped[2]
+        gpu, cpu = _side(sims), _side(swapped)
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks(sims), _ranks(sims))
+        self.assertFalse(ok)
+        self.assertIn("order", reason)
+
+    def test_a_deviation_above_the_min_gap_fails_naming_the_deviation_and_the_gap(self):
+        # Same ORDER, but the deviation (0.05 at the first text) is LARGER than
+        # the minimum gap between adjacent similarities of the gpu answer
+        # (0.02): a deviation that can flip a cut, check (2) — and an ABSOLUTE
+        # cosine threshold (0.05 < 0.1) would pass it, the relative rule does
+        # not, which is the spec-mestra's own contrast.
+        sims = [0.9, 0.7, 0.5, 0.3, 0.28, 0.2, 0.1, 0.05]  # min gap 0.02
+        dev = list(sims)
+        dev[0] = 0.85  # max |dev - sims| = 0.05, order untouched
+        gpu, cpu = _side(dev), _side(sims)
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks(dev), _ranks(sims))
+        self.assertFalse(ok)
+        self.assertIn("deviation", reason)
+        self.assertIn("0.05", reason)
+        self.assertIn("0.02", reason)
+
+    def test_a_deviation_below_the_min_gap_passes(self):
+        # The same shape, deviation 0.015 < min gap 0.02: the relative rule
+        # passes what the spec wants to pass (the cuts cannot flip).
+        sims = [0.9, 0.7, 0.5, 0.3, 0.28, 0.2, 0.1, 0.05]  # min gap 0.02
+        dev = list(sims)
+        dev[0] = 0.885  # deviation 0.015, order untouched
+        gpu, cpu = _side(dev), _side(sims)
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks(dev), _ranks(sims))
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_identical_sims_with_a_swapped_rank_fail_naming_rerank(self):
+        # Check (3) alone: the similarities agree exactly, but the rerank
+        # order of the fixed pairs differs (two indices swapped).
+        sims = [0.9, 0.7, 0.5, 0.4, 0.35, 0.2, 0.1, 0.05]
+        gpu, cpu = _side(sims), _side(sims)
+        rank = list(_ranks(sims))
+        rank[1], rank[2] = rank[2], rank[1]  # swap two adjacent pair indices
+        ok, reason = verify.numerical_compare(gpu, cpu, rank, _ranks(sims))
+        self.assertFalse(ok)
+        self.assertIn("rerank", reason)
+
+    def test_a_degenerate_equal_value_corpus_fails_on_any_nonzero_deviation(self):
+        # The conservative case: the three documents at 0.5 tie, so the
+        # minimum gap is 0, and ANY nonzero deviation is above it (0.0001 > 0)
+        # — a corpus with no gap between them cannot be trusted to cut, and
+        # the check says so instead of passing on the tie. The order is kept
+        # (the bump is inside the tie group's own slot), so the gap check is
+        # the one that fails, not the order.
+        sims = [0.9, 0.7, 0.5, 0.5, 0.5, 0.3, 0.2, 0.1]  # min gap 0 (the tie)
+        dev = list(sims)
+        dev[2] = 0.5 + 1e-4
+        gpu, cpu = _side(dev), _side(sims)
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks(dev), _ranks(sims))
+        self.assertFalse(ok)
+        self.assertIn("gap", reason)
+        self.assertIn("0", reason)
+
+    def test_identical_degenerate_corpus_passes(self):
+        # The same tie everywhere, on BOTH sides: the deviation is 0, which is
+        # not above the 0 gap, and no order differs — the tie passes, which is
+        # the only reading of the rule that is not vacuous.
+        sims = [0.9, 0.7, 0.5, 0.5, 0.5, 0.3, 0.2, 0.1]
+        gpu, cpu = _side(sims), _side(sims)
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks(sims), _ranks(sims))
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

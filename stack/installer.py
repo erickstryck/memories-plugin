@@ -29,9 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
+from core import build_embedder, build_reranker
 from core import setup as core_setup
 from core.config import Config
+from core.embedding import Embedder
 from core.errors import CoreError
+from core.reranking import Reranker
 
 from . import StackError, catalog, compose, fetch, facts, health, process, state, verify
 from .backends import (BACKENDS, MISSING, Availability, Option, READY,
@@ -67,6 +70,13 @@ DZN_BUILD_TIMEOUT = 3600.0
 #: The token and the manifest are cheap registry reads: the pull itself has
 #: the 1800 s bound of the plan, the check does not.
 _DZN_MANIFEST_TIMEOUT = 30.0
+#: The project of the NUMERICAL check's throwaway no-device servers. The
+#: render names every container `<project>-<service>` (M6: the explicit
+#: `container_name`), so a file rendered for the STACK'S OWN project would
+#: `up -d` into the containers that are running and `down` them; a distinct
+#: project keeps the throwaway's names, labels and volume apart from the
+#: stack's, and the `down` that follows removes only the throwaway.
+NUMERICAL_PROJECT_SUFFIX = "-numcheck"
 
 
 class Prompter(Protocol):
@@ -236,6 +246,9 @@ class Deps:
     status: Callable[[str], int | None] = health.http_status
     diagnose: Callable[[Config], dict] = core_setup.diagnose
     calibrate: Callable[..., tuple] = verify.calibrate
+    numerical: Callable[..., tuple[bool, str]] = verify.numerical_compare
+    numerical_embedder: Callable[[Config], Embedder] = build_embedder
+    numerical_reranker: Callable[[Config], Reranker | None] = build_reranker
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     dzn_reachable: Callable[[str], bool] = field(default=dzn_image_reachable)
@@ -274,6 +287,7 @@ def provision(request: Request, deps: Deps) -> "state.StackState | None":
     _download(ctx)
     _write_compose_and_start(ctx, plan)
     dim = _verify_functional(ctx)
+    _verify_numerical(ctx, plan)
     _calibrate(ctx, plan)
     _save_config(ctx, plan, dim)
     return _finish(ctx)
@@ -542,15 +556,21 @@ def _availability(ctx: _Ctx) -> dict[str, Availability]:
             for b in BACKENDS}
 
 
-def _probe_plan(ctx: _Ctx, backend: str, gpu_index: int | None) -> compose.Plan:
+def _probe_plan(ctx: _Ctx, backend: str, gpu_index: int | None, *,
+                ports: dict[str, int] | None = None,
+                project: str | None = None) -> compose.Plan:
     """A probe render of `backend`: the device is still unknown at this
     point (the proof step names it), so it renders without one; `gpu_index`
-    is the nvidia-smi index the nvidia profile needs per file."""
+    is the nvidia-smi index the nvidia profile needs per file. `ports` and
+    `project` override the request's, for a probe that must run beside the
+    stack without landing on its own containers (the dzn check's
+    throwaway, which renders the same profile with no device)."""
     return compose.Plan(
         platform=ctx.platform, runtime=ctx.runtime.name, backend=backend,
-        device=None, gpu_index=gpu_index, ports=ctx.ports,
+        device=None, gpu_index=gpu_index, ports=ports or ctx.ports,
         stack_dir=ctx.deps.stack_dir, images=ctx.images,
-        selinux=ctx.deps.facts.selinux, project=ctx.request.project)
+        selinux=ctx.deps.facts.selinux,
+        project=project or ctx.request.project)
 
 
 def _write_probes(ctx: _Ctx) -> None:
@@ -572,15 +592,18 @@ def _write_probes(ctx: _Ctx) -> None:
 
 
 def _run_compose(ctx: _Ctx, file: Path, *args: str, step: str = "install",
-                 timeout: float = 60.0, stream: bool = False) -> "object":
+                 timeout: float = 60.0, stream: bool = False,
+                 project: str | None = None) -> "object":
     """One compose command through the runtime that serves the stack: its
     provider, the project (M6: the volume name depends on it), the timeout of
-    the plan's table. A failure names the command and shows its output."""
+    the plan's table. A failure names the command and shows its output.
+    `project` overrides the request's project — the throwaway the dzn check
+    renders under its own so it never lands on the stack's containers."""
     provider = ctx.runtime.compose_provider().provider
     if provider is None:
         raise StackError(f"{ctx.runtime.name} has no compose provider",
                          step="runtime", fix="install a compose provider")
-    out = ctx.runtime.compose(provider, ctx.request.project, file, *args,
+    out = ctx.runtime.compose(provider, project or ctx.request.project, file, *args,
                               timeout=timeout, stream=stream)
     if not out.ok:
         detail = out.stderr.strip() or out.stdout.strip() or "(no output)"
@@ -900,6 +923,130 @@ def _verify_functional(ctx: _Ctx) -> int | None:
     for check in checks:
         ctx.deps.reporter.ok(f"{check.name}: {check.detail}")
     return dim
+
+
+def _numerical_rank(deps, cfg: Config, query: str, texts: list[str]) -> list[int]:
+    """The rerank order of the fixed pairs on one side: the indices the
+    reranker answers, in its score order (`rank` already sorts them). The
+    builders come from `deps` (the test's fakes, the core's clients in
+    production); a missing reranker is a refusal, not a degradation — the
+    stack the check runs on just passed its functional check, which includes
+    the Re-rank, so None here is a broken install, and the check names it.
+    """
+    reranker = deps.numerical_reranker(cfg)
+    if reranker is None:
+        raise StackError(
+            "the numerical check needs the rerank server, and none is configured",
+            step="verify",
+            fix="the stack's functional check passed with a rerank; re-run the "
+                "install: qctx install")
+    pairs, _info = reranker.rank(query, texts)
+    return [index for index, _score in pairs]
+
+
+def _verify_numerical(ctx: _Ctx, plan: compose.Plan) -> None:
+    """Step 10, the dzn half: the NUMERICAL verification of the master spec
+    ('Imagem própria e GPU no Windows' -> 'Verificação numérica'). WHY: the
+    dzn driver (Mesa over D3D12, the only GPU path on Windows) declares itself
+    non-conformant, so this step does not trust a bare 'it ran': with the
+    chosen profile ALREADY UP it embeds the fixed corpus (`verify.NUMERICAL_QUERY`
+    plus `verify.NUMERICAL_TEXTS`, owned by `verify`) on the running dzn stack
+    AND on the SAME profile WITHOUT a device — the dzn image is the official
+    one plus the driver, so it runs CPU without `/dev/dxg` — and compares the
+    two answers: the order of the similarities, the deviation relative to the
+    gaps that decide the cuts, and the rerank order (`verify.numerical_compare`,
+    injected through `deps.numerical` so the tests drive it with fakes).
+
+    THE MENU DOES NOT RUN THIS (spec-2026-10-09, 'A prova de GPU e o menu'):
+    the menu precedes the download, and the comparison needs models running;
+    the step that runs it is the verification of the stack that is up, which
+    is this one, and it runs ONLY for the dzn profile — the cpu profile on
+    WSL2 runs the official image without a device and passes the functional
+    check it already had, no numerical one.
+
+    The no-device side is a THROWAWAY: the same probe render `_write_probes`
+    writes for the dzn proof (`_probe_plan` with no device — `-dev none`,
+    the WSL mounts the dzn patch always carries), on FREE PORTS beside the
+    stack's own, and under a DISTINCT project (`NUMERICAL_PROJECT_SUFFIX` —
+    the render names every container `<project>-<service>`, M6, so the
+    stack's own project would land the `up` on the containers that are
+    running and the `down` on the stack itself). It is brought up with
+    `compose up -d` of the embed and rerank services only, readiness waited
+    on like the stack's, consulted with the corpus, and torn down in a
+    `finally` so a failure never leaks the container.
+
+    A failure raises with `step='verify'` and the fix that says WHY the
+    check failed (the reason `numerical_compare` gave) and offers the CPU
+    profile with `--stack cpu` — NOTHING is written, because `_save_config`
+    comes later and is never reached. A success prints one ok line with the
+    measured maximum deviation.
+    """
+    if plan.backend != "dzn":
+        return
+    deps = ctx.deps
+    deps.reporter.step("verifying the dzn numerically against the no-device profile")
+    cfg = verify.stack_config(ctx.ports)
+    corpus = [verify.NUMERICAL_QUERY, *verify.NUMERICAL_TEXTS]
+    texts = list(verify.NUMERICAL_TEXTS)
+    gpu_vecs = deps.numerical_embedder(cfg).embed(corpus)
+    gpu_rank = _numerical_rank(deps, cfg, verify.NUMERICAL_QUERY, texts)
+    # The no-device side: the probe render of the dzn profile WITHOUT a
+    # device (`-dev none`), on a free port beside the stack's own — the same
+    # image (the dzn is the official one plus the driver), so what is
+    # compared is the driver's numbers against its own CPU numbers.
+    ports = dict(plan.ports)
+    for service in ("embed", "rerank"):
+        port = plan.ports[service]
+        for candidate in (port + catalog.PORT_FALLBACK_OFFSET + i
+                          for i in range(100)):
+            if candidate not in ports.values() and deps.port_free(candidate):
+                ports[service] = candidate
+                break
+        else:
+            raise StackError(
+                f"no free port beside {port} for the no-device {service} server",
+                step="verify", fix="free one of those ports, or pass the free one")
+    cpu_plan = _probe_plan(ctx, "dzn", None, ports=ports,
+                           project=plan.project + NUMERICAL_PROJECT_SUFFIX)
+    file = deps.stack_dir / "probe" / "dzn-cpu.yaml"
+    file.write_text(compose.dump(cpu_plan))
+    try:
+        _run_compose(ctx, file, "up", "-d", "--no-deps", "embed", "rerank",
+                     timeout=600.0, step="verify", project=cpu_plan.project)
+        health.wait_ready(health.endpoints(ports), status=deps.status,
+                          clock=deps.clock, sleep=deps.sleep)
+        cpu_cfg = verify.stack_config(ports)
+        cpu_vecs = deps.numerical_embedder(cpu_cfg).embed(corpus)
+        cpu_rank = _numerical_rank(deps, cpu_cfg, verify.NUMERICAL_QUERY, texts)
+    finally:
+        # The throwaway is torn down HERE, not in `_finish`: a failure must
+        # not leak the container, and the probe file is the probe file
+        # (`_finish` removes the whole directory at the end of a GOOD install).
+        # Its project is its own, so the `down` never reaches the stack's
+        # containers (the names differ by the suffix).
+        try:
+            _run_compose(ctx, file, "down", "--timeout", "10", timeout=120.0,
+                         step="verify", project=cpu_plan.project)
+        except StackError:
+            deps.reporter.warn("the no-device dzn container did not stop "
+                               "cleanly; stop it with: compose down "
+                               f"against {file.name}")
+    gpu_side = {"vecs": gpu_vecs, "rank": gpu_rank}
+    cpu_side = {"vecs": cpu_vecs, "rank": cpu_rank}
+    ok, reason = deps.numerical(gpu_side, cpu_side)
+    if not ok:
+        raise StackError(
+            "the dzn numerical verification failed: " + reason, step="verify",
+            fix="the dzn driver (Vulkan over D3D12) declared itself "
+                "non-conformant and did not keep the numbers the no-device "
+                "profile gives; re-run the install with --stack cpu (the "
+                "official image, no device, the numbers the check compares "
+                "against)")
+    axis = gpu_side["vecs"][0]
+    max_deviation = max(abs(verify.cosine(axis, g) - verify.cosine(axis, c))
+                        for g, c in zip(gpu_side["vecs"][1:], cpu_side["vecs"][1:]))
+    deps.reporter.ok(f"dzn numerical check: max deviation {max_deviation:.3e} "
+                     "against the no-device profile, order and rerank agree")
 
 
 def _calibrate(ctx: _Ctx, plan: compose.Plan) -> None:

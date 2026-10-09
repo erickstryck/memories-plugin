@@ -155,6 +155,39 @@ def raising_calibrate(cfg, budgets, *, clock=None, memory=None):
     raise EmbeddingError("could not reach http://127.0.0.1:8003/v1/embeddings")
 
 
+class _NumericalEmbedder:
+    """The `embed` contract of `core/embedding.py`, no HTTP: one distinct
+    unit vector per corpus text, so the installed step can run its real
+    embedder seam against the fakes without a server. The vectors are never
+    read by a test: the compare is injected (the pure `numerical_compare` is
+    covered in `tests/test_stack_verify.py`), so only the SHAPE matters."""
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0 / (i + 1), 0.0, 0.0] for i in range(len(texts))]
+
+
+class _NumericalReranker:
+    """The `rank` contract of `core/reranking.py`, no HTTP: the indices in
+    ascending order, the `rank` shape of `(pairs sorted by score desc, info)`
+    with `info["ok"]` set. The order is never read by a test either: the
+    compare is injected and sees only this fake's own pairs."""
+
+    def rank(self, query: str, documents: list[str]):
+        pairs = [(i, 1.0 / (i + 1)) for i in range(len(documents))]
+        return pairs, {"ok": True, "contract": "jina", "was_logit": False}
+
+
+def _numerical_deps(numerical):
+    """The `Deps` fields the dzn step needs when a test injects a compare:
+    the compare itself plus the embedder/reranker builders the step drives —
+    the fakes above, so no HTTP and no real server run."""
+    if numerical is None:
+        return {}
+    return {"numerical": numerical,
+            "numerical_embedder": lambda cfg: _NumericalEmbedder(),
+            "numerical_reranker": lambda cfg: _NumericalReranker()}
+
+
 def timed_calibrate(embed_s: float, rerank_s: float):
     """The REAL `verify.calibrate`, over the shared embedder/reranker fakes of
     `tests/test_stack_verify.py` and a clock scripted to the given durations, with
@@ -207,7 +240,7 @@ def make_runtime(name, eng, list_devices=None, fail=None, argv=("docker", "compo
 def run_case(tmp, *, request, runtimes, facts, prompter, reporter, config,
              env_extra=None, port_free=None, status=None, diagnose=None,
              calibrate=None, clock=None, sleep=None, budgets=None,
-             dzn_reachable=None, dzn_runner=None):
+             dzn_reachable=None, dzn_runner=None, numerical=None):
     """Builds the `Deps` over a temp stack directory and runs `provision` with
     the small patched models. Returns the `StackState`, `None`, or the
     `StackError` that escaped, so a test asserts on whichever it got.
@@ -215,7 +248,12 @@ def run_case(tmp, *, request, runtimes, facts, prompter, reporter, config,
     default) answers True for every pin, a bool answers that, or a callable is
     passed through as `ref -> bool` so the test can spy on it. `dzn_runner` is
     the `Runner` the local build runs through; a test passes a recording
-    `FakeRunner` and reads its `.calls` to prove the exact `docker build`."""
+    `FakeRunner` and reads its `.calls` to prove the exact `docker build`.
+    `numerical` is the dzn check's compare, `(gpu_side, cpu_side) -> (ok,
+    reason)`: None (the default) is the REAL `verify.numerical_compare` driven
+    by the real `build_embedder`/`build_reranker` over the stack's endpoints
+    (which the tests do not reach, because they inject a fake), and a test
+    passes its own compare to drive the step both ways without a server."""
     transport = UrlTransport({_EMBED.url(): FakeTransport(b"x" * _EMBED.size),
                               _RERANK.url(): FakeTransport(b"y" * _RERANK.size)})
     env = {"HOME": str(tmp)}
@@ -236,7 +274,7 @@ def run_case(tmp, *, request, runtimes, facts, prompter, reporter, config,
         calibrate=calibrate or default_calibrate,
         clock=clock if clock is not None else (lambda: 0.0),
         sleep=sleep if sleep is not None else (lambda seconds: None),
-        dzn_reachable=reach, dzn_runner=dzn_runner)
+        dzn_reachable=reach, dzn_runner=dzn_runner, **_numerical_deps(numerical))
     with mock.patch.multiple(catalog, MODELS=(_EMBED, _RERANK),
                              MODELS_BYTES=_EMBED.size + _RERANK.size):
         try:
@@ -1292,6 +1330,157 @@ class TestTheReachabilityCheckOfThePin(unittest.TestCase):
             "ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382",
             token=_NoTokenFile(), manifest_status=manifest_status))
         self.assertEqual([], seen)
+
+
+LIST_DZN = (
+    "Available devices:\n"
+    "  Vulkan0: Microsoft Direct3D12 (NVIDIA GeForce RTX 4090) (24564 MiB, 23000 MiB free)\n"
+)
+
+#: The deviation the dzn check measured on a passing compare, for the ok line.
+NUM_OK_MAX_DEV = 2.1e-05
+
+
+def passing_numerical(_gpu, _cpu):
+    """The injected compare, passing: the contract's `(ok, reason)` with the
+    reason the spec asks the ok line to carry — the measured max deviation."""
+    return True, f"max deviation {NUM_OK_MAX_DEV:.3e}"
+
+
+def failing_numerical(_gpu, _cpu):
+    """The injected compare, failing the way check (2) fails: the deviation is
+    named next to the minimum gap the deviation is measured against (no
+    absolute cosine threshold — the spec's relative rule)."""
+    return False, ("the gpu similarity deviates 0.04 from the no-device one, "
+                   "above the minimum gap 0.02 between adjacent similarities")
+
+
+class TestTheDznNumericalCheck(ProvisionTestCase):
+    """The dzn check (spec-mestra, 'Imagem própria e GPU no Windows' ->
+    'Verificação numérica'; spec-2026-10-09, 'A prova de GPU e o menu'): the
+    dzn driver declares itself non-conformant, so the install does not trust a
+    bare 'it ran' — it embeds the FIXED corpus on the dzn profile that is up
+    AND on the same profile without a device (the dzn image runs CPU), and
+    compares the order of the similarities, the deviation relative to the
+    gaps, and the rerank order. The MENU never runs this (the menu precedes
+    the download, and the comparison needs models running); this step does,
+    with the stack up, and a failure aborts BEFORE the config is written,
+    offering the cpu profile with the reason. Only the dzn profile gets it:
+    the cpu profile on WSL2 runs the official image, no device, and passes
+    the functional check it already had."""
+
+    DZN_FACTS = None  # the facts every case here runs on: WSL2, a proven dzn
+
+    @classmethod
+    def setUpClass(cls):
+        cls.DZN_FACTS = facts_for(wsl=True)
+
+    def _docker(self):
+        # WSL2 with the dzn GPU proven in the container: the profile reaches
+        # the menu as READY, and the stack comes up on the dzn backend.
+        return make_runtime("docker", docker_engine(), list_devices={"dzn": LIST_DZN})
+
+    def test_dzn_numerical_failure_aborts_before_the_config(self):
+        # plan.backend == 'dzn' + an injected failing compare: the flow stops
+        # with a StackError of step 'verify' whose fix says why (the reason
+        # the compare gave) and offers `--stack cpu`, and the config is never
+        # written — `_save_config` comes later and is never reached, which is
+        # what leaves the state in the `compose` phase.
+        config = FakeConfigSink()
+        reporter = RecordingReporter()
+        docker = self._docker()
+        err = run_case(self.tmp, request=installer.Request(profile="dzn", yes=True),
+                       runtimes=[docker], facts=self.DZN_FACTS,
+                       prompter=ScriptedPrompter([]), reporter=reporter,
+                       config=config, numerical=failing_numerical)
+        self.assertIsInstance(err, StackError)
+        self.assertEqual(err.step, "verify")
+        self.assertIn("--stack cpu", err.fix or "")
+        self.assertIn("0.04", str(err))  # the reason the compare gave is in the error
+        self.assertIn("0.02", str(err))
+        self.assertEqual(config.saves, [], "nothing is written after a failed check")
+        self.assertEqual(state.load(self.stack).phase, "compose")
+        # the throwaway no-device side really was served and torn down: one
+        # `up` of the embed and rerank services (NOT a `--list-devices`
+        # proof) against the rendered probe file, followed by its `down`
+        # (the finally of the step, so a failure never leaks the container)
+        on_file = lambda argv: (  # noqa: E731
+            "-f" in argv and argv[argv.index("-f") + 1].endswith("probe/dzn-cpu.yaml"))
+        ups = [list(args) for (argv, _p, args, _t, _s) in docker.calls
+               if args and args[0] == "up" and on_file(argv)]
+        downs = [list(args) for (argv, _p, args, _t, _s) in docker.calls
+                 if args and args[0] == "down" and on_file(argv)]
+        self.assertEqual(len(ups), 1, "the no-device side was brought up")
+        self.assertIn("embed", ups[0])
+        self.assertIn("rerank", ups[0])
+        self.assertNotIn("--list-devices", ups[0],
+                         "it SERVES embeddings, it does not list devices")
+        self.assertEqual(len(downs), 1, "the no-device side was torn down in the finally")
+        # the throwaway runs under ITS OWN project (M6: the render names every
+        # container `<project>-<service>`): with the stack's own project the
+        # `up -d` would land on the containers that are running and the
+        # `down` would remove the stack itself
+        up_argv = next(argv for (argv, _p, args, _t, _s) in docker.calls
+                       if args and args[0] == "up" and "-f" in argv
+                       and argv[argv.index("-f") + 1].endswith("probe/dzn-cpu.yaml"))
+        self.assertEqual(up_argv[up_argv.index("-p") + 1],
+                         "mnemosine" + installer.NUMERICAL_PROJECT_SUFFIX)
+        down_argv = next(argv for (argv, _p, args, _t, _s) in docker.calls
+                         if args and args[0] == "down" and "-f" in argv
+                         and argv[argv.index("-f") + 1].endswith("probe/dzn-cpu.yaml"))
+        self.assertEqual(down_argv[down_argv.index("-p") + 1],
+                         "mnemosine" + installer.NUMERICAL_PROJECT_SUFFIX)
+        # the file it was rendered from is the dzn profile WITHOUT a device:
+        # the same image, the same WSL patch, and `-dev none` (the probe
+        # directory survives a failed install, so the file is still on disk)
+        rendered = (self.stack / "probe" / "dzn-cpu.yaml").read_text()
+        self.assertIn('"-dev"', rendered)
+        self.assertIn('- "none"', rendered)
+        self.assertIn("ghcr.io/erickstryck/llama-dzn", rendered)
+
+    def test_the_cpu_profile_never_runs_the_numerical_check(self):
+        # plan.backend == 'cpu' (the official image, no device, even on WSL2):
+        # the numerical compare is a dzn-only step, and the injected spy is
+        # NEVER called — the cpu passes the functional check it already had.
+        spy_calls = []
+
+        def spy(_gpu, _cpu):
+            spy_calls.append(1)
+            return passing_numerical(_gpu, _cpu)
+
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[self._docker()], facts=self.DZN_FACTS,
+                          prompter=ScriptedPrompter([]), reporter=RecordingReporter(),
+                          config=FakeConfigSink(), numerical=spy)
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(result.profile, "cpu")
+        self.assertEqual(spy_calls, [], "the cpu profile does not get the numerical check")
+
+    def test_dzn_numerical_pass_completes_the_install_and_writes_the_config(self):
+        # plan.backend == 'dzn' + a passing compare: the install completes,
+        # the state is running, the config is written ONCE, and the ok line
+        # carries the measured max deviation.
+        config = FakeConfigSink()
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(profile="dzn", yes=True),
+                          runtimes=[self._docker()], facts=self.DZN_FACTS,
+                          prompter=ScriptedPrompter([]), reporter=reporter,
+                          config=config, numerical=passing_numerical)
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(result.profile, "dzn")
+        self.assertEqual(result.device, "Vulkan0")
+        self.assertEqual(result.phase, "running")
+        self.assertEqual(len(config.saves), 1)
+        self.assertEqual(config.file["api_base_url"], "http://127.0.0.1:8003/v1")
+        # the ok line of the check says the max deviation that was measured
+        oks = [t for m, t in reporter.calls if m == "ok"]
+        self.assertTrue(any("max deviation" in t for t in oks), oks)
+        # and it came AFTER the functional check (the stack was up and
+        # functional before the corpus was consulted)
+        calls = [t for m, t in reporter.calls]
+        i_functional = next(i for i, t in enumerate(calls) if t.startswith("Qdrant:"))
+        i_numerical = next(i for i, t in enumerate(calls) if "max deviation" in t)
+        self.assertLess(i_functional, i_numerical)
 
 
 if __name__ == "__main__":
