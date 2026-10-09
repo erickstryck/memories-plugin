@@ -279,6 +279,65 @@ class AppleGpu:
         return [d for d in parse_devices(output) if d.vendor == "apple"]
 
 
+class DznGpu:
+    """The Windows GPU profile: the one path a GPU reaches a container on
+    Windows. The official image never does (its Mesa has no dzn driver, and a
+    WSL2 container's GPU arrives over D3D12, `/dev/dxg`), so the GPU runs the
+    OWN `llama-dzn` image: the official one plus Mesa's dzn driver (Vulkan over
+    D3D12). The dzn driver names the device `Microsoft Direct3D12 (<adapter>)`,
+    where the adapter is the host's own GPU (`NVIDIA GeForce ...`, `AMD Radeon
+    ...`), so the vendor is read from the name in the parentheses. A dzn
+    container WITHOUT the WSL2 GPU passthrough lists `llvmpipe` instead (CPU
+    software rendering), which is not a GPU and must not count.
+
+    Offered ONLY on the `windows` platform, and on Docker only: Podman's WSL2
+    integration carries no GPU passthrough, so the profile points at Docker.
+    `availability` does not gate on `facts.gpus`: a WSL2 distro's `/sys/bus/pci`
+    shows the Windows host's PCI bus, not what the dzn driver sees, so the GPU
+    proof (does `/dev/dxg` actually expose a GPU to the container) belongs to the
+    installer's prove step, not here (spec 2026-10-09, decision 21). Its
+    non-conformance (`not a conformant Vulkan implementation, testing use only`)
+    is handled by the numeric verification step, so the profile is offered, not
+    experimental."""
+    id: str = "dzn"
+    experimental: bool = False
+    vendor: str | None = None
+    image_role: str | None = "llama-dzn"
+
+    def runtimes(self, platform: str) -> frozenset[str]:
+        if platform == "windows":
+            return frozenset({"docker"})
+        return frozenset()
+
+    def availability(self, platform: str, facts: HostFacts, engine: EngineInfo,
+                     runtime: str) -> Availability:
+        if platform != "windows":
+            return Availability(state=UNSUPPORTED, reason="dzn runs on windows only")
+        if runtime != "docker":
+            return Availability(state=RUNTIME,
+                                reason="podman has no gpu path on windows",
+                                needs="docker")
+        # The GPU is proven in the installer's prove step, not here: see the
+        # class docstring (a WSL2 distro's PCI bus is not what dzn sees).
+        return Availability(state=READY)
+
+    def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
+        # The spec-mestra's Windows profile, verbatim (line ~380, "Perfis de
+        # backend"): /dev/dxg in, /usr/lib/wsl mounted read-only, and
+        # LD_LIBRARY_PATH at the WSL-provided Vulkan loader libs. One GPU path
+        # (the D3D12 device the host exposes), so no runtime or index branch.
+        return {"devices": ["/dev/dxg"],
+                "volumes": ["/usr/lib/wsl:/usr/lib/wsl:ro"],
+                "environment": ["LD_LIBRARY_PATH=/usr/lib/wsl/lib"]}
+
+    def devices_seen(self, output: str) -> list[Device]:
+        # The real adapter only: the dzn driver wraps it in `Microsoft
+        # Direct3D12 (<adapter>)`. `llvmpipe` (no passthrough) is CPU software
+        # rendering, not a GPU, and carries no such marker.
+        return [d for d in parse_devices(output)
+                if "Microsoft Direct3D12" in d.name]
+
+
 def _docker_ge_29_2(version: str) -> bool:
     """Whether a Docker version is 29.2 or newer, so the `nvidia-cdi-hook` counts.
 
@@ -299,10 +358,11 @@ BACKENDS: dict[str, Backend] = {
     "intel": DriGpu("intel"),
     "nvidia": NvidiaGpu(),
     "apple": AppleGpu(),
+    "dzn": DznGpu(),
 }
 
 #: The profiles that take a device: everything but `cpu`.
-GPU_PROFILES = ("amd", "intel", "nvidia", "apple")
+GPU_PROFILES = ("amd", "intel", "nvidia", "apple", "dzn")
 
 
 def runtime_label(runtimes: frozenset[str]) -> str:

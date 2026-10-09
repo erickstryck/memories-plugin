@@ -31,6 +31,7 @@ from stack.backends import (  # noqa: E402
     Availability,
     Cpu,
     DriGpu,
+    DznGpu,
     NvidiaGpu,
     Option,
     AppleGpu,
@@ -72,6 +73,22 @@ Available devices:
 """
 
 NONE_OUTPUT = "Available devices:\n  (none)\n"
+
+#: A dzn `--list-devices` run on WSL2 with the GPU passthrough: the adapter's
+#: own name wrapped by Mesa's dzn driver (`Microsoft Direct3D12 (<adapter>)`).
+DZN_OUTPUT = (
+    "Available devices:\n"
+    "  Vulkan0: Microsoft Direct3D12 (NVIDIA GeForce RTX 4090) "
+    "(24564 MiB, 23000 MiB free)\n"
+)
+
+#: The same dzn container WITHOUT the WSL2 GPU passthrough: the Mesa Vulkan
+#: driver falls back to `llvmpipe` (CPU software rendering), which is a CPU
+#: device, not a dzn GPU.
+DZN_LLVMPIPE_OUTPUT = (
+    "Available devices:\n"
+    "  Vulkan0: llvmpipe (LLVM 15.0.7, 256 bits) (0 MiB, 0 MiB free)\n"
+)
 
 
 class ParseDevicesTest(unittest.TestCase):
@@ -162,36 +179,50 @@ class CompatibilityMatrixTest(unittest.TestCase):
             ("windows", "intel"): frozenset(),
             ("windows", "nvidia"): frozenset(),
             ("windows", "apple"): frozenset(),
+            # dzn is the ONLY gpu path on windows: the official image never
+            # reaches the gpu, so the gpu profiles (amd/intel/nvidia) run the
+            # dzn image through it, on docker. Podman has no gpu path there
+            # (no WSL2 gpu passthrough), so dzn is docker-only.
+            ("windows", "dzn"): frozenset({"docker"}),
         }
         for platform in ("linux", "macos", "windows", "freebsd"):
-            for profile in ("cpu", "amd", "intel", "nvidia", "apple"):
+            for profile in ("cpu", "amd", "intel", "nvidia", "apple", "dzn"):
                 with self.subTest(platform=platform, profile=profile):
                     self.assertEqual(expected.get((platform, profile), frozenset()),
                                      BACKENDS[profile].runtimes(platform))
 
     def test_backends_dict_is_ordered_and_complete(self):
-        self.assertEqual(("cpu", "amd", "intel", "nvidia", "apple"),
+        self.assertEqual(("cpu", "amd", "intel", "nvidia", "apple", "dzn"),
                          tuple(BACKENDS))
-        self.assertEqual(("amd", "intel", "nvidia", "apple"), GPU_PROFILES)
+        self.assertEqual(("amd", "intel", "nvidia", "apple", "dzn"), GPU_PROFILES)
         self.assertIsInstance(BACKENDS["cpu"], Cpu)
         self.assertIsInstance(BACKENDS["amd"], DriGpu)
         self.assertIsInstance(BACKENDS["intel"], DriGpu)
         self.assertIsInstance(BACKENDS["nvidia"], NvidiaGpu)
         self.assertIsInstance(BACKENDS["apple"], AppleGpu)
+        self.assertIsInstance(BACKENDS["dzn"], DznGpu)
         self.assertEqual("amd", BACKENDS["amd"].vendor)
         self.assertEqual("intel", BACKENDS["intel"].vendor)
         self.assertEqual("nvidia", BACKENDS["nvidia"].vendor)
         self.assertEqual("apple", BACKENDS["apple"].vendor)
         self.assertIsNone(BACKENDS["cpu"].vendor)
+        # dzn is the shared windows gpu profile: the vendor comes from the adapter
+        # name at runtime (the Direct3D12 wrapper), not from the profile itself.
+        self.assertIsNone(BACKENDS["dzn"].vendor)
         self.assertEqual("llama", BACKENDS["amd"].image_role)
         self.assertEqual("llama", BACKENDS["nvidia"].image_role)
         self.assertEqual("llama", BACKENDS["apple"].image_role)
         self.assertIsNone(BACKENDS["cpu"].image_role)
+        # The dzn profile runs the OWN image, not the official `llama` one.
+        self.assertEqual("llama-dzn", BACKENDS["dzn"].image_role)
         self.assertFalse(BACKENDS["cpu"].experimental)
         self.assertFalse(BACKENDS["amd"].experimental)
         self.assertFalse(BACKENDS["intel"].experimental)
         self.assertFalse(BACKENDS["nvidia"].experimental)
         self.assertTrue(BACKENDS["apple"].experimental)
+        # dzn is offered, not experimental: its non-conformance is handled by the
+        # numeric verification step (spec 2026-10-09), not by hiding it.
+        self.assertFalse(BACKENDS["dzn"].experimental)
 
 
 class AvailabilityTableTest(unittest.TestCase):
@@ -344,6 +375,30 @@ class AvailabilityTableTest(unittest.TestCase):
                   render_nodes=("renderD128",)),
              engine("docker"), "docker",
              UNSUPPORTED, "apple runs on macos only", None, None),
+            # dzn is the windows-only gpu profile. A bare windows host's
+            # /sys/bus/pci shows the Windows host's PCI bus, not what the dzn
+            # driver sees, so availability does NOT gate on facts.gpus: the
+            # gpu proof (does /dev/dxg actually expose a gpu) happens in the
+            # installer's prove step, not here (spec 2026-10-09, decision 21).
+            ("dzn is not offered off windows", "dzn", "linux",
+             host(),
+             engine("docker"), "docker",
+             UNSUPPORTED, "dzn runs on windows only", None, None),
+            ("dzn is not offered off windows (macos)", "dzn", "macos",
+             host(system="macos", arch="arm64"),
+             engine("podman", "5.7.0", os="linux"), "podman",
+             UNSUPPORTED, "dzn runs on windows only", None, None),
+            # On windows the gpu path is docker-only: podman's WSL2 integration
+            # carries no gpu passthrough, so the profile points at docker.
+            ("dzn on windows with podman", "dzn", "windows",
+             host(system="windows", arch="amd64"),
+             engine("podman", "5.7.0", os="linux"), "podman",
+             RUNTIME, "podman has no gpu path on windows", None, "docker"),
+            # docker on windows: ready, without requiring facts.gpus.
+            ("dzn ready on windows docker without facts.gpus", "dzn", "windows",
+             host(system="windows", arch="amd64", gpus=()),
+             engine("docker", "28.0.0", os="linux"), "docker",
+             READY, "", None, None),
         ]
         for (name, profile, platform, facts, engine_info, runtime, state, reason,
              fix, needs) in cases:
@@ -420,6 +475,16 @@ class ServicePatchTest(unittest.TestCase):
         self.assertEqual({"devices": ["/dev/dri:/dev/dri"],
                           "annotations": {"run.oci.keep_original_groups": "1"}},
                          BACKENDS["intel"].service_patch("podman", None))
+        # The dzn patch (spec-mestra line ~380, "Perfis de backend") is the
+        # Windows gpu profile verbatim: /dev/dxg in, /usr/lib/wsl mounted read-
+        # only, and LD_LIBRARY_PATH at the WSL-provided Vulkan loader libs. It
+        # does not depend on the runtime or a gpu index: there is one gpu path,
+        # the D3D12 device the WSL2 host exposes.
+        dzn_patch = {"devices": ["/dev/dxg"],
+                     "volumes": ["/usr/lib/wsl:/usr/lib/wsl:ro"],
+                     "environment": ["LD_LIBRARY_PATH=/usr/lib/wsl/lib"]}
+        self.assertEqual(dzn_patch, BACKENDS["dzn"].service_patch("docker", None))
+        self.assertEqual(dzn_patch, BACKENDS["dzn"].service_patch("docker", 0))
 
 
 class DevicesSeenTest(unittest.TestCase):
@@ -436,6 +501,36 @@ class DevicesSeenTest(unittest.TestCase):
                  "(16384 MiB, 8000 MiB free)\n")
         self.assertEqual(1, len(BACKENDS["apple"].devices_seen(venus)))
         self.assertEqual("apple", BACKENDS["apple"].devices_seen(venus)[0].vendor)
+
+    def test_dzn_devices_seen_keeps_the_direct3d12_adapter(self):
+        # The dzn driver names the device `Microsoft Direct3D12 (<adapter>)`:
+        # the adapter is the real gpu, and the vendor is read from the name
+        # inside the parentheses (the NVIDIA token is inside, so `vendor_of`
+        # resolves it). One dzn device in the output is one device seen.
+        devices = BACKENDS["dzn"].devices_seen(DZN_OUTPUT)
+        self.assertEqual(1, len(devices))
+        self.assertEqual("Vulkan0", devices[0].id)
+        self.assertEqual("Microsoft Direct3D12 (NVIDIA GeForce RTX 4090)",
+                         devices[0].name)
+        self.assertEqual("nvidia", devices[0].vendor)
+        # The other vendor's adapters resolve through the same wrapper: AMD and
+        # Intel tokens inside the parentheses.
+        amd = ("Available devices:\n  Vulkan0: Microsoft Direct3D12 "
+               "(AMD Radeon RX 7900 XTX) (24576 MiB, 22000 MiB free)\n")
+        self.assertEqual("amd", BACKENDS["dzn"].devices_seen(amd)[0].vendor)
+        intel = ("Available devices:\n  Vulkan0: Microsoft Direct3D12 "
+                 "(Intel(R) Arc(TM) A770) (16384 MiB, 15000 MiB free)\n")
+        self.assertEqual("intel", BACKENDS["dzn"].devices_seen(intel)[0].vendor)
+        # On the plain (non-dzn) output the adapter name is not wrapped in
+        # `Microsoft Direct3D12 (...)`, so it is not a dzn device.
+        self.assertEqual([], BACKENDS["dzn"].devices_seen(DEVICES_OUTPUT))
+        self.assertEqual([], BACKENDS["dzn"].devices_seen(NONE_OUTPUT))
+
+    def test_dzn_devices_seen_excludes_llvmpipe(self):
+        # Without the WSL2 gpu passthrough the dzn container lists `llvmpipe`
+        # (CPU software rendering). That is not a dzn gpu and must not count:
+        # the profile would otherwise claim a gpu the host never exposes.
+        self.assertEqual([], BACKENDS["dzn"].devices_seen(DZN_LLVMPIPE_OUTPUT))
 
 
 class DefaultOptionTest(unittest.TestCase):
