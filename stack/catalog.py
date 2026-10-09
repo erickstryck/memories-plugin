@@ -1,4 +1,4 @@
-"""What the stack pins: the two images, the two GGUFs, the server flags and the ports.
+"""What the stack pins: the three images, the two GGUFs, the server flags and the ports.
 
 This is DATA, not behaviour: every other `stack` module renders the compose, fetches the
 models and talks to a runtime from the constants here, so a version bump is an edit of
@@ -13,14 +13,18 @@ BUMP PROCEDURE (spec, "Bump e override"), once per release that touches this fil
 2. Qdrant: the NEXT MINOR ONLY, never skip. Qdrant guarantees storage compatibility only
    between consecutive minors, and `qdrant_version` feeds the guard that enforces it on
    `up --upgrade`.
-3. Run the opt-in integration (`QCTX_STACK_IT=1`) against the new pins, then
+3. llama-dzn: read the digest of the published image from the build workflow's run
+   (`.github/workflows/llama-dzn.yml`, which the install builds locally when the pin
+   cannot be pulled) and pin `tag@digest` in `LLAMA_DZN_IMAGE`, the same way as llama.
+   Until that first publish the pin is the tag alone.
+4. Run the opt-in integration (`QCTX_STACK_IT=1`) against the new pins, then
    regenerate the golden fixtures: `python3 tests/test_stack_compose.py --regen`.
-   (The llama-dzn image is phase 3; its digest is copied from the build workflow instead.)
 
 OVERRIDES: `--image ROLE=REF` (parsed by `parse_image_flags`) beats the
-`QCTX_STACK_IMAGE_LLAMA` / `QCTX_STACK_IMAGE_QDRANT` environment, which beats this
-catalogue (`resolve_images`). What was used is written to `stack.json`; `qctx stack up`
-without `--upgrade` repeats exactly that. Nothing here updates on its own.
+`QCTX_STACK_IMAGE_LLAMA` / `QCTX_STACK_IMAGE_QDRANT` / `QCTX_STACK_IMAGE_LLAMA_DZN`
+environment, which beats this catalogue (`resolve_images`). What was used is written to
+`stack.json`; `qctx stack up` without `--upgrade` repeats exactly that. Nothing here
+updates on its own.
 """
 import re
 from dataclasses import dataclass
@@ -32,10 +36,17 @@ LLAMA_IMAGE = ("ghcr.io/ggml-org/llama.cpp:server-vulkan-b11382"
                "@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9")
 QDRANT_IMAGE = ("docker.io/qdrant/qdrant:v1.19.2-unprivileged"
                 "@sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b")
+#: The OWN build the Windows GPU profile runs: the official image plus Mesa's dzn driver
+#: (Vulkan over D3D12), built by `.github/workflows/llama-dzn.yml`. The pin is the TAG
+#: until that workflow's first publish; the digest is copied in from the run by the bump
+#: (step 3 of the BUMP PROCEDURE), the same way as llama's.
+LLAMA_DZN_IMAGE = "ghcr.io/erickstryck/llama-dzn:b11382-mesa26.0.3"
 
-#: The roles an override may name. `llama-dzn` is phase 3 (the own build, Windows).
-IMAGES = {"llama": LLAMA_IMAGE, "qdrant": QDRANT_IMAGE}
-IMAGE_ENV = {"llama": "QCTX_STACK_IMAGE_LLAMA", "qdrant": "QCTX_STACK_IMAGE_QDRANT"}
+#: The roles an override may name. `llama-dzn` is the own build (Windows, the dzn
+#: profile), a tag until the publish workflow's first digest arrives.
+IMAGES = {"llama": LLAMA_IMAGE, "qdrant": QDRANT_IMAGE, "llama-dzn": LLAMA_DZN_IMAGE}
+IMAGE_ENV = {"llama": "QCTX_STACK_IMAGE_LLAMA", "qdrant": "QCTX_STACK_IMAGE_QDRANT",
+             "llama-dzn": "QCTX_STACK_IMAGE_LLAMA_DZN"}
 
 
 @dataclass(frozen=True)
@@ -144,26 +155,22 @@ def qdrant_version(ref: str) -> str:
 
 
 def parse_image_flags(values: list[str]) -> dict[str, str]:
-    """The `--image ROLE=REF` pairs, checked against the roles this phase knows.
-
-    `llama-dzn` is not one of them yet: it is phase 3, and naming it here would make a
-    phase-1 `--image` accept a role the catalogue has no entry for.
-    """
+    """The `--image ROLE=REF` pairs, checked against the roles this catalogue names."""
     out: dict[str, str] = {}
     for value in values:
         role, sep, ref = value.partition("=")
         if not sep:
             raise StackError(
                 f"--image wants ROLE=REF, got: {value!r}", step="catalog",
-                fix="--image llama=REF or --image qdrant=REF")
+                fix="--image ROLE=REF, ROLE is llama, qdrant or llama-dzn")
         if not ref:
             raise StackError(f"--image has an empty reference: {value!r}",
                              step="catalog",
-                             fix="--image llama=REF or --image qdrant=REF")
+                             fix="--image ROLE=REF, ROLE is llama, qdrant or llama-dzn")
         if role not in IMAGES:
             raise StackError(
                 f"unknown --image role: {role}", step="catalog",
-                fix="--image llama=REF or --image qdrant=REF")
+                fix="--image ROLE=REF, ROLE is llama, qdrant or llama-dzn")
         out[role] = ref
     return out
 

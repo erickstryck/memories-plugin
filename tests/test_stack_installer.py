@@ -205,14 +205,26 @@ def make_runtime(name, eng, list_devices=None, fail=None, argv=("docker", "compo
 
 def run_case(tmp, *, request, runtimes, facts, prompter, reporter, config,
              env_extra=None, port_free=None, status=None, diagnose=None,
-             calibrate=None, clock=None, sleep=None, budgets=None):
+             calibrate=None, clock=None, sleep=None, budgets=None,
+             dzn_reachable=None, dzn_runner=None):
     """Builds the `Deps` over a temp stack directory and runs `provision` with
     the small patched models. Returns the `StackState`, `None`, or the
-    `StackError` that escaped, so a test asserts on whichever it got."""
+    `StackError` that escaped, so a test asserts on whichever it got.
+    `dzn_reachable` drives the reachability seam of the pull step: None (the
+    default) answers True for every pin, a bool answers that, or a callable is
+    passed through as `ref -> bool` so the test can spy on it. `dzn_runner` is
+    the `Runner` the local build runs through; a test passes a recording
+    `FakeRunner` and reads its `.calls` to prove the exact `docker build`."""
     transport = UrlTransport({_EMBED.url(): FakeTransport(b"x" * _EMBED.size),
                               _RERANK.url(): FakeTransport(b"y" * _RERANK.size)})
     env = {"HOME": str(tmp)}
     env.update(env_extra or {})
+    if dzn_reachable is None:
+        reach = lambda ref: True
+    elif callable(dzn_reachable):
+        reach = dzn_reachable
+    else:
+        reach = lambda ref: bool(dzn_reachable)
     deps = installer.Deps(
         runtimes=list(runtimes), facts=facts, prompter=prompter, reporter=reporter,
         config=config, transport=transport, stack_dir=Path(tmp) / "stack",
@@ -222,7 +234,8 @@ def run_case(tmp, *, request, runtimes, facts, prompter, reporter, config,
         diagnose=diagnose or good_diagnose,
         calibrate=calibrate or default_calibrate,
         clock=clock if clock is not None else (lambda: 0.0),
-        sleep=sleep if sleep is not None else (lambda seconds: None))
+        sleep=sleep if sleep is not None else (lambda seconds: None),
+        dzn_reachable=reach, dzn_runner=dzn_runner)
     with mock.patch.multiple(catalog, MODELS=(_EMBED, _RERANK),
                              MODELS_BYTES=_EMBED.size + _RERANK.size):
         try:
@@ -993,6 +1006,100 @@ class TestProvision(ProvisionTestCase):
         self.assertNotIn("stack up", err.fix)
         self.assertEqual(config.saves, [])
         self.assertEqual(state.load(self.stack).phase, "compose")
+
+
+class TestTheDznLocalBuildFallback(ProvisionTestCase):
+    """The dzn pin may not be pullable (before the workflow's first publish, or a
+    private package): the pull step then builds the image from the repository's
+    `images/llama-dzn/` with `docker build`, and says so. The decision is the pure
+    `dzn_image_ref`; only the check of the pin's reachability is injected, so the
+    test drives it both ways without a network."""
+
+    DZN_REF = catalog.LLAMA_DZN_IMAGE
+
+    def _runner(self):
+        from tests.stack_fakes import FakeRunner
+        return FakeRunner({("docker", "build"): Completed(0)})
+
+    def test_dzn_image_ref_unreachable_builds_and_returns_built(self):
+        runner = self._runner()
+        ref, built = installer.dzn_image_ref(False, runner, self.DZN_REF)
+        self.assertEqual((ref, built), (self.DZN_REF, True))
+        # the build tags the pin's reference, from the repository's own context.
+        # The context is ABSOLUTE because the Runner contract carries no working
+        # directory and the install may run from anywhere (see DZN_BUILD_CONTEXT).
+        (argv, _timeout), = runner.calls
+        self.assertEqual(["docker", "build", "-t", self.DZN_REF,
+                          str(installer.DZN_BUILD_CONTEXT)], argv)
+        # that context really is images/llama-dzn under the repository root
+        self.assertEqual(Path("images/llama-dzn"),
+                         installer.DZN_BUILD_CONTEXT.relative_to(REPO))
+
+    def test_dzn_image_ref_reachable_never_runs_the_runner(self):
+        runner = self._runner()
+        ref, built = installer.dzn_image_ref(True, runner, self.DZN_REF)
+        self.assertEqual((ref, built), (self.DZN_REF, False))
+        self.assertEqual(runner.calls, [])
+
+    def test_the_pull_step_builds_the_dzn_image_when_the_pin_is_unreachable(self):
+        # WSL2 (windows platform): the dzn probe renders, the pull sees the dzn
+        # role in the resolved images, and the reachability check says the pin
+        # cannot be pulled -- the local build runs (through the injected runner),
+        # the pull follows it, and the line that says so is printed.
+        reporter = RecordingReporter()
+        docker = make_runtime("docker", docker_engine())
+        dzn_runner = self._runner()
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[docker], facts=facts_for(wsl=True),
+                          prompter=ScriptedPrompter([]), reporter=reporter,
+                          config=FakeConfigSink(), dzn_reachable=False,
+                          dzn_runner=dzn_runner)
+        self.assertNotIsInstance(result, StackError)
+        # the build ran (through the injected runner), tagged the pin's ref
+        (argv, _timeout), = dzn_runner.calls
+        self.assertEqual(["docker", "build", "-t", self.DZN_REF,
+                          str(installer.DZN_BUILD_CONTEXT)], argv)
+        # the pull followed the build
+        pulls = [list(args) for (_argv, _p, args, _t, _s) in docker.calls
+                 if args and args[0] == "pull"]
+        self.assertEqual(pulls, [["pull"]])
+        # the local build was reported, before the stack started
+        infos = [text for method, text in reporter.calls if method == "info"]
+        self.assertTrue(any("local build" in text for text in infos), infos)
+        i_build = reporter.calls.index(
+            ("info", next(t for t in infos if "local build" in t)))
+        i_start = reporter.calls.index(
+            next(c for c in reporter.calls
+                 if c[0] == "step" and c[1].startswith("writing compose.yaml")))
+        self.assertLess(i_build, i_start)
+
+    def test_the_pull_step_skips_the_build_when_the_pin_is_reachable(self):
+        docker = make_runtime("docker", docker_engine())
+        dzn_runner = self._runner()
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[docker], facts=facts_for(wsl=True),
+                          prompter=ScriptedPrompter([]), reporter=RecordingReporter(),
+                          config=FakeConfigSink(), dzn_reachable=True,
+                          dzn_runner=dzn_runner)
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(dzn_runner.calls, [], "a pullable pin is never built")
+
+    def test_on_linux_the_pull_step_neither_checks_nor_builds_the_dzn_image(self):
+        # the dzn role is only RESOLVED for a plan that runs the dzn backend; on
+        # linux the profile is the cpu and no manifest check may even happen
+        # (the seam must be called zero times, not merely answered True)
+        calls = []
+
+        def spy(ref):
+            calls.append(ref)
+            return True
+        docker = make_runtime("docker", docker_engine())
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[docker], facts=facts_for(),
+                          prompter=ScriptedPrompter([]), reporter=RecordingReporter(),
+                          config=FakeConfigSink(), dzn_reachable=spy)
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

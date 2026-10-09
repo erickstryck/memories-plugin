@@ -41,7 +41,8 @@ def make_state(**overrides) -> state.StackState:
         role="local", listen="127.0.0.1", platform="linux", runtime="podman",
         provider=["podman-compose"], profile="cpu", device=None, gpu_index=None,
         ports={"qdrant": 6333, "embed": 8003, "rerank": 8004},
-        images={"llama": catalog.LLAMA_IMAGE, "qdrant": catalog.QDRANT_IMAGE},
+        images={"llama": catalog.LLAMA_IMAGE, "qdrant": catalog.QDRANT_IMAGE,
+                "llama-dzn": catalog.LLAMA_DZN_IMAGE},
         models={"bge-m3-Q4_K_M.gguf": "x", "bge-reranker-v2-m3-Q4_K_M.gguf": "y"},
         qdrant_version="1.19.2", selinux=False, phase="running",
         created_at="2026-10-06T00:00:00Z", updated_at="2026-10-06T00:00:00Z",
@@ -228,12 +229,25 @@ class TestStatus(_LifecycleCase):
         self.assertEqual(result["services"]["qdrant"]["status"], 200)
 
     def test_outdated_pins_are_listed(self):
-        # the recorded images differ from the catalogue -> both roles are listed
-        st = make_state(images={"llama": "old-llama:1", "qdrant": "old-qdrant:1"})
+        # the recorded images differ from the catalogue -> the moved roles are
+        # listed. A recording written before the catalogue gained the dzn role
+        # (every pre-Task-4 stack.json) carries no `llama-dzn` at all, so the
+        # role is listed too: that is the documented behavior of a catalogue
+        # pin moving (cross-platform wizard plan, Task 4, intentional).
+        st = make_state(images={"llama": "old-llama:1", "qdrant": "old-qdrant:1",
+                                "llama-dzn": catalog.LLAMA_DZN_IMAGE})
         deps = make_deps(self.stack, state_obj=st, status_fn=lambda url: 200)
         result, _ = lifecycle.status(deps)
         self.assertIn("llama", result["outdated_pins"])
         self.assertIn("qdrant", result["outdated_pins"])
+        self.assertNotIn("llama-dzn", result["outdated_pins"])
+        # the pre-dzn-role recording: the missing role is listed, once
+        st_old = make_state(images={"llama": catalog.LLAMA_IMAGE,
+                                    "qdrant": catalog.QDRANT_IMAGE})
+        deps_old = make_deps(self.stack / "old", state_obj=st_old,
+                             status_fn=lambda url: 200)
+        result_old, _ = lifecycle.status(deps_old)
+        self.assertEqual(result_old["outdated_pins"], ["llama-dzn"])
         # the recorded images match the catalogue -> nothing is listed
         fresh = make_deps(self.stack / "fresh", state_obj=make_state(),
                           status_fn=lambda url: 200)

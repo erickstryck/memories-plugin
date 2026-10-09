@@ -144,7 +144,7 @@ class TheFixturesTest(unittest.TestCase):
             with self.subTest(fixture=name):
                 self.assertEqual((FIXTURES / f"{name}.yaml").read_text(encoding="utf-8"),
                                  dump(plan))
-        self.assertEqual(11, len(plans))
+        self.assertEqual(12, len(plans))
 
     def test_amd_and_intel_render_the_same_file(self):
         for runtime in ("docker", "podman"):
@@ -274,17 +274,44 @@ class TheRenderTest(unittest.TestCase):
         class Patching:
             def __init__(self, patch):
                 self.patch = patch
+                self.image_role = "llama"
 
             def service_patch(self, runtime, gpu_index):
                 return dict(self.patch)
 
-        for patch in ({"group_add": ["video"]}, {"command": ["--list-devices"]},
-                      {"volumes": ["/usr/lib/wsl:/usr/lib/wsl:ro"]}):
+        for patch in ({"group_add": ["video"]}, {"command": ["--list-devices"]}):
             with self.subTest(patch=patch):
                 with mock.patch.dict(BACKENDS, {"odd": Patching(patch)}):
                     with self.assertRaises(StackError) as ctx:
                         render(fixture_plan("linux", "docker", "odd"))
                 self.assertEqual("compose", ctx.exception.step)
+
+    def test_dzn_renders_the_llama_dzn_image_and_merges_its_volumes(self):
+        # The dzn profile runs its OWN image (the backend's `image_role`), and its
+        # patch carries the WSL mounts, which are MERGED over the models mount
+        # (models first), not a refusal: the dzn driver reads the Vulkan loader
+        # libs the WSL distribution provides.
+        plan = fixture_plan("windows", "docker", "dzn")
+        services = render(plan)["services"]
+        for role in ("embed", "rerank"):
+            with self.subTest(role=role):
+                self.assertEqual(plan.images["llama-dzn"], services[role]["image"])
+                self.assertEqual(
+                    [f"{plan.stack_dir}/models:/models:ro", "/usr/lib/wsl:/usr/lib/wsl:ro"],
+                    services[role]["volumes"])
+                self.assertEqual(["/dev/dxg"], services[role]["devices"])
+                self.assertEqual(["LD_LIBRARY_PATH=/usr/lib/wsl/lib"],
+                                 services[role]["environment"])
+        self.assertEqual(plan.images["qdrant"], services["qdrant"]["image"])
+
+    def test_a_backend_with_no_image_role_renders_the_llama_image(self):
+        # `image_role` None (cpu) and "llama" (the other profiles) both land on
+        # the official image: only the dzn profile names its own.
+        for backend in ("cpu", "amd"):
+            with self.subTest(backend=backend):
+                services = render(fixture_plan("linux", "docker", backend))["services"]
+                for role in ("embed", "rerank"):
+                    self.assertEqual(catalog.LLAMA_IMAGE, services[role]["image"])
 
     def test_a_stack_dir_with_a_colon_is_refused(self):
         # R2 item R2-9: the models mount is the short form `<host>:/models:ro`, which

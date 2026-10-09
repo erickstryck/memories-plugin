@@ -20,7 +20,11 @@ against: the prompts, the output and the config file are injected, so the
 whole flow is exercised with fakes and a temp directory, no engine, no
 network. The flow's own data travels in a private `_Ctx`.
 """
+import json
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -29,12 +33,13 @@ from core import setup as core_setup
 from core.config import Config
 from core.errors import CoreError
 
-from . import StackError, catalog, compose, fetch, facts, health, state, verify
+from . import StackError, catalog, compose, fetch, facts, health, process, state, verify
 from .backends import (BACKENDS, MISSING, Availability, Option, READY,
                        default_option, runtime_label)
 from .engine import ContainerRuntime, EngineInfo, log_tail
 from .facts import HostFacts
 from .fetch import Transport
+from .process import Runner
 
 #: The headroom the disk must still carry beyond the models: the Qdrant
 #: volume grows in it, and a download that fills the disk to the byte cannot
@@ -51,6 +56,17 @@ README_PATH = "README.md, section 'Local models'"
 #: the state's `ports` dict, one per service (a host:port here would conflate
 #: the two, and the phase-2 exposure classifier works on hosts).
 LISTEN_HOST = "127.0.0.1"
+#: The dzn image the fallback builds: the context is the repository's own
+#: `images/llama-dzn/` (Task 10 of the cross-platform wizard plan), addressed
+#: by ABSOLUTE path, because the `Runner` contract carries no working
+#: directory and the install may run from anywhere.
+DZN_BUILD_CONTEXT = Path(__file__).resolve().parent.parent / "images" / "llama-dzn"
+#: The build compiles Mesa's dzn driver: it is the step with no plan bound, so
+#: it gets the hour it may need rather than the pull's 1800 s.
+DZN_BUILD_TIMEOUT = 3600.0
+#: The token and the manifest are cheap registry reads: the pull itself has
+#: the 1800 s bound of the plan, the check does not.
+_DZN_MANIFEST_TIMEOUT = 30.0
 
 
 class Prompter(Protocol):
@@ -103,12 +119,91 @@ class Request:
     project: str = catalog.PROJECT
 
 
+def dzn_image_ref(reachable: bool, runner: Runner, ref: str) -> tuple[str, bool]:
+    """The image the dzn profile will run, and whether the install BUILT it.
+
+    Pure: the reachability is passed in (the pull step checks the pin first,
+    through the injectable `Deps.dzn_reachable`), so the decision is testable
+    with a fake `runner` that records the `docker build`. When the pin cannot
+    be pulled (before the workflow's first publish, or while the package is
+    private) the image is built from the repository's own `images/llama-dzn/`,
+    tagged with the pin's reference so that a later `pull` and the recorded
+    `stack.json` images see the local build as the image they named.
+    """
+    if reachable:
+        return ref, False
+    runner.run(["docker", "build", "-t", ref, str(DZN_BUILD_CONTEXT)],
+               timeout=DZN_BUILD_TIMEOUT, stream=True)
+    return ref, True
+
+
+#: The OCI media type the manifest GET asks for (an index, like the bump
+#: procedure's digest read).
+_OCI_INDEX_ACCEPT = "application/vnd.oci.image.index.v1+json"
+
+
+def _registry_manifest_status(url: str, headers: dict) -> int | None:
+    """One registry GET as a status code: None is a network error (the check
+    must read an unreachable registry as unreachable, not crash the install)."""
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=_DZN_MANIFEST_TIMEOUT) as answer:
+            return answer.status
+    except urllib.error.HTTPError as error:
+        return error.code
+    except (OSError, ValueError):
+        return None
+
+
+def dzn_image_reachable(ref: str) -> bool:
+    """Whether the dzn pin can be pulled ANONYMOUSLY, the two-step contract
+    ghcr.io answers (measured 2026-10-09):
+
+    1. `GET <host>/token?scope=repository:<owner>/<repo>:pull` -> the JSON
+       carries a `token` (a public image needs no login for this; measured
+       token len 56);
+    2. `GET <host>/v2/<owner>/<repo>/manifests/<tag>` with
+       `Authorization: Bearer <token>` and the OCI index `Accept` header.
+
+    A 200 is reachable; 403 or 404 are not; a network error is not. The raw
+    status of step 2 WITHOUT the token is 401 for a public image AND for a
+    private or nonexistent one alike (both measured), so the token is not an
+    optimisation but the whole difference between "public" and "not pullable"
+    -- a single unauthenticated probe would read the public pin as
+    unreachable and build it on every install.
+    """
+    registry, separator, remainder = ref.partition("/")
+    if not separator:
+        return False
+    parts = remainder.split(":")
+    if len(parts) < 2:
+        return False
+    repository, tag = parts[0], parts[1]
+    host = f"https://{registry}"
+    token_url = (f"{host}/token?scope=repository:{urllib.parse.quote(repository)}:pull")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(token_url),
+                                    timeout=_DZN_MANIFEST_TIMEOUT) as answer:
+            token = json.loads(answer.read()).get("token", "")
+    except (OSError, ValueError):
+        return False
+    if not token:
+        return False
+    manifest_url = (f"{host}/v2/{repository}/manifests/"
+                    f"{urllib.parse.quote(tag, safe='')}")
+    status = _registry_manifest_status(
+        manifest_url, {"Authorization": f"Bearer {token}", "Accept": _OCI_INDEX_ACCEPT})
+    return status == 200
+
+
 @dataclass
 class Deps:
     """Everything `provision` may touch, injected. `facts` is read here, not
     re-collected: gathering is the CLI's job (Task 11). The probes (port,
     http, diagnose, calibrate, clock, sleep) default to the real ones; a test
-    swaps them for fakes, so no engine, network or real time is needed."""
+    swaps them for fakes, so no engine, network or real time is needed.
+    `dzn_reachable` and `dzn_runner` are the dzn fallback's seams, defaulted
+    to the real ones: the manifest read and the CLI's subprocess runner."""
     runtimes: list[ContainerRuntime]
     facts: HostFacts
     prompter: Prompter
@@ -124,6 +219,8 @@ class Deps:
     calibrate: Callable[..., tuple] = verify.calibrate
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
+    dzn_reachable: Callable[[str], bool] = field(default=dzn_image_reachable)
+    dzn_runner: Runner = field(default_factory=process.SubprocessRunner)
 
 
 @dataclass
@@ -371,10 +468,9 @@ def _check_platform(deps: Deps) -> str:
     not any of the three, and it still points at the manual path."""
     platform = facts.platform_of(deps.facts)
     if platform not in ("linux", "macos", "windows"):
-        raise StackError("the stack runs on linux and macos in this version",
+        raise StackError("the stack runs on linux, macos and windows in this version",
                          step="platform",
-                         fix=f"until windows arrives (phase 3), set it up by hand: "
-                             f"{README_PATH}")
+                         fix=f"set it up by hand: {README_PATH}")
     return platform
 
 
@@ -473,9 +569,25 @@ def _run_compose(ctx: _Ctx, file: Path, *args: str, step: str = "install",
 def _pull(ctx: _Ctx) -> None:
     """Step 4: the images, with the provider's progress on the terminal
     (`stream=True` inherits the terminal's own stdout, the 1800 s bound of
-    the plan). The pull does not depend on the choice — every profile runs
-    the same image — so it happens before the menu, and the menu only offers
-    what the container will in fact see."""
+    the plan). The pull does not depend on the choice -- every profile runs
+    the same image -- so it happens before the menu, and the menu only offers
+    what the container will in fact see.
+
+    The exception is the dzn pin, which the pull step owns: it is resolved for
+    a plan that runs the dzn backend (the windows platform), and until the
+    workflow publishes it (or while the package stays private) it cannot be
+    pulled. The check is the injectable `Deps.dzn_reachable` (a manifest read,
+    so the test drives it both ways); when it says unreachable, the image is
+    BUILT from the repository's `images/llama-dzn/` first, and the line that
+    says the local build was used is printed before the pull runs."""
+    dzn_ref = ctx.images.get("llama-dzn")
+    if dzn_ref is not None and BACKENDS["dzn"].runtimes(ctx.platform):
+        ref, built = dzn_image_ref(ctx.deps.dzn_reachable(dzn_ref),
+                                   ctx.deps.dzn_runner, dzn_ref)
+        if built:
+            ctx.deps.reporter.info(
+                f"llama-dzn: the pin {dzn_ref} cannot be pulled; the local build "
+                f"was used (docker build from images/llama-dzn/)")
     file = ctx.deps.stack_dir / "probe" / "cpu.yaml"
     if not file.exists():
         file = ctx.deps.stack_dir / "probe" / "pull.yaml"

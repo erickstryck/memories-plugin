@@ -150,18 +150,26 @@ def _qdrant(plan: Plan) -> dict:
 
 def _server(plan: Plan, role: str) -> dict:
     label = "ro,z" if plan.selinux else "ro"
+    # The backend's `image_role` names the image the profile runs: the official
+    # one for every profile but the dzn, whose own build (the dzn driver,
+    # Windows) is a distinct pin in the catalogue. None is "llama" (cpu).
     fields = {**_common(plan, role),
-              "image": plan.images["llama"],
+              "image": plan.images[BACKENDS[plan.backend].image_role or "llama"],
               "command": catalog.server_command(role, plan.device),
               "volumes": [f"{plan.stack_dir}/models:/models:{label}"]}
     patch = BACKENDS[plan.backend].service_patch(plan.runtime, plan.gpu_index)
+    merged = dict(patch)
+    if "volumes" in patch:
+        # The dzn patch carries the WSL mounts: they ADD to the models mount
+        # (models first), they never replace it. Every other key merged over
+        # the base would replace the command or the models mount; left out of
+        # the fixed order, it would vanish from the file without a word.
+        merged["volumes"] = fields["volumes"] + list(patch["volumes"])
     for key in patch:
-        # Merged over the base, the key would replace the command or the models mount;
-        # left out of the fixed order, it would vanish from the file without a word.
-        if key in fields or key not in _SERVICE_KEYS:
+        if key != "volumes" and (key in fields or key not in _SERVICE_KEYS):
             raise StackError(f"the {plan.backend} profile cannot set {key!r} on a service",
                              step="compose")
-    return {**fields, **patch}
+    return {**fields, **merged}
 
 
 def emit(doc: dict) -> str:

@@ -21,6 +21,9 @@ AS_SHIPPED = {
              "@sha256:431561ee79ee67b3980a02ff47ed9dc19496127643b75671d9789ef693ca57f9",
     "qdrant": "docker.io/qdrant/qdrant:v1.19.2-unprivileged"
               "@sha256:efb96a9425a90d2d5a1a0a474156280df1892dcdf1af3e8515bd2589b1bfd88b",
+    # tag only: the dzn pin carries no digest until the build workflow's first
+    # publish (catalog, BUMP PROCEDURE); the digest is copied in by the bump
+    "llama-dzn": "ghcr.io/erickstryck/llama-dzn:b11382-mesa26.0.3",
 }
 
 EMBED_AS_SHIPPED = {
@@ -54,11 +57,15 @@ class TestThePinnedValues(unittest.TestCase):
         self.assertEqual(catalog.IMAGES, AS_SHIPPED)
         self.assertEqual(catalog.LLAMA_IMAGE, AS_SHIPPED["llama"])
         self.assertEqual(catalog.QDRANT_IMAGE, AS_SHIPPED["qdrant"])
+        self.assertEqual(catalog.LLAMA_DZN_IMAGE, AS_SHIPPED["llama-dzn"])
+        # the dzn pin is a tag until the workflow's first publish: no digest yet
+        self.assertNotIn("@", catalog.LLAMA_DZN_IMAGE)
 
     def test_the_image_env_names_are_the_pinned_ones(self):
         self.assertEqual(catalog.IMAGE_ENV,
                          {"llama": "QCTX_STACK_IMAGE_LLAMA",
-                          "qdrant": "QCTX_STACK_IMAGE_QDRANT"})
+                          "qdrant": "QCTX_STACK_IMAGE_QDRANT",
+                          "llama-dzn": "QCTX_STACK_IMAGE_LLAMA_DZN"})
 
     def test_the_models_are_the_pinned_ones(self):
         self.assertEqual(asdict(catalog.EMBED_MODEL), EMBED_AS_SHIPPED)
@@ -160,6 +167,8 @@ class TestTheImageOverride(unittest.TestCase):
         self.assertEqual(
             catalog.parse_image_flags(["llama=a:1", "qdrant=b:2"]),
             {"llama": "a:1", "qdrant": "b:2"})
+        # the dzn role is a catalogue entry (Task 4): an override may name it
+        self.assertEqual(catalog.parse_image_flags(["llama-dzn=r:1"]), {"llama-dzn": "r:1"})
         for bad in (["qdrant"], ["dzn=x"], ["llama="]):
             with self.subTest(bad=bad):
                 with self.assertRaises(StackError) as ctx:
@@ -168,21 +177,33 @@ class TestTheImageOverride(unittest.TestCase):
 
     def test_an_unknown_role_points_at_the_override_form(self):
         with self.assertRaises(StackError) as ctx:
-            catalog.parse_image_flags(["llama-dzn=x"])
-        self.assertEqual(ctx.exception.fix, "--image llama=REF or --image qdrant=REF")
+            catalog.parse_image_flags(["nope=x"])
+        self.assertEqual(ctx.exception.fix, "--image ROLE=REF, ROLE is llama, qdrant or llama-dzn")
 
     def test_flags_beat_env_beat_catalog(self):
         got = catalog.resolve_images({"llama": "f"},
                                      {"QCTX_STACK_IMAGE_LLAMA": "e",
                                       "QCTX_STACK_IMAGE_QDRANT": "  "})
-        self.assertEqual(got, {"llama": "f", "qdrant": catalog.QDRANT_IMAGE})
+        self.assertEqual(got, {"llama": "f", "qdrant": catalog.QDRANT_IMAGE,
+                               "llama-dzn": catalog.LLAMA_DZN_IMAGE})
 
     def test_env_beats_catalog_and_blank_env_is_no_value(self):
         got = catalog.resolve_images({},
                                      {"QCTX_STACK_IMAGE_LLAMA": "e",
                                       "QCTX_STACK_IMAGE_QDRANT": "   "})
-        self.assertEqual(got, {"llama": "e", "qdrant": catalog.QDRANT_IMAGE})
+        self.assertEqual(got, {"llama": "e", "qdrant": catalog.QDRANT_IMAGE,
+                               "llama-dzn": catalog.LLAMA_DZN_IMAGE})
         self.assertEqual(catalog.resolve_images({}, {}), catalog.IMAGES)
+
+    def test_the_dzn_role_resolves_by_flag_and_env(self):
+        # flag > env > catalogue, the same precedence as every role
+        self.assertEqual(catalog.resolve_images({"llama-dzn": "f"},
+                                                {"QCTX_STACK_IMAGE_LLAMA_DZN": "e"})["llama-dzn"],
+                         "f")
+        self.assertEqual(catalog.resolve_images({},
+                                                {"QCTX_STACK_IMAGE_LLAMA_DZN": "e"})["llama-dzn"],
+                         "e")
+        self.assertEqual(catalog.resolve_images({}, {})["llama-dzn"], catalog.LLAMA_DZN_IMAGE)
 
 
 if __name__ == "__main__":
