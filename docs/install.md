@@ -230,6 +230,31 @@ with the most memory free; an explicit `--stack <profile>` reduces the menu to
 that profile's cards (its own default) and `--yes` takes that default without
 asking.
 
+**A machine that only runs the stack.** When neither `hermes` nor `claude`
+is on PATH, the wizard says `skipping this host` for each and goes on: the
+launcher lands on PATH as a copy, the stack stands up and the configuration
+points at its local URLs, exactly as when a host is present. That is the
+whole setup for a box that exists to serve the stack, and it works the same
+way on the platforms this version runs on, **Linux and macOS** (the wizard
+is `bash` + `python3`, which is why it ships as a shell script):
+
+```bash
+git clone https://github.com/erickstryck/mnemosine.git
+cd mnemosine
+./scripts/install.sh --stack auto --yes
+```
+
+**Windows is not on that path, in this version.** The wizard detects a
+Windows host (WSL included) and refuses the stack step, pointing at the
+README's [Local models](../README.md#local-models) manual path instead
+(decision 14 of the design document: Windows arrives in phase 3, already
+with GPU, built on its own image; a Windows CPU box is what phase 1 and 2
+never deliver). So on a Windows machine the standalone setup is the manual
+one, host or not: run Qdrant and the two `llama-server` endpoints by hand
+(`docker` from Docker Desktop, or WSL2), and point the agent that uses them
+at those URLs. That manual path needs no plugin code at all, which is why
+the wizard does not try to run it.
+
 **The download has a progress bar.** The long part is the two models
 (836 MiB). It shows percent, MiB done of total, speed and ETA, rewriting one
 line on a terminal; when stdout is not a terminal (piped to a file or a log) it writes
