@@ -892,6 +892,67 @@ class TestProvision(ProvisionTestCase):
                             for method, text in reporter7.calls),
                         "a 7 GiB machine must get the RAM warning")
 
+    def test_wsl2_ram_figure_is_the_engine_vm_not_the_distro_proc(self):
+        # WSL2: `facts.system` is `linux` (the distro's own system name), but
+        # the containers run in the ENGINE's VM (Docker Desktop / podman
+        # machine), so the figure the RAM check uses is `engine.memory_bytes`,
+        # not the distro's /proc/meminfo (`facts.ram_bytes`) -- each WSL2
+        # distro is its own VM, separate from the engine's. The test's knife
+        # edge: the distro reports 32 GiB (no warning would fire from that
+        # figure), the engine's VM is 6 GiB (below the 8 GiB threshold) --
+        # only a check that reads the engine's number can fire here.
+        facts = facts_for(system="linux", wsl=True, ram=32 * GIB)
+        docker = make_runtime("docker", docker_engine(memory=6 * GIB))
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[docker], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=reporter, config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual("windows", result.platform,
+                         "wsl=True is the windows platform for the installer")
+        warns = [text for method, text in reporter.calls
+                 if method == "warn" and "RAM" in text]
+        self.assertEqual(len(warns), 1,
+                         f"the 6 GiB engine VM must get the RAM warning: {reporter.calls}")
+        self.assertIn("6", warns[0],
+                      "the warning carries the engine's figure, not the distro's")
+
+    def test_wsl2_engine_with_no_published_ram_figure_degrades_to_no_warning(self):
+        # The engine publishes no memory figure (`memory_bytes` is None): the
+        # existing `if ram is not None` guard skips the warning -- the same
+        # degradation as a linux host with no readable /proc/meminfo. No
+        # fallback is invented, and the distro's /proc figure is NOT used in
+        # its place (that is exactly the wrong number on WSL2).
+        facts = facts_for(system="linux", wsl=True, ram=32 * GIB)
+        docker = make_runtime("docker", docker_engine(memory=None))
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[docker], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=reporter, config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        self.assertFalse(any(method == "warn" and "RAM" in text
+                             for method, text in reporter.calls),
+                         "no published engine figure means no RAM warning, "
+                         "not the distro's /proc figure")
+
+    def test_linux_ram_figure_stays_the_distro_proc(self):
+        # Regression: on a plain linux host (platform linux) the figure is
+        # `facts.ram_bytes`, not the engine's. The knife edge: the engine's
+        # number is small (a warning would fire from it), the host's is large
+        # -- only a check that reads facts.ram_bytes stays silent.
+        facts = facts_for(system="linux", wsl=False, ram=16 * GIB)
+        podman = make_runtime("podman", podman_engine(memory=6 * GIB),
+                              argv=("podman", "compose"))
+        reporter = RecordingReporter()
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[podman], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=reporter, config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError)
+        self.assertEqual("linux", result.platform)
+        self.assertFalse(any(method == "warn" and "RAM" in text
+                             for method, text in reporter.calls),
+                         "a 16 GiB linux host must not get the RAM warning")
+
     def test_no_runtime_at_all_names_a_fix(self):
         # spec: every refusal carries the correction. When NO runtime binary
         # answers (the common "nothing installed" case), the fallback fix is

@@ -507,7 +507,10 @@ def _check_disk_and_ram(ctx: _Ctx) -> None:
     """Step 2: the disk gate (below the models plus headroom, minus what is
     already downloaded — a re-run only fetches the missing model) and the RAM
     warning, on the figure the containers GET: the engine's on macOS (the
-    machine's VM, not the host's RAM), the host's MemAvailable on linux."""
+    machine's VM, not the host's RAM) and on the windows platform (WSL2: the
+    engine's VM, not the distro's /proc — each WSL2 distro is its own VM,
+    separate from the one the containers run in), the host's MemAvailable on
+    linux."""
     free = ctx.deps.facts.disk_free_bytes
     if free is not None:
         have = 0
@@ -522,7 +525,8 @@ def _check_disk_and_ram(ctx: _Ctx) -> None:
                 f"plus headroom)", step="disk",
                 fix="free disk space and run again; a .part file resumes")
     engine = _engine(ctx)
-    ram = (engine.memory_bytes if ctx.deps.facts.system == "macos"
+    ram = (engine.memory_bytes
+           if (ctx.deps.facts.system == "macos" or ctx.platform == "windows")
            else ctx.deps.facts.ram_bytes)
     if ram is not None and ram < RAM_WARN_BYTES:
         ctx.deps.reporter.warn(
