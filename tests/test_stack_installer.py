@@ -377,19 +377,18 @@ class TestRuntimeAndPlatform(ProvisionTestCase):
         # WSL is read from the kernel (the `wsl` fact here stands for the
         # `microsoft` in osrelease): `platform_of` classifies it as windows,
         # and step 2 ACCEPTS that -- the refusal of the phase-1 plan is gone,
-        # with it the pointer at the README's manual path. The flow dies only
-        # later, where the profile is not READY yet (Task 2 makes `cpu`
-        # READY on windows), still naming the platform.
+        # with it the pointer at the README's manual path. With cpu READY on
+        # windows (Task 2) the flow no longer dies at the profile step: the
+        # install completes, still naming the platform.
         facts = facts_for(wsl=True)
         docker = make_runtime("docker", docker_engine())
-        err = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
-                       runtimes=[docker], facts=facts, prompter=ScriptedPrompter([]),
-                       reporter=RecordingReporter(), config=FakeConfigSink())
-        self.assertIsInstance(err, StackError)
-        self.assertNotEqual(err.step, "platform",
-                            "windows is no longer refused by step 2")
-        self.assertNotIn("Local models", str(err),
-                         "no pointer at the manual path for a windows platform")
+        result = run_case(self.tmp, request=installer.Request(profile="cpu", yes=True),
+                          runtimes=[docker], facts=facts, prompter=ScriptedPrompter([]),
+                          reporter=RecordingReporter(), config=FakeConfigSink())
+        self.assertNotIsInstance(result, StackError,
+                                 "cpu is READY on windows, so the install completes")
+        self.assertEqual("windows", result.platform)
+        self.assertEqual("cpu", result.profile)
 
     def test_wsl2_with_no_runtime_aborts_at_the_runtime_step(self):
         # WSL2, no runtime answering (Docker Desktop off, or WSL integration

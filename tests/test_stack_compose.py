@@ -6,7 +6,9 @@ rewrites them from `dump(plan)` and runs no test (step 3 of the catalogue's bump
 WHICH fixtures exist is not a list typed here: it is derived from `Backend.runtimes(platform)`,
 the spec's single source for where a profile runs ("Compatibilidade"), with `amd` and `intel`
 folded into `dri` because they render the same file. The spec's nine names are pinned
-separately, so the derivation cannot drift together with `runtimes()`.
+separately, so the derivation cannot drift together with `runtimes()` -- and the two windows
+cpu fixtures Task 2 serves (a WSL2 host runs the cpu on the official image) are pinned there
+too.
 
 The fixture plans live under the placeholder homes `/home/me` and `/Users/me`, never a real one.
 """
@@ -33,20 +35,29 @@ from stack.compose import (  # noqa: E402
 
 FIXTURES = REPO / "tests" / "fixtures" / "stack"
 
-#: Every platform `runtimes()` is asked about. Windows is phase 3 and every profile answers it
-#: with no runtime today; asking anyway is what makes a phase-3 profile show up here.
+#: Every platform `runtimes()` is asked about. Windows now serves the cpu profile
+#: (a WSL2 host with a runtime is the windows platform, cross-platform wizard
+#: plan); the GPU profiles arrive through the dzn backend (Task 3), so asking
+#: anyway is what makes a windows profile show up here.
 PLATFORMS = ("linux", "macos", "windows")
 
-#: The spec's nine ("Fixtures golden"). There is no `macos-docker-apple`: Docker Desktop
-#: passes no GPU to a container.
+#: The spec's nine ("Fixtures golden"), plus the two windows cpu fixtures Task 2
+#: serves (a WSL2 host runs the cpu on the official image, identical to linux).
+#: There is no `macos-docker-apple`: Docker Desktop passes no GPU to a container.
+#: The windows dzn fixtures join this set with Task 7.
 PHASE1_FIXTURES = {
     "linux-docker-cpu", "linux-docker-dri", "linux-docker-nvidia",
     "linux-podman-cpu", "linux-podman-dri", "linux-podman-nvidia",
     "macos-docker-cpu", "macos-podman-cpu", "macos-podman-apple",
+    "windows-docker-cpu", "windows-podman-cpu",
 }
 
 STACK_DIRS = {"linux": Path("/home/me/.local/share/mnemosine/stack"),
-              "macos": Path("/Users/me/.local/share/mnemosine/stack")}
+              "macos": Path("/Users/me/.local/share/mnemosine/stack"),
+              # The WSL2 distro is a Linux home: the state and stack dir live in
+              # the distro (decision 24), so the cpu fixture is identical to the
+              # linux one.
+              "windows": Path("/home/me/.local/share/mnemosine/stack")}
 
 #: The service keys in the spec's order, pinned here rather than read from the module.
 SERVICE_KEYS = ("container_name", "image", "restart", "command", "ports", "volumes",
@@ -133,7 +144,7 @@ class TheFixturesTest(unittest.TestCase):
             with self.subTest(fixture=name):
                 self.assertEqual((FIXTURES / f"{name}.yaml").read_text(encoding="utf-8"),
                                  dump(plan))
-        self.assertEqual(9, len(plans))
+        self.assertEqual(11, len(plans))
 
     def test_amd_and_intel_render_the_same_file(self):
         for runtime in ("docker", "podman"):
@@ -212,7 +223,7 @@ class TheRenderTest(unittest.TestCase):
                         self.assertNotIn("devices", services[role])
                         self.assertNotIn("deploy", services[role])
                     seen += 1
-        self.assertEqual(8, seen)
+        self.assertEqual(12, seen)
 
     def test_ports_bind_loopback_only(self):
         for name, plan in sorted(served_fixtures().items()):

@@ -138,11 +138,12 @@ class VendorOfTest(unittest.TestCase):
 class CompatibilityMatrixTest(unittest.TestCase):
     def test_the_compatibility_matrix_is_the_specs(self):
         # Absolute: the spec's "Compatibilidade" table is the only source.
-        # Every (platform, profile) pair phase 1 serves, pinned; the rest must
-        # be empty. Windows enters in phase 3, and until then the step says
-        # Windows is not supported "em vez de oferecer CPU" (spec, "Detecção"),
-        # so nothing runs there, the CPU included; neither does a platform the
-        # spec does not name.
+        # Every (platform, profile) pair this version serves, pinned; the rest
+        # must be empty. The cpu profile now serves windows too (cross-platform
+        # wizard, spec 2026-10-09): a WSL2 host with a runtime is the windows
+        # platform, and the cpu runs the official image there. The GPU profiles
+        # still do not (the dzn path is a separate profile); neither does a
+        # platform the spec does not name.
         both = frozenset({"docker", "podman"})
         podman = frozenset({"podman"})
         expected = {
@@ -156,7 +157,7 @@ class CompatibilityMatrixTest(unittest.TestCase):
             ("macos", "intel"): frozenset(),
             ("macos", "nvidia"): frozenset(),
             ("macos", "apple"): podman,
-            ("windows", "cpu"): frozenset(),
+            ("windows", "cpu"): both,
             ("windows", "amd"): frozenset(),
             ("windows", "intel"): frozenset(),
             ("windows", "nvidia"): frozenset(),
@@ -354,21 +355,33 @@ class AvailabilityTableTest(unittest.TestCase):
                 self.assertEqual(fix, availability.fix)
                 self.assertEqual(needs, availability.needs)
 
-    def test_cpu_is_ready_on_linux_and_macos_only(self):
-        for platform in ("linux", "macos"):
+    def test_cpu_is_ready_on_linux_macos_and_windows(self):
+        # The cpu profile serves every platform this version supports: linux,
+        # macos and windows (a WSL2 host with a runtime is the windows platform,
+        # cross-platform wizard plan, Task 1). The one-line refusal for a bare
+        # Windows lives in `install_step` (`facts.is_native_windows`), not here.
+        for platform in ("linux", "macos", "windows"):
             with self.subTest(platform=platform):
                 availability = BACKENDS["cpu"].availability(
                     platform, host(), engine("podman", "5.7.0"), "podman")
                 self.assertEqual(READY, availability.state)
                 self.assertEqual("cpu", availability.reason)
                 self.assertIsNone(availability.fix)
-        # phase 1 refuses Windows instead of offering the CPU (spec, "Detecção")
-        for platform in ("windows", "freebsd"):
+        # A platform the spec does not name is still unsupported.
+        for platform in ("freebsd",):
             with self.subTest(platform=platform):
                 availability = BACKENDS["cpu"].availability(
                     platform, host(), engine("podman", "5.7.0"), "podman")
                 self.assertEqual(UNSUPPORTED, availability.state)
                 self.assertIsNone(availability.fix)
+
+    def test_cpu_on_windows_runs_the_official_image_with_no_device(self):
+        # Spec 2026-10-09: the cpu profile on WSL2 deliberately does NOT use the
+        # dzn image (the GPU profiles do, and that is a separate profile). It
+        # runs the official image with `-dev none`, exactly like on linux: the
+        # compose diff is empty.
+        self.assertEqual({}, BACKENDS["cpu"].service_patch("docker", None))
+        self.assertEqual({}, BACKENDS["cpu"].service_patch("podman", None))
 
 
 class ServicePatchTest(unittest.TestCase):

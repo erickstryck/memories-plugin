@@ -24,9 +24,12 @@ from .devices import Device, parse_devices, vendor_of  # noqa: F401
 from .engine import EngineInfo
 from .facts import HostFacts
 
-#: The platforms phase 1 serves. Windows (WSL included) enters in phase 3, and
-#: until then the step refuses it instead of offering the CPU (spec, "Detecção").
-_PHASE1_PLATFORMS = ("linux", "macos")
+#: The platforms this version serves. Windows means WSL2 with a container
+#: runtime: Task 1 classifies such a host as the `windows` platform, and the cpu
+#: profile runs there on the official image (spec 2026-10-09). A BARE Windows
+#: (no WSL2) is still refused, but that one-liner now lives in `install_step`
+#: (`facts.is_native_windows`), not here -- so this table offers the cpu.
+_SUPPORTED_PLATFORMS = ("linux", "macos", "windows")
 
 #: The documented CDI generation (NVIDIA Container Toolkit), run as root because it
 #: writes under /etc/cdi. Without `--output` it prints the spec to stdout and writes
@@ -75,15 +78,15 @@ class Cpu:
     image_role: str | None = None
 
     def runtimes(self, platform: str) -> frozenset[str]:
-        if platform in _PHASE1_PLATFORMS:
+        if platform in _SUPPORTED_PLATFORMS:
             return frozenset({"docker", "podman"})
         return frozenset()
 
     def availability(self, platform: str, facts: HostFacts, engine: EngineInfo,
                      runtime: str) -> Availability:
-        if platform not in _PHASE1_PLATFORMS:
+        if platform not in _SUPPORTED_PLATFORMS:
             return Availability(state=UNSUPPORTED,
-                                reason="the stack runs on linux and macos in this version")
+                                reason="the stack runs on linux, macos and windows in this version")
         return Availability(state=READY, reason="cpu")
 
     def service_patch(self, runtime: str, gpu_index: int | None) -> dict:
