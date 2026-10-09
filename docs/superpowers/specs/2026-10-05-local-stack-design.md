@@ -51,7 +51,7 @@ mão hoje: embedding e rerank num host da tailnet, e o Qdrant atrás de um proxy
 | 11 | stack em outra máquina | **escuta num IP escolhido**, com chave de API obrigatória e HTTP; o HTTPS fica com o usuário, com receita documentada (tailscale serve ou proxy próprio) | o `qctx` configurar o tailscale serve; HTTPS embutido com Caddy |
 | 12 | apontar o plugin | **`qctx stack connect <host>`**, e a opção "stack remota" no `qctx install`, que chama o mesmo caso de uso | imprimir os comandos para colar no cliente |
 | 13 | organização | **uma spec, três fases, um plano por fase** | um plano só; três specs |
-| 14 | Windows entre as fases | **o Windows só entra na fase 3, já com GPU pela imagem própria**; nas fases 1 e 2 a etapa não é oferecida nele | Windows em CPU nas fases 1 e 2; trazer a imagem própria para a fase 1 |
+| 14 | Windows entre as fases | **revertida em 2026-10-09**: o Windows entra agora, via WSL2, com a jornada única (decisões 17 a 24), na [spec de 2026-10-09](2026-10-09-cross-platform-wizard-design.md); a GPU continua pela imagem própria dzn. Texto anterior: o Windows só entraria na fase 3, já com GPU pela imagem própria, e nas fases 1 e 2 a etapa não era oferecida nele | Windows em CPU nas fases 1 e 2; trazer a imagem própria para a fase 1 |
 | 15 | compatibilidade de runtime | **toda opção diz onde funciona: Docker, Podman ou os dois**, no menu, na pergunta de runtime e na documentação. O menu lista também a opção que o runtime em uso não atende, como indisponível, com o runtime que ela exige e a correção. No macOS: CPU (Docker e Podman) e GPU Apple experimental (só Podman) | mostrar só o estado de cada opção, sem dizer o runtime; esconder o que o runtime em uso não atende |
 | 16 | progresso da instalação | **barra por operação**: a baixa dos modelos (a parte longa, ~836 MiB, e a que o `qctx` controla de ponta a ponta) desenha barra com porcentagem, MiB, velocidade e ETA; o pull de imagens usa a barra nativa do provider de compose, que em TTY já desenha a dele | barra única cobrindo a instalação inteira, re-parseando o progresso do pull do compose |
 
@@ -89,9 +89,9 @@ dependem só dela, e não uma da outra. O Windows entra inteiro na fase 3, já c
 
 | fase | escopo | aceite |
 |---|---|---|
-| 1. stack local | o pacote `stack/`, a etapa no `qctx install` e `qctx stack status\|up\|down\|remove`, no Linux e no macOS, com a imagem oficial. No Windows, a etapa ainda não é oferecida | as 9 fixtures da fase; a integração opt-in no perfil `cpu`; as verificações de abertura da fase 1 |
+| 1. stack local | o pacote `stack/`, a etapa no `qctx install` e `qctx stack status\|up\|down\|remove`, no Linux, no macOS e no Windows (via WSL2, [spec de 2026-10-09](2026-10-09-cross-platform-wizard-design.md), reversão da decisão 14), com a jornada única de seis passos | as 9 fixtures da fase, mais o fixture do Windows; a integração opt-in no perfil `cpu`; as verificações de abertura da fase 1; o spike do dzn |
 | 2. modo servidor e connect | `qctx stack install --listen`, as chaves, `qctx stack keys`, `qctx stack connect` e a opção "stack remota" no wizard; receitas de HTTPS na documentação. Servidor Linux | uma máquina Linux servindo a stack num IP da tailnet ou da LAN, e outra conectada por `qctx stack connect`, com a verificação passando |
-| 3. Windows, com GPU pela imagem própria | o suporte ao Windows inteiro: Dockerfile, workflow, publicação no GHCR, pin no catálogo, os perfis do Windows e a verificação numérica | o workflow publica a imagem; numa máquina Windows real, o `--list-devices` mostra a GPU pelo dzn e a verificação numérica passa |
+| 3. GPU no Windows, pela imagem própria | o que sobrou da fase 3 original depois da reversão: a dzn, o pin no catálogo e a jornada já vêm com a fase 1; nesta fase fica a aprovação da **verificação numérica** em máquina Windows real (o spike da fase 1 pode não ter GPU disponível) | numa máquina Windows real, o `--list-devices` mostra a GPU pelo dzn e a verificação numérica passa |
 
 ## Viabilidade, passo a passo
 
