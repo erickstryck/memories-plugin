@@ -4,6 +4,7 @@ The assertions are absolute on purpose: a bump is an edit of `stack/catalog.py` 
 tables in this file, so changing one constant is what goes red. The digests live in the
 tables, where a bump can be reviewed against them, and they are not secret-shaped.
 """
+import re
 import sys
 import unittest
 from dataclasses import asdict
@@ -204,6 +205,42 @@ class TestTheImageOverride(unittest.TestCase):
                                                 {"QCTX_STACK_IMAGE_LLAMA_DZN": "e"})["llama-dzn"],
                          "e")
         self.assertEqual(catalog.resolve_images({}, {})["llama-dzn"], catalog.LLAMA_DZN_IMAGE)
+
+
+class TestTheLlamaBasePinIsNotDuplicatedOutOfSync(unittest.TestCase):
+    """`catalog.LLAMA_IMAGE` is the OWNER of the llama.cpp base pin. It is
+    committed in two more places because the dzn build must be self-contained
+    on both paths: the Dockerfile's `ARG LLAMA_BASE` (the PR path builds it as
+    committed, no inputs) and the workflow's `base_digest` default (the
+    publish path). The bump procedure updates all three by hand, so this is the
+    second source of truth the audit flagged - the cross-check that turns the
+    suite red the moment any one copy diverges from the owner.
+
+    The comparison is on the DIGEST alone (the `@sha256:` part): the tag name
+    is an input to the bump, and the workflow's default legitimately carries the
+    same tag, but only the digest is the identity.
+    """
+
+    @staticmethod
+    def _digest(ref):
+        return ref.split("@", 1)[1]
+
+    def test_the_dockerfile_arg_matches_the_catalog_owner(self):
+        dockerfile = (REPO / "images" / "llama-dzn" / "Dockerfile").read_text()
+        arg = re.search(r"^ARG LLAMA_BASE=(\S+)$", dockerfile, re.M)
+        self.assertIsNotNone(arg, "the Dockerfile's ARG LLAMA_BASE line")
+        self.assertEqual(self._digest(arg.group(1)), self._digest(catalog.LLAMA_IMAGE),
+                         "bump the Dockerfile's ARG LLAMA_BASE with the catalogue "
+                         "(stack/catalog.py LLAMA_IMAGE)")
+
+    def test_the_workflow_default_matches_the_catalog_owner(self):
+        workflow = (REPO / ".github" / "workflows" / "llama-dzn.yml").read_text()
+        default = re.search(r"      base_digest:\n(?:.*\n)*?        default: '(.*?)'",
+                            workflow)
+        self.assertIsNotNone(default, "the workflow's base_digest default")
+        self.assertEqual(self._digest(default.group(1)), self._digest(catalog.LLAMA_IMAGE),
+                         "bump the workflow's base_digest default with the catalogue "
+                         "(stack/catalog.py LLAMA_IMAGE)")
 
 
 if __name__ == "__main__":
