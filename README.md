@@ -1,4 +1,4 @@
-# mnemosine
+# MNEMOSINE
 
 ![Mnemosine](docs/mnemosine.jpeg)
 
