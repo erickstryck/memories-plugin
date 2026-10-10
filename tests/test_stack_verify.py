@@ -546,6 +546,20 @@ class TestNumericalCompare(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(reason, "")
 
+    def test_unequal_vector_counts_refuse_to_align(self):
+        # The length guard: a side that embedded a DIFFERENT number of vectors
+        # than the other cannot be aligned, so the check refuses with a named
+        # reason instead of comparing misaligned lists. (If the guard were
+        # removed, the zip in the deviation check would silently truncate and
+        # a shorter cpu side could pass - this is the guard the audit found
+        # dead: no test fed unequal-length sides.)
+        gpu = _side([0.9, 0.7, 0.5])
+        cpu = _side([0.9, 0.7])  # one fewer vector
+        ok, reason = verify.numerical_compare(gpu, cpu, _ranks([0.9, 0.7, 0.5]), _ranks([0.9, 0.7]))
+        self.assertFalse(ok)
+        self.assertIn("align", reason)
+        self.assertIn("4 and 3", reason)  # gpu side (query+3) vs cpu side (query+2)
+
 
 if __name__ == "__main__":
     unittest.main()

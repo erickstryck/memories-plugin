@@ -1422,6 +1422,39 @@ class TestTheDefaultNumericalBinding(unittest.TestCase):
         self.assertEqual(result, (True, ""))
 
 
+class TestTheNumericalRankRefusesANoneReranker(unittest.TestCase):
+    """`installer._numerical_rank`'s docstring claims a missing reranker is
+    'a refusal, not a degradation' - it must raise a named StackError, not
+    silently return an empty rank that check (3) would then mis-report. This
+    is the guard the audit found dead: no test ever injected a reranker builder
+    that returns None, so removing the raise left the module green."""
+
+    def test_a_none_reranker_raises_a_named_stack_error(self):
+        from types import SimpleNamespace
+        deps = SimpleNamespace(numerical_reranker=lambda cfg: None)
+        with self.assertRaises(StackError) as ctx:
+            # cfg is unused on this path: the builder returns None and the
+            # guard raises before cfg is read, so a placeholder is enough.
+            installer._numerical_rank(deps, cfg=None,  # type: ignore[arg-type]
+                                      query="q", texts=["a", "b"])
+        self.assertEqual(ctx.exception.step, "verify")
+        self.assertIn("rerank", str(ctx.exception))
+
+    def test_a_reranker_that_answers_returns_its_order(self):
+        # The non-refusal path, for contrast: a real builder hands back the
+        # indices the reranker scored, in score order.
+        from types import SimpleNamespace
+
+        class _Ranker:
+            def rank(self, query, texts):
+                # the core/reranking.py contract: (pairs sorted by score desc, info)
+                return [(1, 0.9), (0, 0.2)], {"ok": True}
+
+        deps = SimpleNamespace(numerical_reranker=lambda cfg: _Ranker())
+        self.assertEqual(installer._numerical_rank(deps, None,  # type: ignore[arg-type]
+                                                    "q", ["a", "b"]), [1, 0])
+
+
 class TestTheDznNumericalCheck(ProvisionTestCase):
     """The dzn check (spec-mestra, 'Imagem própria e GPU no Windows' ->
     'Verificação numérica'; spec-2026-10-09, 'A prova de GPU e o menu'): the
@@ -1548,6 +1581,27 @@ class TestTheDznNumericalCheck(ProvisionTestCase):
         i_functional = next(i for i, t in enumerate(calls) if t.startswith("Qdrant:"))
         i_numerical = next(i for i, t in enumerate(calls) if "max deviation" in t)
         self.assertLess(i_functional, i_numerical)
+
+    def test_no_free_port_for_the_no_device_side_aborts_verifying(self):
+        # The _verify_numerical no-free-port guard: it stands the no-device
+        # throwaway on a free port BESIDE the stack's own (the +10000 fallback
+        # range), and if none is free it must abort the install with a named
+        # verify error, not bind a taken port and let `compose up` fail.
+        # `choose_ports` still binds the wanted ports (they are free); only the
+        # fallback range is held, which is what the guard scans. The audit
+        # found this guard dead: no test held the fallback range.
+        wanted = {6333, 8003, 8004}  # the stack's own ports, free
+        port_free = lambda p: p in wanted  # every fallback candidate is held
+        config = FakeConfigSink()
+        err = run_case(self.tmp, request=installer.Request(profile="dzn", yes=True),
+                       runtimes=[self._docker()], facts=self.DZN_FACTS,
+                       prompter=ScriptedPrompter([]), reporter=RecordingReporter(),
+                       config=config, numerical=passing_numerical,
+                       port_free=port_free)
+        self.assertIsInstance(err, StackError)
+        self.assertEqual(err.step, "verify")
+        self.assertIn("no free port beside", str(err))
+        self.assertEqual(config.saves, [], "the abort is before the config is written")
 
 
 if __name__ == "__main__":

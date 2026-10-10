@@ -110,11 +110,12 @@ Assert-Equal (Select-Distro $onlyNotInstalled '') '' 'only Not Installed distros
 Write-Host "Test-Gateway"
 $g1 = Test-Gateway $false '' $true $true $true
 Assert-Equal      $g1.Action 'abort'        'no WSL2 -> abort'
-Assert-Contains   $g1.Message 'WSL2'        'no-WSL2 message names WSL2'
+Assert-Contains   $g1.Message 'WSL2 is missing' 'no-WSL2 message is the WSL2-missing one (not the no-distro one)'
 Assert-Contains   $g1.Fix 'wsl --install'   'no-WSL2 fix is wsl --install (admin + reboot)'
 
 $g2 = Test-Gateway $true '' $true $true $true
 Assert-Equal $g2.Action 'abort' 'WSL2 present but no usable distro -> abort'
+Assert-Contains $g2.Message 'no usable distro' 'no-distro message is the no-usable-distro one (not the WSL2-missing one)'
 
 $g3 = Test-Gateway $true 'Ubuntu' $false $false $true
 Assert-Equal      $g3.Action 'abort'            'no docker AND no podman -> abort'
