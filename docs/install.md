@@ -235,8 +235,8 @@ is on PATH, the wizard says `skipping this host` for each and goes on: the
 launcher lands on PATH as a copy, the stack stands up and the configuration
 points at its local URLs, exactly as when a host is present. That is the
 whole setup for a box that exists to serve the stack, and it works the same
-way on the platforms this version runs on, **Linux and macOS** (the wizard
-is `bash` + `python3`, which is why it ships as a shell script):
+way on every platform this version runs on (Linux and macOS directly;
+Windows through WSL2):
 
 ```bash
 git clone https://github.com/erickstryck/mnemosine.git
@@ -244,13 +244,15 @@ cd mnemosine
 ./scripts/install.sh --stack auto --yes
 ```
 
-**Windows is not on that path, in this version.** The wizard detects a
-Windows host (WSL included) and refuses the stack step, pointing at the
-README's [Local models](../README.md#local-models) manual path instead
-(decision 14 of the design document: Windows arrives in phase 3, already
-with GPU, built on its own image; a Windows CPU box is what phase 1 and 2
-never deliver). So on a Windows machine the standalone setup is the manual
-one, host or not: run Qdrant and the two `llama-server` endpoints by hand
+**Windows is on that path, through WSL2.** A Windows machine enters the
+stack through the same normal journey as the other platforms:
+`install.ps1` verifies WSL2, a container runtime inside the chosen distro,
+and `python3`, then hands off to the `install.sh` above, so the six steps
+after it are identical (the dzn profile is the GPU path there, on Docker).
+The one-line refusal now covers only native Windows without WSL2, where
+containers cannot run at all. The manual [Local
+models](../README.md#local-models) path is the one for someone who does not
+want the plugin: run Qdrant and the two `llama-server` endpoints by hand
 (`docker` from Docker Desktop, or WSL2), and point the agent that uses them
 at those URLs. That manual path needs no plugin code at all, which is why
 the wizard does not try to run it.
@@ -315,24 +317,34 @@ platform:
 | linux | intel | yes | yes | Docker and Podman | a DRI render node for that vendor |
 | linux | nvidia | yes | yes | Docker and Podman | an NVIDIA driver that lists the card, plus the CDI spec |
 | linux | apple | - | - | not available here | not in phase 1 |
+| linux | dzn | - | - | not available here | the dzn runs on windows only |
 | macos | cpu | yes | yes | Docker and Podman | nothing |
 | macos | amd | - | - | not available here | not in phase 1 |
 | macos | intel | - | - | not available here | not in phase 1 |
 | macos | nvidia | - | - | not available here | not in phase 1 |
 | macos | apple | - | yes | Podman only | an Apple GPU |
+| macos | dzn | - | - | not available here | the dzn runs on windows only |
+| windows | cpu | yes | yes | Docker and Podman | a WSL2 distro (the cpu runs the official image; no GPU needed) |
+| windows | dzn | yes | - | Docker only | a WSL2 GPU the dzn driver lists (Microsoft Direct3D12) |
 
 The "still needs" column is the hardware prerequisite in plain words: the
 driver and node the container has to reach, or nothing for the cpu profile,
-which runs everywhere. The rows marked "not available here" are where the
-phase-1 matrix is the spec: the Apple profile is experimental and macOS-only,
-and the DRI and NVIDIA profiles are Linux-only. The menu still lists a profile
-the platform cannot run, marked unavailable with its reason (on Linux the Apple
-line says it runs on macOS only), so you can see why it is not offered; picking
-it repeats the reason and the menu comes back.
+which runs everywhere. The rows marked "not available here" are where this
+version's matrix is the spec: the Apple profile is experimental and macOS-only,
+the DRI and NVIDIA profiles are Linux-only, and the dzn profile is
+Windows-only (the one path a GPU reaches a container on Windows; the official
+image never does). The menu still lists a profile the platform cannot run,
+marked unavailable with its reason (on Linux the Apple line says it runs on
+macOS only, and the dzn line says it runs on Windows only), so you can see why
+it is not offered; picking it repeats the reason and the menu comes back.
 
-**Windows.** The local stack is not offered on Windows (WSL included) in phase
-1; it arrives in phase 3. Until then the step says so in one line and points at
-the manual path in [Local models, step by step](../README.md#local-models).
+**Windows.** The local stack is on Windows through WSL2, with the journey
+above: `install.ps1` verifies and hands off to `install.sh` inside the
+distro (the cpu profile runs the official image, and the dzn profile is the
+GPU path, on Docker). The one-line refusal covers only native Windows
+without WSL2; the manual path in
+[Local models, step by step](../README.md#local-models) is for a machine
+that does not run the plugin.
 
 **The environment trap.** The configuration resolves as environment variable,
 then file, then default, so a variable already exported in the shell wins over

@@ -44,15 +44,17 @@ Three pieces, in order, on every OS:
 3. **The wizard**: one command that writes the configuration and the credentials,
    runs the host's cutover, and re-checks the whole stack.
 
-The wizard is the same on every OS: it is `bash` plus `python3`, nothing OS-specific.
-On Windows you run it under WSL or git-bash.
+The wizard is the same on every OS: the same six steps, in the same order, with
+the same questions. Linux and macOS run it with `bash` plus `python3`, and on
+Windows the front door is a small PowerShell script that verifies and then runs
+that same `bash` plus `python3` journey inside a WSL2 distro: nothing
+OS-specific, and no second wizard.
 
 With Docker or Podman already installed, the wizard stands the infrastructure up
-itself on Linux and macOS (Windows, WSL included, gets the local stack in a later
-phase; there you follow the manual path below): `qctx install --stack auto` pulls the
-images, downloads the two models and brings the three containers up, then points the
-configuration at them. [The manual path](#local-models) below is the same setup done
-by hand.
+itself on every OS, including Windows through WSL2: `qctx install --stack auto`
+pulls the images, downloads the two models and brings the three containers up,
+then points the configuration at them. [The manual path](#local-models) below
+is the same setup done by hand, for a machine that does not run the plugin.
 
 **Linux**
 
@@ -99,7 +101,55 @@ Same containers as Linux (Docker Desktop or WSL2); the model downloads and the t
   wizard copies `qctx` there, so once the directory is on PATH every later step is just
   `qctx ...`.
 
-Then the host lines, and the wizard in a terminal with `bash` (WSL or git-bash).
+Then the host lines. For the wizard, Windows enters through the same journey as
+the other OSes: the front door is `./install.ps1` from the cloned copy, and the
+six steps after it are identical to the Linux and macOS ones, because the script
+hands off to the same `install.sh` they run. The first-run form avoids
+PowerShell's execution-policy refusal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ./install.ps1
+```
+
+Afterwards `./install.ps1` (or `./install.ps1 --stack auto`) works directly.
+
+`install.ps1` verifies and delegates; it decides nothing. It checks, in order:
+
+1. **WSL2 is present.** If no distro answers, it aborts and names `wsl --install`.
+   That one is yours to run: an Administrator PowerShell, and a reboot when it
+   finishes. The script does not install WSL2 for you.
+2. **A container runtime inside the chosen distro.** Docker Desktop exposes its
+   socket in the distro, and `podman` answers there too. If neither answers it
+   aborts and names the three likely causes: Docker Desktop is off, the WSL
+   integration for the distro is unchecked in Docker Desktop's settings, or podman
+   is not installed.
+3. **python3 inside the distro.** If it is missing, the script offers
+   `apt install python3` with your consent: the one dependency it may install,
+   and the only one.
+
+Then it runs `install.sh` inside the distro and does nothing more, so the journey
+from there is the same six steps on every platform, ending in the same summary:
+what was done, the three URLs, the api-key when there is one, and the reboot
+note.
+
+Day to day, `./install.ps1 -Command status` (or `up`, `down`, `remove`) runs
+`qctx stack <command>` inside the distro, without re-running the wizard.
+
+**A native Windows machine without WSL2 gets the one-line refusal.** A WSL2 with
+a runtime is a normal install, not a refusal; the refusal now covers only the
+case where containers cannot run at all.
+
+Two Windows specifics still apply to the manual steps above:
+
+- the model download: PowerShell's `Invoke-WebRequest` instead of `curl`, or plain
+  `wget` from WSL:
+  ```powershell
+  Invoke-WebRequest https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf -OutFile $env:USERPROFILE\llama-models\bge-m3-Q4_K_M.gguf
+  ```
+- `~/.local/bin` is not on PATH by default. Either add it
+  (Settings, system, environment variables) or call the wizard by its full path; the
+  wizard copies `qctx` there, so once the directory is on PATH every later step is just
+  `qctx ...`.
 
 ### The wizard
 
