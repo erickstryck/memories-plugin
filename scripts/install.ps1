@@ -240,6 +240,29 @@ if ($MyInvocation.InvocationName -ne '.') {
   $gateway = Test-Gateway -wslPresent $wslPresent -distro $distroName `
                           -dockerOk $dockerOk -podmanOk $podmanOk -python3Ok $python3Ok
 
+  # The delegation the journey ends in. The in-distro command's exit code is
+  # the script's (spec rule 5), and its output is NOT captured: a
+  # `$null = wsl ...` would swallow the whole journey (the progress bar and the
+  # final summary with the URLs), so the call streams to the console. Used by
+  # both 'install-python' (after the apt install, the journey must continue)
+  # and 'delegate'.
+  function Invoke-Delegation {
+    $stackCmd = Resolve-Command $Command
+    if ($stackCmd -ne $null) {
+      # -Command: run `qctx stack <cmd>` inside the distro via the launcher
+      # (decision 24). The wizard is NOT re-triggered.
+      wsl -d $distroName -- bash -lc ('qctx stack ' + $stackCmd[2])
+      exit $LASTEXITCODE
+    }
+    if (-not (Test-Path $installSh)) {
+      Write-Host "install.ps1: install.sh not found at $installSh - is the repo fully cloned?"
+      exit 1
+    }
+    # No -Command: hand everything to install.sh, the only decision-maker.
+    wsl -d $distroName -- bash $installSh @WizardArgs
+    exit $LASTEXITCODE
+  }
+
   switch ($gateway.Action) {
 
     'abort' {
@@ -252,7 +275,9 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     'install-python' {
       # python3 is the one dependency the entry MAY install - but only with the
-      # user's consent (decision 19 / spec rule 3).
+      # user's consent (decision 19 / spec rule 3). On success the journey
+      # CONTINUES into the delegation: a first run that only installs python3
+      # must still start the wizard (spec: one verify-then-delegate pass).
       $answer = Read-Host "python3 is missing in '$distroName'. Install it now? [y/N]"
       if ($answer -ne 'y' -and $answer -ne 'Y' -and $answer -ne 'yes') {
         Write-Host "  install.ps1: declined - installing python3 in '$distroName' is required before the wizard can run."
@@ -263,24 +288,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Host "  install.ps1: `apt install python3` in '$distroName' failed (exit $LASTEXITCODE)."
         exit $LASTEXITCODE
       }
-      Write-Host "  install.ps1: python3 installed in '$distroName'."
+      Write-Host "  install.ps1: python3 installed in '$distroName'; starting the wizard."
+      Invoke-Delegation
     }
 
     'delegate' {
-      $stackCmd = Resolve-Command $Command
-      if ($stackCmd -ne $null) {
-        # -Command: run `qctx stack <cmd>` inside the distro via the launcher
-        # (decision 24). The wizard is NOT re-triggered.
-        $null = wsl -d $distroName -- bash -lc ('qctx stack ' + $stackCmd[2])
-        exit $LASTEXITCODE
-      }
-      if (-not (Test-Path $installSh)) {
-        Write-Host "install.ps1: install.sh not found at $installSh - is the repo fully cloned?"
-        exit 1
-      }
-      # No -Command: hand everything to install.sh, the only decision-maker.
-      $null = wsl -d $distroName -- bash $installSh @WizardArgs
-      exit $LASTEXITCODE
+      Invoke-Delegation
     }
 
   }

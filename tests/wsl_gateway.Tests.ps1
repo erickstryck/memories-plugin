@@ -141,6 +141,81 @@ Assert-True ($null -eq (Resolve-Command 'install')) "Resolve-Command 'install' -
 Assert-True ($null -eq (Resolve-Command 'bogus'))   "Resolve-Command 'bogus' -> null"
 Assert-True ($null -eq (Resolve-Command ''))        "Resolve-Command '' -> null"
 
+# ---- Imperative body (host-faked) -----------------------------------------
+# The pure-function assertions above CANNOT see the body's control flow, and two
+# real regressions lived there: a `$null = wsl ...` that swallowed the whole
+# journey's stdout (the progress bar and the final summary with the URLs), and
+# the install-python branch ending without delegating. Neither is visible to
+# Test-Gateway, so this section drives the REAL script end-to-end with shimmed
+# `where.exe` / `wsl` on PATH. It self-skips when bash is unavailable (the fakes
+# are bash scripts), so a pwsh-only host is not broken by it.
+$bashForBody = Get-Command bash -ErrorAction SilentlyContinue
+$pwshBin     = Join-Path $PSHOME 'pwsh'
+if (-not $bashForBody -or -not (Test-Path $pwshBin)) {
+  Write-Host "(body test skipped: needs bash + a nested pwsh to shim where.exe/wsl)"
+} else {
+  $fakeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("qctx-body-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory $fakeDir | Out-Null
+  $env:QCTX_FAKE_DIR = $fakeDir
+  try {
+    # The fakes read their exit codes from sidecar .rc files, so one fake set
+    # serves every scenario. Written by bash (LF, working shebang).
+    $bashBlock = @'
+D="$QCTX_FAKE_DIR"
+cat > "$D/where.exe" <<'EOS'
+#!/usr/bin/env bash
+exit 0
+EOS
+cat > "$D/wsl" <<'EOS'
+#!/usr/bin/env bash
+D="$(cd "$(dirname "$0")" && pwd)"
+if [ "$1" = "-l" ]; then printf '  STATE          NAME\n  * Running      Ubuntu\n'; exit 0; fi
+shift; shift
+[ "$1" = "--" ] && shift
+case "$*" in
+  *command\ -v\ python3*) exit $(cat "$D/python3.rc") ;;
+  *command\ -v\ docker*)  exit 0 ;;
+  *apt-get*)              exit $(cat "$D/apt.rc") ;;
+  *"-lc qctx stack status"*) echo "BODY_IN_DISTRO_STATUS"; exit $(cat "$D/cmd.rc") ;;
+  *install.sh*)           echo "BODY_WIZARD_STREAMED"; exit 0 ;;
+  *)                      exit 0 ;;
+esac
+EOS
+chmod +x "$D/where.exe" "$D/wsl"
+echo 0 > "$D/python3.rc"; echo 0 > "$D/apt.rc"; echo 0 > "$D/cmd.rc"
+'@
+    & $bashForBody.Source -c $bashBlock
+    if ($LASTEXITCODE -ne 0) { throw "the fake wsl/where harness failed to set up (bash)" }
+
+    $sep  = if ($IsLinux -or $IsMacOS) { ":" } else { ";" }
+    $savedPath = $env:PATH
+    $env:PATH  = $fakeDir + $sep + $savedPath
+
+    # S2: a distro without python3, the user consents -> the body installs it
+    # and CONTINUES into the wizard (the fall-through the switch used to drop),
+    # and the wizard output streams to the console (is not captured).
+    Set-Content (Join-Path $fakeDir 'python3.rc') -Value "1"
+    $out  = "y`n" | & $pwshBin -NoProfile -File $installResolved --stack auto 2>&1
+    $code = $LASTEXITCODE
+    Assert-True     ($code -eq 0)         "body: the install-python path exits 0 (consented)"
+    Assert-Contains $out "starting the wizard"  "body: after installing python3 it starts the wizard"
+    Assert-Contains $out "BODY_WIZARD_STREAMED" "body: the wizard output streams (not captured)"
+
+    # S3: -Command status with an in-distro exit 3 -> the script exits 3 and
+    # streams the in-distro output (spec rule 5, no stdout capture).
+    Set-Content (Join-Path $fakeDir 'python3.rc') -Value "0"
+    Set-Content (Join-Path $fakeDir 'cmd.rc')     -Value "3"
+    $out2  = & $pwshBin -NoProfile -File $installResolved -Command status 2>&1
+    $code2 = $LASTEXITCODE
+    Assert-True     ($code2 -eq 3)        "body: -Command propagates the in-distro exit code"
+    Assert-Contains $out2 "BODY_IN_DISTRO_STATUS" "body: -Command output streams (not captured)"
+  } finally {
+    $env:PATH = $savedPath
+    Remove-Item Env:QCTX_FAKE_DIR -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $fakeDir -ErrorAction SilentlyContinue
+  }
+}
+
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "$($script:AssertCount) assertions passed"
