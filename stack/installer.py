@@ -968,11 +968,14 @@ def _verify_numerical(ctx: _Ctx, plan: compose.Plan) -> None:
     non-conformant, so this step does not trust a bare 'it ran': with the
     chosen profile ALREADY UP it embeds the fixed corpus (`verify.NUMERICAL_QUERY`
     plus `verify.NUMERICAL_TEXTS`, owned by `verify`) on the running dzn stack
-    AND on the SAME profile WITHOUT a device — the dzn image is the official
-    one plus the driver, so it runs CPU without `/dev/dxg` — and compares the
-    two answers: the order of the similarities, the deviation relative to the
-    gaps that decide the cuts, and the rerank order (`verify.numerical_compare`,
-    injected through `deps.numerical` so the tests drive it with fakes).
+    AND on the SAME profile WITHOUT a device, and compares the two answers. The
+    no-device side reuses the dzn image (the official one plus the driver) and
+    the same compose patch (which still mounts `/dev/dxg` and the WSL libs) —
+    what makes it a CPU answer is the server command's `-dev none`, not the
+    device being absent — and compares: the order of the similarities, the
+    deviation relative to the gaps that decide the cuts, and the rerank order
+    (`verify.numerical_compare`, injected through `deps.numerical` so the tests
+    drive it with fakes).
 
     THE MENU DOES NOT RUN THIS (spec-2026-10-09, 'A prova de GPU e o menu'):
     the menu precedes the download, and the comparison needs models running;

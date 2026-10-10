@@ -382,7 +382,7 @@ class TestCosine(unittest.TestCase):
 
 class TestNumericalTexts(unittest.TestCase):
     """The fixed corpus of the dzn check: Ruling R1 makes it its own constant
-    (the calibration's is synthetic and degenerate: one 4095-char text and 20
+    (the calibration's is synthetic and degenerate: one 6000-char text and 20
     IDENTICAL documents, a corpus in which every similarity is a tie)."""
 
     def test_the_corpus_is_fixed_distinct_and_english(self):

@@ -54,8 +54,11 @@ RUN tar -xJf mesa.tar.xz \
         #     take the empty list, never `disabled`;
         #   * the dzn pulls in the dxil compiler and the SPIRV-to-DXIL path
         #     from within src/microsoft/ (gated only on the driver being
-        #     selected), and links the system `DirectX-Headers` >= 1.618.1
-        #     via the directx-headers-dev package (required when dzn is on);
+        #     selected). It wants DirectX-Headers >= 1.618.1: meson first tries
+        #     the system package (directx-headers-dev, required:false) and, if
+        #     that is absent, falls back to the bundled subproject
+        #     subprojects/DirectX-Headers-1.0 (v1.618.1) - so the apt package
+        #     is the fast path, not a hard requirement;
         #   * with no windowing platform the wsi compiles headless
         #     (wsi_common_headless.c) — the dzn loads WSL2's dxcore library
         #     at RUNTIME, so nothing WSI needs to be built in;

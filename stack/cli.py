@@ -390,7 +390,7 @@ def _windows_line() -> None:
     runtime hits the existing `step="runtime"` abort in `installer._choose_runtime`
     (cross-platform wizard plan, Task 1)."""
     print("  ..    the local stack is not available on this platform in this version "
-          "(windows, incl. wsl); set it up by hand: see '## Local models' in the README")
+          "(windows, without wsl2); set it up by hand: see '## Local models' in the README")
 
 
 def _provision(args, stack_dir, budgets, ask, installer, facts) -> None:

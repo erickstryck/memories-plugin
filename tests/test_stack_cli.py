@@ -612,6 +612,14 @@ class TheInstallStep(unittest.TestCase):
         self.assertEqual(len(up_calls), 0, "native Windows never restarts")
         self.assertIn("Local models", out, "the line must point at the README section")
         self.assertIn("not available", out, "the line must say it is not available")
+        # The refusal is native-only (decision 20): a WSL2 host with a runtime
+        # provisions as the `windows` platform, so the line names its scope as
+        # "without wsl2" -- never the old false "incl. wsl".
+        self.assertIn("without wsl2", out.lower(),
+                      "the refusal must name its native scope (windows without wsl2)")
+        self.assertNotIn("incl. wsl", out.lower(),
+                         "the refusal must not claim WSL is refused (a WSL2 with a "
+                         "runtime provisions as the windows platform)")
 
     def test_wsl2_with_a_runtime_proceeds_to_provision(self):
         """WSL2 is no longer the one-line refusal: the gate reads the native

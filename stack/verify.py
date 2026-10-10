@@ -306,7 +306,7 @@ def env_overrides(env: Mapping[str, str], wanted: dict[str, str]) -> list[tuple[
 # this — the menu precedes the download, and the comparison needs models
 # running — the verification step of the stack that is up does. The corpus is
 # this module's own constant (Ruling R1): the calibration's is synthetic and
-# degenerate (one 4095-char text and 20 IDENTICAL documents — made to time
+# degenerate (one 6000-char text and 20 IDENTICAL documents — made to time
 # calls, where every similarity is a tie and the check degenerates).
 
 
