@@ -36,7 +36,6 @@ from stack.facts import (  # noqa: E402
     VENDORS,
     collect,
     is_native_windows,
-    is_windows_host,
     normalize_system,
     platform_of,
     port_free,
@@ -442,59 +441,6 @@ class TestPortFree(unittest.TestCase):
             holder.close()
         # and a genuinely free port (re-bound by nobody) answers yes
         self.assertTrue(port_free(free_port))
-
-
-class TestIsWindowsHost(unittest.TestCase):
-    """The cheap Windows/WSL gate `install_step` uses to say the one line and return.
-
-    It reads ONLY the two facts `platform_of`'s windows branch reads -- the system
-    name and the kernel release -- so it is cheap (no hardware probe, the plan calls
-    it "uma linha e volta") and, on the host side, cannot diverge from the
-    compatibility-matrix decision. WSL1 is the uppercase `Microsoft`, WSL2 the
-    lowercase `microsoft-standard-WSL2` (both case-insensitive), and the `/proc`
-    kernel file is the only source (`/etc/os-release` is the distro's and names no
-    WSL).
-    """
-
-    def test_native_linux_is_not_windows(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            (root / "proc" / "sys" / "kernel").mkdir(parents=True)
-            (root / "proc" / "sys" / "kernel" / "osrelease").write_text(
-                "7.0.0-34-generic\n")
-            self.assertFalse(is_windows_host(
-                Probe(root=root, system=lambda: "Linux", machine=lambda: "x86_64")))
-
-    def test_darwin_is_not_windows(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            self.assertFalse(is_windows_host(
-                Probe(root=root, system=lambda: "Darwin", machine=lambda: "arm64")))
-
-    def test_native_windows_is_windows(self):
-        self.assertTrue(is_windows_host(
-            Probe(root=Path("/"), system=lambda: "Windows", machine=lambda: "AMD64")))
-
-    def test_wsl_is_windows_even_when_the_distro_says_linux(self):
-        # the same kernel-release cases the `collect(...).wsl` test exercises
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            (root / "proc" / "sys" / "kernel").mkdir(parents=True)
-            osrelease = root / "proc" / "sys" / "kernel" / "osrelease"
-            for release, windows in (("5.15.167.4-microsoft-standard-WSL2\n", True),
-                                     ("4.4.0-19041-Microsoft\n", True),
-                                     ("7.0.0-34-generic\n", False)):
-                with self.subTest(release=release.strip()):
-                    osrelease.write_text(release)
-                    self.assertEqual(is_windows_host(
-                        Probe(root=root, system=lambda: "Linux",
-                              machine=lambda: "x86_64")), windows)
-
-    def test_a_missing_kernel_release_is_not_windows(self):
-        # WSL is in the kernel; a host with no readable osrelease is not WSL
-        with tempfile.TemporaryDirectory() as raw:
-            self.assertFalse(is_windows_host(
-                Probe(root=Path(raw), system=lambda: "Linux", machine=lambda: "x86_64")))
 
 
 class TestIsNativeWindows(unittest.TestCase):

@@ -327,17 +327,6 @@ def platform_of(facts: HostFacts, engine_kernel: str = "") -> str:
     return "linux"
 
 
-def is_windows_host(probe: Probe) -> bool:
-    """Whether the host is Windows or WSL, from the two facts `platform_of`'s windows
-    branch reads on the HOST side -- the system name and the kernel release. The
-    install step asks this BEFORE it offers anything (the plan's first branch, "uma
-    linha e volta"), so it must be cheap: it reads neither the GPUs nor the disk, and it
-    runs no `nvidia-smi`. It cannot diverge from `platform_of` on the host side, because
-    it answers the same question with the same two reads (`/etc/os-release` names no
-    WSL, so the `/proc` kernel release is the only WSL source)."""
-    return probe.system().strip().lower() == "windows" or _wsl(probe)
-
-
 def is_native_windows(probe: Probe) -> bool:
     """Native Windows (no WSL): the system name says Windows, whatever the kernel
     says. This is the gate the one-line `install_step` refusal runs on (cross-platform
@@ -346,6 +335,5 @@ def is_native_windows(probe: Probe) -> bool:
     at the README's manual path is its whole answer. WSL2 is NOT native -- its distro
     reports the system name Linux -- so it is False here and is classified instead by
     `platform_of` (and by the runtime discovery, which decides whether WSL2 has an
-    answering runtime at all). Like `is_windows_host`, it is cheap: one read, no
-    hardware probe."""
+    answering runtime at all). It is cheap: one read, no hardware probe."""
     return probe.system().strip().lower() == "windows"
