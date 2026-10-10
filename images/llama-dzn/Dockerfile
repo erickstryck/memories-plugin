@@ -74,14 +74,17 @@ RUN tar -xJf mesa.tar.xz \
             -Degl=disabled \
             -Dgles1=disabled \
             -Dgles2=disabled \
-            -Dopengl=disabled \
+            -Dopengl=false \
             -Dglx=disabled \
             -Dllvm=disabled \
         && meson compile -C build \
-    # libvulkan_dzn.so is an install symlink into the build tree; cp -L
-    # dereferences it to a real file. The ICD manifest is the dzn's only
-    # one in the build tree (dzn_devenv_icd is the dev-environment variant
-    # and is not installed by default).
+    # libvulkan_dzn.so in the build tree is the compiled driver itself:
+    # a regular file, because the dzn's shared_library sets no
+    # version/soversion, so meson emits no versioned form of it. cp -L
+    # is used anyway, so the copy still works if a future Mesa bump
+    # does make it a versioned library. The ICD manifest is the dzn's
+    # only one in the build tree (dzn_devenv_icd is the dev-environment
+    # variant and is not installed by default).
     && cp -L build/src/microsoft/vulkan/libvulkan_dzn.so /src/ \
     && find build -name 'dzn_icd*.json' -exec cp {} /src/dzn_icd.json \;
 
