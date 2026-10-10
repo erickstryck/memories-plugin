@@ -217,18 +217,16 @@ infrastructure itself. With Docker or Podman already installed, run:
 qctx install --stack auto
 ```
 
-and the wizard does the whole local setup in one pass: it detects the runtimes
-that answer, proves which GPU profile (if any) the host serves, pulls the two
-images, downloads the two models, renders the compose file, brings the three
-containers up, verifies that the endpoints answer and that the calibration is
-within budget, and then points the configuration at the stack it just built.
-`auto` picks the best profile the host serves; the other choices are `cpu`,
-`amd`, `intel`, `nvidia` and `apple`, and `--runtime docker` or `--runtime
-podman` decides when both runtimes answer. When a GPU profile proves more than
-one card, the menu lists each card on its own line, and `auto` picks the card
-with the most memory free; an explicit `--stack <profile>` reduces the menu to
-that profile's cards (its own default) and `--yes` takes that default without
-asking.
+It detects the runtime that answers, proves which GPU profile (if any) the host
+serves, pulls the two images, downloads the two models, renders the compose file,
+brings the three containers up, verifies the endpoints answer and the calibration
+is within budget, and points the configuration at the stack. `auto` picks the best
+profile the host serves; the other choices are `cpu`, `amd`, `intel`, `nvidia`,
+`apple` and `dzn`, and `--runtime docker` or `--runtime podman` decides when both
+runtimes answer. When a GPU profile proves more than one card, the menu lists each
+on its own line and `auto` picks the one with the most memory free; an explicit
+`--stack <profile>` reduces the menu to that profile's cards, and `--yes` takes
+that default without asking.
 
 **A machine that only runs the stack.** When neither `hermes` nor `claude`
 is on PATH, the wizard says `skipping this host` for each and goes on: the
@@ -337,14 +335,6 @@ image never does). The menu still lists a profile the platform cannot run,
 marked unavailable with its reason (on Linux the Apple line says it runs on
 macOS only, and the dzn line says it runs on Windows only), so you can see why
 it is not offered; picking it repeats the reason and the menu comes back.
-
-**Windows.** The local stack is on Windows through WSL2, with the journey
-above: `install.ps1` verifies and hands off to `install.sh` inside the
-distro (the cpu profile runs the official image, and the dzn profile is the
-GPU path, on Docker). The one-line refusal covers only native Windows
-without WSL2; the manual path in
-[Local models, step by step](../README.md#local-models) is for a machine
-that does not run the plugin.
 
 **The environment trap.** The configuration resolves as environment variable,
 then file, then default, so a variable already exported in the shell wins over

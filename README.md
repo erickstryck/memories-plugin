@@ -88,68 +88,36 @@ adds. Then the host and wizard lines exactly as on Linux.
 
 **Windows**
 
-Same containers as Linux (Docker Desktop or WSL2); the model downloads and the three
-`docker run` lines are identical. Two Windows specifics:
+Same manual path as Linux: the same three `docker run` lines (Docker Desktop or
+WSL2), with two Windows specifics:
 
-- the model download: PowerShell's `Invoke-WebRequest` instead of `curl`, or plain
-  `wget` from WSL:
+- download the models with `Invoke-WebRequest` instead of `curl` (or `wget` from WSL):
   ```powershell
   Invoke-WebRequest https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf -OutFile $env:USERPROFILE\llama-models\bge-m3-Q4_K_M.gguf
   ```
-- `~/.local/bin` is not on PATH by default. Either add it
-  (Settings, system, environment variables) or call the wizard by its full path; the
-  wizard copies `qctx` there, so once the directory is on PATH every later step is just
-  `qctx ...`.
+- `~/.local/bin` is not on PATH by default: add it (Settings, environment variables)
+  or call the wizard by its full path. It copies `qctx` there, so once it is on PATH
+  every later step is just `qctx ...`.
 
-Then the host lines. For the wizard, Windows enters through the same journey as
-the other OSes: the front door is `./install.ps1` from the cloned copy, and the
-six steps after it are identical to the Linux and macOS ones, because the script
-hands off to the same `install.sh` they run. The first-run form avoids
-PowerShell's execution-policy refusal:
+Then the host lines, as on Linux. The wizard enters through the same journey as the
+other OSes: the front door is `install.ps1`, which verifies and then runs that same
+`install.sh` inside a WSL2 distro. First run avoids the execution-policy refusal:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ./install.ps1
 ```
 
-Afterwards `./install.ps1` (or `./install.ps1 --stack auto`) works directly.
+`install.ps1` checks, in order, and aborts naming the fix when one fails: WSL2 is
+present (if not, run `wsl --install` yourself: an Administrator PowerShell and a
+reboot); a container runtime answers inside the chosen distro (Docker Desktop's socket
+or podman); and python3 is there (it offers `apt install python3`, the one dependency
+it may install). It then runs `install.sh` and does nothing more, so the rest of the
+journey is identical on every platform. Day to day,
+`./install.ps1 -Command status` (likewise `up`, `down`, `remove`) runs `qctx stack
+<command>` inside the distro, without re-running the wizard.
 
-`install.ps1` verifies and delegates; it decides nothing. It checks, in order:
-
-1. **WSL2 is present.** If no distro answers, it aborts and names `wsl --install`.
-   That one is yours to run: an Administrator PowerShell, and a reboot when it
-   finishes. The script does not install WSL2 for you.
-2. **A container runtime inside the chosen distro.** Docker Desktop exposes its
-   socket in the distro, and `podman` answers there too. If neither answers it
-   aborts and names the three likely causes: Docker Desktop is off, the WSL
-   integration for the distro is unchecked in Docker Desktop's settings, or podman
-   is not installed.
-3. **python3 inside the distro.** If it is missing, the script offers
-   `apt install python3` with your consent: the one dependency it may install,
-   and the only one.
-
-Then it runs `install.sh` inside the distro and does nothing more, so the journey
-from there is the same six steps on every platform, ending in the same summary:
-what was done, the three URLs, the api-key when there is one, and the reboot
-note.
-
-Day to day, `./install.ps1 -Command status` (or `up`, `down`, `remove`) runs
-`qctx stack <command>` inside the distro, without re-running the wizard.
-
-**A native Windows machine without WSL2 gets the one-line refusal.** A WSL2 with
-a runtime is a normal install, not a refusal; the refusal now covers only the
-case where containers cannot run at all.
-
-Two Windows specifics still apply to the manual steps above:
-
-- the model download: PowerShell's `Invoke-WebRequest` instead of `curl`, or plain
-  `wget` from WSL:
-  ```powershell
-  Invoke-WebRequest https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf -OutFile $env:USERPROFILE\llama-models\bge-m3-Q4_K_M.gguf
-  ```
-- `~/.local/bin` is not on PATH by default. Either add it
-  (Settings, system, environment variables) or call the wizard by its full path; the
-  wizard copies `qctx` there, so once the directory is on PATH every later step is just
-  `qctx ...`.
+A native Windows machine without WSL2 gets the one-line refusal: a WSL2 with a runtime
+is a normal install, so the refusal covers only where containers cannot run at all.
 
 ### The wizard
 
